@@ -1,0 +1,26 @@
+[project]
+name = "ask_llm"
+version = "0.1.0"
+description = "Ask LLM is a Python-based application that allows users to interact with various language models, including OpenAI and Ollama. The application provides a command-line interface for querying these models and managing conversation history."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "openai>=1.69.0",
+    "pytest>=8.3.5",
+    "rich>=13.9.4",
+    "requests>=2.25.0",
+]
+
+[project.scripts]
+ask-llm = "ask_llm.main:main"
+llm = "ask_llm.main:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
