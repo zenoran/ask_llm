@@ -1,4 +1,3 @@
-import re
 import json
 import os
 from openai import OpenAI
@@ -6,8 +5,8 @@ from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.rule import Rule
 from rich.align import Align
+from rich.live import Live
 from ask_llm.clients.base import LLMClient
-from ask_llm.utils.config import Config
 
 
 class OpenAIClient(LLMClient):
@@ -37,93 +36,94 @@ class OpenAIClient(LLMClient):
         return api_messages
 
     def _stream_response(self, api_messages):
-        """Stream the response with incremental printing, ensuring the first paragraph is boxed."""
-        response = ""
-        buffer = ""
-        in_code_block = False
-        code_fence_count = 0
-        first_paragraph = None
-
+        """Stream the response with live updating display."""
+        total_response = ""
+        accumulated_buffer = ""  # Buffer to collect chunks until we have a complete first paragraph
+        first_para_rendered = False
+        second_display_started = False
+        
+        # Add a header rule
+        self.console.print()
+        
         api_request = self.client.chat.completions.create(
             model=self.model, messages=api_messages, stream=True, store=False
         )
-
-        try:
-            for chunk in api_request:
-                content = chunk.choices[0].delta.content
-                if not content:
-                    continue
-
-                response += content
-
-                if first_paragraph is None and "\n\n" in content:
-                    self._print_assistant_message(response)
-                    partitioned = response.partition("\n\n")
-                    first_paragraph = partitioned[0]
-                    response = partitioned[2]
-                    buffer = ""
-                    continue
-
-                buffer += content
-
-                for char in content:
-                    if Config.PRESERVE_CODE_BLOCKS and char == "`":
-                        code_fence_count += 1
-                    else:
-                        if code_fence_count == 3:
-                            in_code_block = not in_code_block
-                        code_fence_count = 0
-
-                if in_code_block:
-                    continue
-
-                if "\n\n" in buffer:
-                    list_match = re.search(
-                        r"(\d+\.\s+[^\n]+(?:\n\s+[^\n]+)*(?:\n\n\d+\.\s+[^\n]+(?:\n\s+[^\n]+)*)*)",
-                        buffer,
-                    )
-
-                    if list_match:
-                        end_pos = list_match.end()
-
-                        if end_pos < len(buffer) and buffer[end_pos:].strip():
-                            after_list = buffer[end_pos:]
-                            next_line = (
-                                after_list.strip().split("\n")[0]
-                                if "\n" in after_list.strip()
-                                else after_list.strip()
-                            )
-
-                            if (
-                                re.match(r"^\d+\.", next_line)
-                                or re.match(r"^\s+-", next_line)
-                                or next_line.startswith("    ")
-                            ):
-                                continue
-
-                            print("\r" + " " * 80, end="\r", flush=True)
-                            self.console.print(Markdown(buffer[:end_pos]))
-                            buffer = buffer[end_pos:]
-                    else:
-                        parts = buffer.split("\n\n", 1)
-                        print("\r" + " " * 80, end="\r", flush=True)
-                        self.console.print(Markdown(parts[0] + "\n\n"))
-                        buffer = parts[1] if len(parts) > 1 else ""
-
-        except KeyboardInterrupt:
-            self.console.print(
-                "\n[bold yellow]Interrupted! Stopping response collection...[/bold yellow]"
-            )
-            raise
-
-        if first_paragraph is None:
-            self._print_assistant_message(response)
-            return response
-
-        if buffer.strip():
-            self.console.print(Markdown(buffer))
-
-        return first_paragraph + "\n\n" + response
+        
+        # Start by collecting the first paragraph completely separate from the rest
+        for chunk in api_request:
+            content = chunk.choices[0].delta.content
+            if not content:
+                continue
+                
+            accumulated_buffer += content
+            total_response += content
+            
+            # Check if we have a complete first paragraph
+            if not first_para_rendered and "\n\n" in accumulated_buffer:
+                # We found a paragraph boundary
+                split_at = accumulated_buffer.find("\n\n")
+                first_para = accumulated_buffer[:split_at].strip()
+                remaining = accumulated_buffer[split_at + 2:]
+                
+                # Display the first paragraph in a panel
+                assistant_panel = Panel(
+                    Markdown(first_para),
+                    title=f"[bold green]{self.model}[/bold green]",
+                    border_style="green",
+                    padding=(1, 4),
+                )
+                self.console.print(Align(assistant_panel, align="right"))
+                self.console.print()
+                
+                first_para_rendered = True
+                
+                # Now start fresh with a separate Live display for everything after the first paragraph
+                if remaining.strip():
+                    # Start with what we already have after the first paragraph
+                    second_display = Live(Markdown(remaining), auto_refresh=True, console=self.console)
+                    second_display.start()
+                    second_display_started = True
+                break
+        
+        # If we found a paragraph break, continue with remaining content in a new Live context
+        if first_para_rendered:
+            try:
+                # Create a completely new Live context for just the remaining text
+                remaining_text = ""
+                if second_display_started:
+                    remaining_text = accumulated_buffer[split_at + 2:]
+                else:
+                    # We didn't have any remaining content yet, so start a fresh Live
+                    second_display = Live("", auto_refresh=True, console=self.console)
+                    second_display.start()
+                    second_display_started = True
+                
+                # Continue processing the rest of the chunks
+                for chunk in api_request:
+                    content = chunk.choices[0].delta.content
+                    if not content:
+                        continue
+                        
+                    total_response += content
+                    remaining_text += content
+                    
+                    if remaining_text.strip():
+                        second_display.update(Markdown(remaining_text))
+                        
+                if second_display_started:
+                    second_display.stop()
+                    
+            except KeyboardInterrupt:
+                self.console.print("\n[bold yellow]Interrupted![/bold yellow]")
+                if second_display_started:
+                    second_display.stop()
+                raise
+        else:
+            # We never found a paragraph break, just display everything as a whole
+            self._print_assistant_message(total_response)
+        
+        self.console.print()
+        return total_response
 
     def get_verbose_output(self, messages, prompt):
         """Get full API response for verbose output"""

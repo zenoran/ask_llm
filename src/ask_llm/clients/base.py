@@ -22,11 +22,6 @@ class LLMClient(ABC):
         pass
 
     @abstractmethod
-    def get_verbose_output(self, messages, prompt):
-        """Get verbose output information for debugging."""
-        pass
-
-    @abstractmethod
     def format_response(self, response_text):
         """Format the response for display."""
         pass

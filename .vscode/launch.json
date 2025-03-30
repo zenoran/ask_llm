@@ -5,6 +5,14 @@
     "version": "0.2.0",
     "configurations": [
         {
+            "arg": [],
+            "name": "Debug: LUA",
+            "program": "${file}",
+            "request": "launch",
+            "stopOnEntry": true,
+            "type": "lua"
+        },
+        {
             "name": "Python Debugger: Current File",
             "type": "debugpy",
             "request": "launch",
@@ -17,7 +25,7 @@
             "request": "launch",
             "program": "${workspaceFolder}/src/ask_llm/main.py",
             "console": "integratedTerminal",
-            "args": ["whats the best season of the year?"],
+            "args": ["-dh", "-m", "exaone-deep", "--verbose", "tell me a joke"],
             "env": {
                 "PYTHONPATH": "${workspaceFolder}/src"
             }
