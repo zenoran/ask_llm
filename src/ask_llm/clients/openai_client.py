@@ -7,7 +7,7 @@ from rich.rule import Rule
 from rich.align import Align
 from rich.live import Live
 from ask_llm.clients.base import LLMClient
-
+from ask_llm.utils.config import config
 
 class OpenAIClient(LLMClient):
     """Client for OpenAI API"""
@@ -41,14 +41,15 @@ class OpenAIClient(LLMClient):
         accumulated_buffer = ""  # Buffer to collect chunks until we have a complete first paragraph
         first_para_rendered = False
         second_display_started = False
-        
-        # Add a header rule
-        self.console.print()
-        
+
+        if config.VERBOSE:
+            self.console.print("[bold blue]Verbose Output:[/bold blue]")
+            self.console.print_json(json.dumps(api_messages))
+
         api_request = self.client.chat.completions.create(
             model=self.model, messages=api_messages, stream=True, store=False
         )
-        
+
         # Start by collecting the first paragraph completely separate from the rest
         for chunk in api_request:
             content = chunk.choices[0].delta.content
@@ -122,7 +123,7 @@ class OpenAIClient(LLMClient):
             # We never found a paragraph break, just display everything as a whole
             self._print_assistant_message(total_response)
         
-        self.console.print()
+        
         return total_response
 
     def get_verbose_output(self, messages, prompt):
@@ -151,7 +152,7 @@ class OpenAIClient(LLMClient):
 
     def _print_user_message(self, content):
         self.console.print()
-        self.console.print("[bold blue]User:[/bold blue]")
+        self.console.print("[bold blue]User:[/bold blue] ", end="")
         self.console.print(Markdown(content))
 
     def _print_assistant_message(self, content):
@@ -171,11 +172,7 @@ class OpenAIClient(LLMClient):
             border_style="green",
             padding=(1, 4),
         )
-
-        self.console.print(Rule(style="#777777"))
-        self.console.print()
         self.console.print(Align(assistant_panel, align="right"))
-        self.console.print()
 
         if extra_response:
             self.console.print(Markdown(extra_response))

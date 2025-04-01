@@ -25,7 +25,7 @@
             "request": "launch",
             "program": "${workspaceFolder}/src/ask_llm/main.py",
             "console": "integratedTerminal",
-            "args": ["-dh", "-m", "exaone-deep", "--verbose", "tell me a joke"],
+            "args": ["--refresh-models", "-m", "gemma:2b", "hi"],
             "env": {
                 "PYTHONPATH": "${workspaceFolder}/src"
             }

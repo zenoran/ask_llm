@@ -40,10 +40,7 @@ def print_assistant_message(content):
         width=box_width,  # Set the dynamic width
     )
 
-    console.print(Rule(style="#777777"))
-    console.print()
     console.print(Align(assistant_panel, align="right"))
-    console.print()
 
     if extra_response:
         console.print(Markdown(extra_response))

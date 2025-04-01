@@ -19,7 +19,7 @@ class MultilineInputHandler:
             tuple: (input_text, is_multiline)
         """
         # Display prompt and get initial input
-        self.console.print(f"[bold blue]{prompt_text}[/bold blue]")
+        self.console.print(f"[bold blue]{prompt_text}[/bold blue]", end=" ")
         
         # Handle non-interactive mode
         if not sys.stdin.isatty():

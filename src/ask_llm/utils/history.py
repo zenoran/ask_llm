@@ -1,11 +1,10 @@
-# filepath: ask_llm/src/utils/history.py
-
 import os
 import json
 import time
 from ask_llm.clients.base import LLMClient
 from ask_llm.models.message import Message
 from rich.rule import Rule
+from ask_llm.utils.config import config
 
 
 HISTORY_FILE = os.path.join(
@@ -49,9 +48,14 @@ class HistoryManager:
     def get_context_messages(self):
         """Get messages to be used as context for the LLM."""
         cutoff = time.time() - HISTORY_DURATION
-        return [
+        messages =  [
             msg for msg in self.messages if msg.role == "system" or msg.timestamp >= cutoff
         ]
+        if "system" not in messages:
+            # Add a system message if none exists
+            messages.insert(0, Message(role="system", content=config.SYSTEM_MESSAGE))
+        return messages
+    
 
     def add_message(self, role, content):
         """Append a message to history."""

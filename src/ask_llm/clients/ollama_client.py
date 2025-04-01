@@ -2,14 +2,15 @@ import json
 import requests
 from rich.markdown import Markdown
 from rich.panel import Panel
-from rich.rule import Rule
 from rich.align import Align
 from rich.live import Live
 from ask_llm.clients.base import LLMClient
 from ask_llm.utils.config import config
+from typing import List
+from ask_llm.utils.ollama_utils import get_available_models as get_models
+
 
 class OllamaClient(LLMClient):
-
     def __init__(self, model):
         super().__init__(model)
 
@@ -19,28 +20,36 @@ class OllamaClient(LLMClient):
         return response
 
     def _prepare_api_messages(self, messages, prompt):
-        api_messages = [msg.to_api_format() for msg in messages]
+        api_messages = [msg.to_api_format() for msg in messages if msg.role != "system"]
+        if "system" not in api_messages:
+            api_messages.insert(0, {"role": "system", "content": config.SYSTEM_MESSAGE.replace("\n", "")})
+
         return api_messages
 
     def _stream_response(self, api_messages):
         """Stream the response with live updating display."""
         total_response = ""
-        accumulated_buffer = ""  # Buffer to collect chunks until we have a complete first paragraph
+        accumulated_buffer = (
+            ""  # Buffer to collect chunks until we have a complete first paragraph
+        )
         total_thought = ""
         thought_buffer = ""
         first_para_rendered = False
         in_thought = False
         live_display = Live(auto_refresh=True, console=self.console)
-        self.console.print()        
         if config.VERBOSE:
             self.console.print("[bold blue]Verbose Output:[/bold blue]")
             self.console.print(api_messages)
+
         api_request = requests.post(
-            f"{config.OLLAMA_URL}/api/chat", json={"model": self.model, "messages": api_messages, "stream": True}, stream=True
+            f"{config.OLLAMA_URL}/api/chat",
+            json={"model": self.model, "messages": api_messages, "stream": True},
+            stream=True,
         )
-        
+
         # Start by collecting the thought or first paragraph completely separate from the rest
         for chunk in api_request.iter_lines():
+
             if not chunk:
                 continue
             try:
@@ -70,15 +79,16 @@ class OllamaClient(LLMClient):
                 elif "</thought>" in accumulated_buffer:
                     in_thought = False
                     buffer_parts = str(accumulated_buffer).partition("</thought>")
-                    accumulated_buffer = buffer_parts[2]
+                    accumulated_buffer = total_response = buffer_parts[2]
                     total_thought += buffer_parts[0]
                     if config.VERBOSE:
-                        self.console.print(f"[#555555]{total_thought.replace("\n\n", "")}[/#555555]")
-                    thought_buffer = total_response = content = ""
+                        self.console.print(
+                            f"[#555555]{total_thought.replace('\n\n', '')}[/#555555]"
+                        )
+                    thought_buffer =  content = ""
                 elif in_thought:
                     thought_buffer += content
                     continue
-
 
             if first_para_rendered is False and "\n\n" in accumulated_buffer:
                 buffer_parts = str(accumulated_buffer).partition("\n\n")
@@ -92,11 +102,11 @@ class OllamaClient(LLMClient):
 
         if live_display.is_started:
             live_display.stop()
-                
-            
-        self.console.print()
-        return total_response
+        if not first_para_rendered:
+            self._print_assistant_message(accumulated_buffer)
 
+
+        return total_response
 
     def format_response(self, response_text):
         """Format OpenAI response for display with the first paragraph in a box"""
@@ -111,7 +121,7 @@ class OllamaClient(LLMClient):
 
     def _print_user_message(self, content):
         self.console.print()
-        self.console.print("[bold blue]User:[/bold blue]")
+        self.console.print("[bold blue]User:[/bold blue] ", end="")
         self.console.print(Markdown(content))
 
     def _print_assistant_message(self, content):
@@ -132,8 +142,6 @@ class OllamaClient(LLMClient):
             padding=(1, 4),
         )
 
-        self.console.print(Rule(style="#777777"))
-        self.console.print()
         self.console.print(Align(assistant_panel, align="right"))
         self.console.print()
 
@@ -144,3 +152,20 @@ class OllamaClient(LLMClient):
         """Print buffered lines to the console."""
         for line in buffer:
             self.console.print(line)
+
+    @staticmethod
+    def get_available_models(base_url: str = None) -> List[str]:
+        """
+        Query Ollama API for available models.
+        
+        Args:
+            base_url: The base URL of the Ollama API (default: from config)
+            
+        Returns:
+            List of available model names, or empty list if API unreachable
+        """
+        if base_url is None:
+            from ask_llm.utils.config import config
+            base_url = config.OLLAMA_URL
+            
+        return get_models(base_url)

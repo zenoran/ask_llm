@@ -1,8 +1,11 @@
+import sys
 import argparse
+from rich.rule import Rule
 from ask_llm.utils.history import HistoryManager
-from ask_llm.utils.config import Config, config
+from ask_llm.utils.config import config
 from ask_llm.clients import OpenAIClient, OllamaClient
 from ask_llm.utils.input_handler import MultilineInputHandler
+from ask_llm.utils.ollama_utils import get_available_models as get_models, find_matching_model
 
 class AskLLM:
     def __init__(self):  # Removed the model parameter
@@ -10,6 +13,7 @@ class AskLLM:
         self.client = self.initialize_client(self.model)
         self.history_manager = HistoryManager(client=self.client)
         self.load_history()
+        
 
     def initialize_client(self, model):
         if model in config.OLLAMA_MODELS:
@@ -28,6 +32,40 @@ class AskLLM:
         except KeyboardInterrupt:
             self.client.console.print("\n[bold red]Query interrupted.[/bold red]")
 
+def validate_model(model_name: str) -> str:
+    """
+    Validate model name and support partial matching.
+    Used as a custom type function for argparse.
+    
+    Args:
+        model_name: The model name to validate
+        
+    Returns:
+        The matched model name if valid
+        
+    Raises:
+        argparse.ArgumentTypeError: If the model name is invalid or ambiguous
+    """
+    # Check OpenAI models first (exact matches only)
+    if model_name in config.OPENAPI_MODELS:
+        return model_name
+    
+    # Check Ollama models with partial matching
+    matched_model = find_matching_model(model_name, config.OLLAMA_MODELS)
+    if matched_model:
+        return matched_model
+    
+    # Handle potential partial matches against OpenAI models
+    openai_match = find_matching_model(model_name, config.OPENAPI_MODELS)
+    if openai_match:
+        return openai_match
+    
+    # No matches at all
+    valid_models = config.MODEL_OPTIONS
+    raise argparse.ArgumentTypeError(
+        f"Invalid model: '{model_name}'. Available models: {', '.join(valid_models)}"
+    )
+
 def parse_arguments():
     parser = argparse.ArgumentParser(description="Query LLM models from the command line")
     parser.add_argument("question", nargs="*", help="Your question for the LLM model")
@@ -40,8 +78,8 @@ def parse_arguments():
         "-m",
         "--model",
         default=config.DEFAULT_MODEL,
-        choices=config.MODEL_OPTIONS,
-        help="Choose the model to use.",
+        type=validate_model,
+        help="Choose the model to use (supports partial matching).",
     )
     parser.add_argument(
         "-dh",
@@ -64,9 +102,16 @@ def parse_arguments():
         help="Execute a shell command and add its output to the question.",
     )
     parser.add_argument("--plain", action="store_true", help="Use plain text output (no formatting)")
+    parser.add_argument(
+        "--refresh-models", 
+        action="store_true", 
+        default=False,
+        help="Refresh available models in cache"
+    )
     return parser.parse_args()
 
 def main() -> None:
+
     args = parse_arguments()
     # Update the global config instance directly from args
     config.update_from_args(args)
@@ -81,6 +126,7 @@ def main() -> None:
         ask_llm.history_manager.print_history(args.print_history)
         if not args.question:
             return
+    ask_llm.client.console.print("")
 
     if args.question:
         question_text = " ".join(args.question)
@@ -97,6 +143,7 @@ def main() -> None:
                 
                 if prompt_text.strip().lower() in ["exit", "quit"]:
                     ask_llm.client.console.print("[bold red]Exiting interactive mode.[/bold red]")
+                    ask_llm.client.console.print()
                     break
 
                 if not prompt_text.strip():
@@ -107,13 +154,19 @@ def main() -> None:
                     prompt_text = input_handler.preview_input(prompt_text)
                 
                 # If we have text after potential preview, query the model
+                ask_llm.client.console.print()
                 if prompt_text.strip():
                     ask_llm.query(prompt_text)
+                ask_llm.client.console.print(Rule(style="#777777"))
+                ask_llm.client.console.print()
                 
-            except KeyboardInterrupt:
+            except (KeyboardInterrupt, EOFError):
                 # This will catch Ctrl+C at any point in the loop
                 ask_llm.client.console.print("\n[bold red]Exiting interactive mode.[/bold red]")
+                ask_llm.client.console.print()
                 break
+    ask_llm.client.console.print(Rule(style="#777777"))
+    ask_llm.client.console.print()
 
 if __name__ == "__main__":
     main()
