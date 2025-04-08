@@ -3,22 +3,29 @@ import argparse
 from rich.rule import Rule
 from ask_llm.utils.history import HistoryManager
 from ask_llm.utils.config import config
-from ask_llm.clients import OpenAIClient, OllamaClient
+from ask_llm.clients import OpenAIClient, OllamaClient, HuggingFaceClient
 from ask_llm.utils.input_handler import MultilineInputHandler
 from ask_llm.utils.ollama_utils import get_available_models as get_models, find_matching_model
 
 class AskLLM:
     def __init__(self):  # Removed the model parameter
-        self.model = config.DEFAULT_MODEL  # Get model from global config
-        self.client = self.initialize_client(self.model)
+        self.model_id = config.DEFAULT_MODEL  # Get model from global config
+        self.client = self.initialize_client(self.model_id)
         self.history_manager = HistoryManager(client=self.client)
         self.load_history()
         
 
-    def initialize_client(self, model):
-        if model in config.OLLAMA_MODELS:
-            return OllamaClient(model)
-        return OpenAIClient(model)
+    def initialize_client(self, model_id):
+        # Check HuggingFace models first
+        if model_id in config.HUGGINGFACE_MODELS:
+             return HuggingFaceClient(model_id)
+        elif model_id in config.OLLAMA_MODELS:
+            return OllamaClient(model_id)
+        elif model_id in config.OPENAPI_MODELS:
+            return OpenAIClient(model_id)
+        else:
+             # This case should ideally be caught by argparse validation, but good as a fallback
+             raise ValueError(f"Unknown model specified in configuration: {model_id}")
 
     def load_history(self):
         self.history_manager.load_history()
@@ -26,7 +33,20 @@ class AskLLM:
     def query(self, prompt):
         try:
             self.history_manager.add_message("user", prompt)
+            # Force a clean query each time
+            self.client.console.print("[dim]Generating response...[/dim]")
             response = self.client.query(self.history_manager.get_context_messages(), prompt)
+            
+            # Verify we didn't get a duplicate response by checking history
+            last_response = self.history_manager.get_last_assistant_message()
+            if last_response and response == last_response:
+                # Try once more with increased randomness
+                self.client.console.print("[yellow]Detected duplicate response. Regenerating with higher temperature...[/yellow]")
+                old_temp = config.TEMPERATURE
+                config.TEMPERATURE = 0.9  # Temporarily increase temperature
+                response = self.client.query(self.history_manager.get_context_messages(), prompt)
+                config.TEMPERATURE = old_temp  # Reset to previous setting
+            
             self.history_manager.add_message("assistant", response)
             return response
         except KeyboardInterrupt:
@@ -50,6 +70,10 @@ def validate_model(model_name: str) -> str:
     if model_name in config.OPENAPI_MODELS:
         return model_name
     
+    # Check HuggingFace models (exact match for now)
+    if model_name in config.HUGGINGFACE_MODELS:
+         return model_name
+    
     # Check Ollama models with partial matching
     matched_model = find_matching_model(model_name, config.OLLAMA_MODELS)
     if matched_model:
@@ -59,6 +83,11 @@ def validate_model(model_name: str) -> str:
     openai_match = find_matching_model(model_name, config.OPENAPI_MODELS)
     if openai_match:
         return openai_match
+        
+    # Try partial matching for HF models if desired (similar to Ollama)
+    hf_match = find_matching_model(model_name, config.HUGGINGFACE_MODELS)
+    if hf_match:
+         return hf_match
     
     # No matches at all
     valid_models = config.MODEL_OPTIONS
@@ -147,6 +176,7 @@ def main() -> None:
                     break
 
                 if not prompt_text.strip():
+                    ask_llm.client.console.print("[dim]Empty input received. Asking again...[/dim]")
                     continue
 
                 # Only show preview for multiline input
@@ -157,7 +187,6 @@ def main() -> None:
                 ask_llm.client.console.print()
                 if prompt_text.strip():
                     ask_llm.query(prompt_text)
-                ask_llm.client.console.print(Rule(style="#777777"))
                 ask_llm.client.console.print()
                 
             except (KeyboardInterrupt, EOFError):
@@ -165,7 +194,6 @@ def main() -> None:
                 ask_llm.client.console.print("\n[bold red]Exiting interactive mode.[/bold red]")
                 ask_llm.client.console.print()
                 break
-    ask_llm.client.console.print(Rule(style="#777777"))
     ask_llm.client.console.print()
 
 if __name__ == "__main__":

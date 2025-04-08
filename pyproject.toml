@@ -3,7 +3,6 @@ name = "ask_llm"
 version = "0.1.0"
 description = "Ask LLM is a Python-based application that allows users to interact with various language models, including OpenAI and Ollama. The application provides a command-line interface for querying these models and managing conversation history."
 readme = "README.md"
-requires-python = ">=3.12"
 dependencies = [
     "openai>=1.69.0",
     "pytest>=8.3.5",

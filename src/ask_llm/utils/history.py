@@ -8,7 +8,7 @@ from ask_llm.utils.config import config
 
 
 HISTORY_FILE = os.path.join(
-    os.getenv("USERPROFILE") or os.getenv("HOME"), ".chat-history"
+    os.getenv("USERPROFILE") or os.getenv("HOME"), config.HISTORY_FILE
 )
 HISTORY_DURATION = 60 * 10  # retain messages for 60 minutes
 
@@ -109,3 +109,15 @@ class HistoryManager:
                 self.client.console.print(f"[bold red]Error clearing history: {e}[/bold red]")
         else:
             self.client.console.print("[bold red]No history file found to clear.[/bold red]")
+            
+    def get_last_assistant_message(self):
+        """Get the last assistant message content for comparison.
+        
+        Returns:
+            str or None: The content of the last assistant message, or None if no assistant messages exist.
+        """
+        # Filter to assistant messages only and get the most recent one
+        assistant_messages = [msg for msg in self.messages if msg.role == "assistant"]
+        if assistant_messages:
+            return assistant_messages[-1].content
+        return None

@@ -18,7 +18,15 @@ class Config(BaseSettings):
     OPENAPI_MODELS: list[str] = Field(
         default=["gpt-4o", "gpt-4.5-preview", "o1", "o3-mini", "chatgpt-4o-latest"]
     )
+    HUGGINGFACE_MODELS: list[str] = Field(
+        default=[
+            "PygmalionAI/pygmalion-3-12b",
+            # Add other local HF models here in the future
+        ]
+    )
     DEFAULT_MODEL: str = Field(default="chatgpt-4o-latest")
+    MAX_TOKENS: int = Field(default=1024, description="Default maximum tokens to generate")
+    TEMPERATURE: float = Field(default=0.8, description="Default generation temperature")
     BUFFER_LINES: int = Field(default=3)  # Number of lines to collect before printing
     PRESERVE_CODE_BLOCKS: bool = Field(
         default=True
@@ -54,7 +62,7 @@ Respond using clean and properly formatted Markdown. Use the following formattin
 
     @computed_field
     def MODEL_OPTIONS(self) -> list[str]:
-        return self.OPENAPI_MODELS + self.OLLAMA_MODELS
+        return self.OPENAPI_MODELS + self.OLLAMA_MODELS + self.HUGGINGFACE_MODELS
 
     def update_from_args(self, args: Namespace) -> "Config":
         """Update config based on command line arguments"""
