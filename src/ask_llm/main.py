@@ -30,12 +30,12 @@ class AskLLM:
     def load_history(self):
         self.history_manager.load_history()
 
-    def query(self, prompt):
+    def query(self, prompt, plaintext_output: bool = False):
         try:
             self.history_manager.add_message("user", prompt)
             # Force a clean query each time
             self.client.console.print("[dim]Generating response...[/dim]")
-            response = self.client.query(self.history_manager.get_context_messages(), prompt)
+            response = self.client.query(self.history_manager.get_context_messages(), prompt, plaintext_output=plaintext_output)
             
             # Verify we didn't get a duplicate response by checking history
             last_response = self.history_manager.get_last_assistant_message()
@@ -44,7 +44,7 @@ class AskLLM:
                 self.client.console.print("[yellow]Detected duplicate response. Regenerating with higher temperature...[/yellow]")
                 old_temp = config.TEMPERATURE
                 config.TEMPERATURE = 0.9  # Temporarily increase temperature
-                response = self.client.query(self.history_manager.get_context_messages(), prompt)
+                response = self.client.query(self.history_manager.get_context_messages(), prompt, plaintext_output=plaintext_output)
                 config.TEMPERATURE = old_temp  # Reset to previous setting
             
             self.history_manager.add_message("assistant", response)
@@ -159,7 +159,7 @@ def main() -> None:
 
     if args.question:
         question_text = " ".join(args.question)
-        ask_llm.query(question_text)
+        ask_llm.query(question_text, plaintext_output=args.plain)
     else:
         ask_llm.client.console.print("[bold green]Entering interactive mode. Type 'exit' or 'quit' to leave.[/bold green]")
         ask_llm.client.console.print("[bold green]Type '>' at the beginning to enter multiline input mode.[/bold green]")
@@ -186,7 +186,7 @@ def main() -> None:
                 # If we have text after potential preview, query the model
                 ask_llm.client.console.print()
                 if prompt_text.strip():
-                    ask_llm.query(prompt_text)
+                    ask_llm.query(prompt_text, plaintext_output=args.plain)
                 ask_llm.client.console.print()
                 
             except (KeyboardInterrupt, EOFError):

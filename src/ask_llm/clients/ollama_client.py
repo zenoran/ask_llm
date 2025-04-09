@@ -8,15 +8,16 @@ from ask_llm.clients.base import LLMClient
 from ask_llm.utils.config import config
 from typing import List
 from ask_llm.utils.ollama_utils import get_available_models as get_models
+import sys
 
 
 class OllamaClient(LLMClient):
     def __init__(self, model):
         super().__init__(model)
 
-    def query(self, messages, prompt):
+    def query(self, messages, prompt, plaintext_output: bool = False):
         api_messages = self._prepare_api_messages(messages, prompt)
-        response = self._stream_response(api_messages)
+        response = self._stream_response(api_messages, plaintext_output)
         return response
 
     def _prepare_api_messages(self, messages, prompt):
@@ -26,96 +27,118 @@ class OllamaClient(LLMClient):
 
         return api_messages
 
-    def _stream_response(self, api_messages):
-        """Stream the response with live updating display."""
+    def _stream_response(self, api_messages, plaintext_output: bool = False):
+        accumulated_buffer = ""
         total_response = ""
-        accumulated_buffer = (
-            ""  # Buffer to collect chunks until we have a complete first paragraph
-        )
-        total_thought = ""
-        thought_buffer = ""
         first_para_rendered = False
+        live_display = Live("", auto_refresh=True, console=self.console, vertical_overflow="visible")
+        total_thought = ""
         in_thought = False
-        live_display = Live(auto_refresh=True, console=self.console)
+        thought_buffer = ""
+        
         if config.VERBOSE:
             self.console.print("[bold blue]Verbose Output:[/bold blue]")
-            self.console.print(api_messages)
+            self.console.print_json(json.dumps(api_messages))
 
         try:
-            api_request = requests.post(
+            response = requests.post(
                 f"{config.OLLAMA_URL}/api/chat",
                 json={"model": self.model, "messages": api_messages, "stream": True},
                 stream=True,
             )
-            
-            # Check for HTTP errors
-            api_request.raise_for_status()
-            
-            # Start by collecting the thought or first paragraph completely separate from the rest
-            for chunk in api_request.iter_lines():
-                if not chunk:
-                    continue
-                try:
-                    chunk = json.loads(chunk)
-                except json.JSONDecodeError:
-                    continue
-                    
-                # Check for error in response
-                if "error" in chunk:
-                    error_msg = chunk["error"]
-                    if "GGML_ASSERT" in error_msg:
-                        self.console.print(f"[bold red]Model Compatibility Error:[/bold red] {error_msg}")
-                        self.console.print("[yellow]This is likely due to a compatibility issue between your model and Ollama.[/yellow]")
-                        self.console.print("Try using a different quantization format for your model.")
-                        return f"ERROR: {error_msg}"
-                    else:
+            response.raise_for_status()
+
+            if plaintext_output:
+                # Plaintext streaming
+                print("", end='') # Ensure the line starts clear
+                sys.stdout.flush()
+                for line in response.iter_lines():
+                    if not line:
+                        continue
+                    try:
+                        chunk = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                        
+                    if "error" in chunk:
+                        error_msg = chunk["error"]
                         self.console.print(f"[bold red]Ollama Error:[/bold red] {error_msg}")
-                        return f"ERROR: {error_msg}"
-                        
-                if "message" in chunk and "content" in chunk["message"]:
-                    content = chunk["message"]["content"]
-                    if not content:
+                        total_response = f"ERROR: {error_msg}"
+                        break # Exit loop on error
+
+                    if "message" in chunk and "content" in chunk["message"]:
+                        content = chunk["message"]["content"]
+                        if content:
+                            total_response += content
+                            print(content, end='')
+                            sys.stdout.flush()
+                print() # Add final newline
+            else:
+                # Rich text streaming (existing logic)
+                for line in response.iter_lines():
+                    if not line:
                         continue
-
-                    accumulated_buffer += content
-                    total_response += content
-
-                    if live_display.is_started:
-                        live_display.update(Markdown(accumulated_buffer), refresh=True)
+                    try:
+                        chunk = json.loads(line)
+                    except json.JSONDecodeError:
                         continue
-
-                    if first_para_rendered is False:
-                        if "<thought>" in accumulated_buffer:
-                            in_thought = True
-                            buffer_parts = str(accumulated_buffer).partition("<thought>")
-                            thought_buffer += buffer_parts[2].replace("\n", "")
-                            accumulated_buffer = buffer_parts[2]
-                            self.console.print("[blue]Thinking...[/blue]")
-                            continue
-                        elif "</thought>" in accumulated_buffer:
-                            in_thought = False
-                            buffer_parts = str(accumulated_buffer).partition("</thought>")
-                            accumulated_buffer = total_response = buffer_parts[2]
-                            total_thought += buffer_parts[0]
-                            if config.VERBOSE:
-                                self.console.print(
-                                    f"[#555555]{total_thought.replace('\n\n', '')}[/#555555]"
-                                )
-                            thought_buffer =  content = ""
-                        elif in_thought:
-                            thought_buffer += content
-                            continue
-
-                    if first_para_rendered is False and "\n\n" in accumulated_buffer:
-                        buffer_parts = str(accumulated_buffer).partition("\n\n")
-                        if not buffer_parts[0].strip():
-                            accumulated_buffer = buffer_parts[2]
-                            continue
-                        self._print_assistant_message(buffer_parts[0])
-                        first_para_rendered = True
-                        accumulated_buffer = content = buffer_parts[2]
-                        live_display.start()
+                    
+                    # Check for error in response
+                    if "error" in chunk:
+                        error_msg = chunk["error"]
+                        if "GGML_ASSERT" in error_msg:
+                            self.console.print(f"[bold red]Model Compatibility Error:[/bold red] {error_msg}")
+                            self.console.print("[yellow]This is likely due to a compatibility issue between your model and Ollama.[/yellow]")
+                            self.console.print("Try using a different quantization format for your model.")
+                            return f"ERROR: {error_msg}"
+                        else:
+                            self.console.print(f"[bold red]Ollama Error:[/bold red] {error_msg}")
+                            return f"ERROR: {error_msg}"
                         
+                    if "message" in chunk and "content" in chunk["message"]:
+                        content = chunk["message"]["content"]
+                        if not content:
+                            continue
+
+                        accumulated_buffer += content
+                        total_response += content
+
+                        if live_display.is_started:
+                            live_display.update(Markdown(accumulated_buffer), refresh=True)
+                            continue
+
+                        if first_para_rendered is False:
+                            if "<thought>" in accumulated_buffer:
+                                in_thought = True
+                                buffer_parts = str(accumulated_buffer).partition("<thought>")
+                                thought_buffer += buffer_parts[2].replace("\n", "")
+                                accumulated_buffer = buffer_parts[2]
+                                self.console.print("[blue]Thinking...[/blue]")
+                                continue
+                            elif "</thought>" in accumulated_buffer:
+                                in_thought = False
+                                buffer_parts = str(accumulated_buffer).partition("</thought>")
+                                accumulated_buffer = total_response = buffer_parts[2]
+                                total_thought += buffer_parts[0]
+                                if config.VERBOSE:
+                                    self.console.print(
+                                        f"[#555555]{total_thought.replace('\n\n', '')}[/#555555]"
+                                    )
+                                thought_buffer =  content = ""
+                            elif in_thought:
+                                thought_buffer += content
+                                continue
+
+                        if first_para_rendered is False and "\n\n" in accumulated_buffer:
+                            buffer_parts = str(accumulated_buffer).partition("\n\n")
+                            if not buffer_parts[0].strip():
+                                accumulated_buffer = buffer_parts[2]
+                                continue
+                            self._print_assistant_message(buffer_parts[0])
+                            first_para_rendered = True
+                            accumulated_buffer = content = buffer_parts[2]
+                            live_display.start()
+                            
         except requests.exceptions.HTTPError as http_err:
             self.console.print(f"[bold red]HTTP Error:[/bold red] {http_err}")
             return f"ERROR: {http_err}"
@@ -130,10 +153,10 @@ class OllamaClient(LLMClient):
             if live_display.is_started:
                 live_display.stop()
                 
-        if not first_para_rendered:
+        if not first_para_rendered and not plaintext_output: # Only print panel if not plaintext
             self._print_assistant_message(accumulated_buffer)
 
-        return total_response
+        return total_response.strip() # Strip whitespace for both modes
 
     def format_response(self, response_text):
         """Format OpenAI response for display with the first paragraph in a box"""

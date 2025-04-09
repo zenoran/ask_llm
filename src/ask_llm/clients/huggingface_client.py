@@ -8,6 +8,7 @@ from rich.rule import Rule
 from rich.live import Live
 from ask_llm.clients.base import LLMClient
 from ask_llm.utils.config import config
+import sys
 
 # Set transformers log level to WARNING
 import logging
@@ -31,8 +32,6 @@ class HuggingFaceClient(LLMClient):
             self.console.print("[bold red]Error: CUDA is not available. Cannot load model on GPU.[/bold red]")
             raise RuntimeError("CUDA not available")
             
-        self.console.print(f"CUDA available: [green]Yes[/green], Device Count: [bold]{torch.cuda.device_count()}[/bold]")
-        
         # Set memory efficient parameters for RTX 4090
         torch.cuda.empty_cache()
         
@@ -40,8 +39,6 @@ class HuggingFaceClient(LLMClient):
         if torch.cuda.get_device_properties(0).name.find("4090") >= 0:
             # Small amount of VRAM reserved to prevent fragmentation
             torch.cuda.set_per_process_memory_fraction(0.85)  # Lower memory fraction for less stress
-            # Removed deprecated nvFuser call that generates warnings
-            self.console.print("[green]Applied RTX 4090 optimizations.[/green]")
             
         # Configure quantization for memory efficiency
         quantization_config = None
@@ -57,7 +54,6 @@ class HuggingFaceClient(LLMClient):
                 bnb_4bit_quant_type="nf4",
                 bnb_4bit_use_double_quant=True,
             )
-            self.console.print("Using 4-bit quantization (bitsandbytes).")
         except ImportError:
             self.console.print("[yellow]Warning:[/yellow] bitsandbytes not found. Model will not be quantized (requires more memory/VRAM).")
             self.console.print("Install with: pip install bitsandbytes accelerate")
@@ -85,10 +81,7 @@ class HuggingFaceClient(LLMClient):
                 **model_args
             )
             
-            # Move model to GPU
-            self.console.print(f"Model loaded, moving to cuda...")
             model.to('cuda')
-            self.console.print(f"Model on device: {model.device}")
             
             # RTX 4090-specific: Try using torch.compile with a safe mode
             if torch.cuda.get_device_properties(0).name.find("4090") >= 0 and hasattr(torch, "compile"):
@@ -96,7 +89,6 @@ class HuggingFaceClient(LLMClient):
                     # Only compile for known models that work well with compilation
                     safe_models = ["llama", "mistral", "phi", "gemma"]
                     if any(name in self.model_id.lower() for name in safe_models):
-                        self.console.print("[yellow]Attempting quiet RTX 4090 optimized compilation...[/yellow]")
                         compiled_model = torch.compile(
                             model, 
                             mode="default",  # Less aggressive mode that causes less coil whine
@@ -117,14 +109,12 @@ class HuggingFaceClient(LLMClient):
             if hasattr(model.config, "attn_implementation"):
                 self.console.print(f"Using attention implementation: {model.config.attn_implementation}")
             
-            self.console.print(f"Model [bold cyan]{self.model_id}[/bold cyan] setup complete on {self.model.device}.")
-
         except Exception as e:
             self.console.print(f"[bold red]Error loading model {self.model_id}:[/bold red] {e}")
             self.console.print("Please ensure you have enough VRAM/RAM and required libraries installed.")
             raise
 
-    def query(self, messages, prompt):
+    def query(self, messages, prompt, plaintext_output: bool = False):
         """Query the local Hugging Face model with streaming output."""
         if not self.tokenizer or not self.model:
             return "Error: Model or Tokenizer not properly initialized."
@@ -212,46 +202,68 @@ class HuggingFaceClient(LLMClient):
         thread = Thread(target=self.model.generate, kwargs=generation_kwargs)
         thread.start()
 
-        # Stream output using Rich Live display
+        # Stream output using Rich Live display OR plaintext
         generated_text = ""
-        panel = Panel(
-            "", 
-            title=f"[bold cyan]{self.model_id}[/bold cyan]", 
-            border_style="cyan",
-            padding=(1,2)
-        )
-        response_text_final = ""
-
-        try:
-            with Live(panel, refresh_per_second=15, console=self.console, vertical_overflow="visible") as live:
+        
+        if plaintext_output:
+            # --- Plaintext Streaming --- 
+            print("", end='') # Ensure the line starts clear
+            sys.stdout.flush()
+            try:
                 for new_text in streamer:
                     generated_text += new_text
-                    # Update the content of the panel within the Live context
-                    live.update(Panel(
-                        Markdown(generated_text.strip()), 
-                        title=f"[bold cyan]{self.model_id}[/bold cyan]", 
-                        border_style="cyan",
-                        padding=(1,2)
-                    ))
-            # Ensure the thread finishes
-            thread.join()
-            
-            # Final processing after stream ends
+                    print(new_text, end='')
+                    sys.stdout.flush()
+                print() # Add a newline at the end
+                thread.join() # Wait for generation thread
+            except Exception as e:
+                self.console.print(f"\n[bold red]Error during plaintext streaming generation:[/bold red] {e}")
+                import traceback
+                traceback.print_exc()
+                generated_text = f"Error during streaming: {e}"
+            except KeyboardInterrupt:
+                 self.console.print("\n[bold yellow]Streaming interrupted.[/bold yellow]")
             response_text_final = generated_text.strip()
-
-            if config.VERBOSE:
-                self.console.print("\n[bold blue]Final Generated Text:[/bold blue]")
-                self.console.print(f"[dim]{response_text_final}[/dim]")
-                self.console.print(Rule(style="#777777"))
+            # --------------------------
+        else:
+            # --- Rich Text Streaming --- 
+            panel = Panel(
+                "", 
+                title=f"[bold cyan]{self.model_id}[/bold cyan]", 
+                border_style="cyan",
+                padding=(1,2)
+            )
+            try:
+                with Live(panel, refresh_per_second=15, console=self.console, vertical_overflow="visible") as live:
+                    for new_text in streamer:
+                        generated_text += new_text
+                        # Update the content of the panel within the Live context
+                        live.update(Panel(
+                            Markdown(generated_text.strip()), 
+                            title=f"[bold cyan]{self.model_id}[/bold cyan]", 
+                            border_style="cyan",
+                            padding=(1,2)
+                        ))
+                # Ensure the thread finishes
+                thread.join()
                 
-        except Exception as e:
-            self.console.print(f"[bold red]Error during streaming generation:[/bold red] {e}")
-            import traceback
-            traceback.print_exc()
-            response_text_final = f"Error during streaming: {e}"
-        except KeyboardInterrupt:
-            self.console.print("\n[bold yellow]Streaming interrupted.[/bold yellow]")
-            response_text_final = generated_text.strip()
+                # Final processing after stream ends
+                response_text_final = generated_text.strip()
+
+                if config.VERBOSE:
+                    self.console.print("\n[bold blue]Final Generated Text:[/bold blue]")
+                    self.console.print(f"[dim]{response_text_final}[/dim]")
+                    self.console.print(Rule(style="#777777"))
+                    
+            except Exception as e:
+                self.console.print(f"[bold red]Error during Rich streaming generation:[/bold red] {e}")
+                import traceback
+                traceback.print_exc()
+                response_text_final = f"Error during streaming: {e}"
+            except KeyboardInterrupt:
+                self.console.print("\n[bold yellow]Streaming interrupted.[/bold yellow]")
+                response_text_final = generated_text.strip()
+            # --------------------------
 
         return response_text_final
 
