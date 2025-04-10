@@ -1,7 +1,7 @@
 # Ask LLM
 
 ## Overview
-Ask LLM is a Python-based command-line tool for interacting with various language models, including OpenAI, Ollama, and Hugging Face. It provides an intuitive interface for querying these models while maintaining conversation history and context.
+Ask LLM is a Python-based command-line tool for interacting with various language models, including OpenAI, Ollama, and Hugging Face. It provides an intuitive interface for querying these models while maintaining conversation history and context. This is intended to be a quick way to ask LLM questions while navigating through your shell without having to open a web browser to chat through a UI. Quick access to ask for help with something and easily copy/paste examples without having to leave your shell.
 
 ## Features
 - Support for multiple LLM providers:
@@ -23,13 +23,13 @@ Ask LLM is a Python-based command-line tool for interacting with various languag
 
 ### Installation as a Package
 ```bash
-pip install git+https://github.com/yourusername/ask_llm.git
+pip install git+https://github.com/zenoran/ask_llm.git
 ```
 
 Alternatively, install from source:
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/ask_llm.git
+git clone https://github.com/zenoran/ask_llm.git
 cd ask_llm
 
 # Install the package
@@ -50,13 +50,32 @@ For Hugging Face models, a CUDA-capable GPU is required with appropriate drivers
 
 After installation, you can use either `ask-llm` or `llm` command:
 
-```bash
-# Ask a direct question
-llm "What is the capital of France?"
+### Ask a direct question
+`> llm "Show me some code"`
 
-# Enter interactive mode
-llm
 ```
+╭────────────────────────────────────── chatgpt-4o-latest ─────────────────────────────────────────────────╮
+│                                                                                                          │
+│    Sure! Here's a simple Python example that prints "Hello, world!" and adds two numbers:                │
+│                                                                                                          │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+```
+```python
+# Print a message
+print("Hello, world!")
+
+# Add two numbers
+a = 5
+b = 3
+sum = a + b
+
+print("The sum is:", sum)
+```
+
+Want code in another language or something more advanced? Just let me know! 😄
+
+### Enter interactive mode
+`> llm`
 
 ### Interactive Mode
 In interactive mode:
@@ -123,6 +142,11 @@ Ask LLM uses environment variables with the prefix `ASK_LLM_` for configuration:
 - `ASK_LLM_DEFAULT_MODEL`: Default model to use (default: chatgpt-4o-latest)
 - `ASK_LLM_MAX_TOKENS`: Maximum tokens to generate (default: 1024)
 - `ASK_LLM_TEMPERATURE`: Temperature for generation (default: 0.8)
+
+
+## Provides LLM access to other Python Apps
+Setting up the clients was also a means to providing future projects with LLM access in a way I have control over.  i.e. The SesameAI CSM TTS project I'm working on which uses this LLM to generate iterative stories from prompts and play the audio for listening or downloading from a web interface.
+
 
 ## License
 This project is licensed under the MIT License.
