@@ -233,20 +233,30 @@ class HuggingFaceClient(LLMClient):
                 border_style="cyan",
                 padding=(1,2)
             )
+            live = Live(panel, refresh_per_second=15, console=self.console, vertical_overflow="visible")
             try:
-                with Live(panel, refresh_per_second=15, console=self.console, vertical_overflow="visible") as live:
-                    for new_text in streamer:
-                        generated_text += new_text
-                        # Update the content of the panel within the Live context
-                        live.update(Panel(
-                            Markdown(generated_text.strip()), 
-                            title=f"[bold cyan]{self.model_id}[/bold cyan]", 
-                            border_style="cyan",
-                            padding=(1,2)
-                        ))
+                live.start() # Manually start the Live display
+                for new_text in streamer:
+                    generated_text += new_text
+                    # Update the content of the panel within the Live context
+                    live.update(Panel(
+                        Markdown(generated_text.strip()), 
+                        title=f"[bold cyan]{self.model_id}[/bold cyan]", 
+                        border_style="cyan",
+                        padding=(1,2)
+                    ))
                 # Ensure the thread finishes
                 thread.join()
-                
+
+                # Final update to show the complete message
+                live.update(Panel(
+                    Markdown(generated_text.strip()), 
+                    title=f"[bold cyan]{self.model_id}[/bold cyan]", 
+                    border_style="cyan",
+                    padding=(1,2)
+                ))
+                live.stop() # Stop the live display, freezing the final panel
+
                 # Final processing after stream ends
                 response_text_final = generated_text.strip()
 
@@ -285,11 +295,13 @@ class HuggingFaceClient(LLMClient):
 
     def _print_assistant_message(self, content):
         """Prints the assistant message using rich Panel."""
-        self.console.print()
-        assistant_panel = Panel(
-            Markdown(content.strip()),
-            title=f"[bold cyan]{self.model_id}[/bold cyan]",
-            border_style="cyan",
-            padding=(1, 2),
-        )
-        self.console.print(Align(assistant_panel, align="right")) 
+        # Pass - Rendering handled by the query method with Live display
+        pass
+        # self.console.print()
+        # assistant_panel = Panel(
+        #     Markdown(content.strip()),
+        #     title=f"[bold cyan]{self.model_id}[/bold cyan]",
+        #     border_style="cyan",
+        #     padding=(1, 2),
+        # )
+        # self.console.print(assistant_panel) 

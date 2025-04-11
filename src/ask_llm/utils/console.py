@@ -6,7 +6,7 @@ from rich.panel import Panel
 from rich.rule import Rule
 from rich.align import Align
 
-console = Console()
+console = Console(force_terminal=True)
 
 def print_message(role, content):
     if role == "user":

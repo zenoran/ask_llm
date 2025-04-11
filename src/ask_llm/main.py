@@ -34,7 +34,6 @@ class AskLLM:
         try:
             self.history_manager.add_message("user", prompt)
             # Force a clean query each time
-            self.client.console.print("[dim]Generating response...[/dim]")
             response = self.client.query(self.history_manager.get_context_messages(), prompt, plaintext_output=plaintext_output)
             
             # Verify we didn't get a duplicate response by checking history

@@ -6,7 +6,7 @@ class MultilineInputHandler:
     """Handles both single-line and multiline input."""
     
     def __init__(self, console=None):
-        self.console = console or Console()
+        self.console = console or Console(force_terminal=True)
         
     def get_input(self, prompt_text="Enter your question (type '>' for multiline input):"):
         """

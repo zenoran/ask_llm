@@ -6,7 +6,7 @@ class LLMClient(ABC):
 
     def __init__(self, model):
         self.model = model
-        self.console = Console()
+        self.console = Console(force_terminal=True)
 
     @abstractmethod
     def query(self, messages, prompt):
