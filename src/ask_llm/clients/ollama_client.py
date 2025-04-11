@@ -8,145 +8,133 @@ from ask_llm.clients.base import LLMClient
 from ask_llm.utils.config import config
 from typing import List
 from ask_llm.utils.ollama_utils import get_available_models as get_models
+import sys
 
 
 class OllamaClient(LLMClient):
     def __init__(self, model):
         super().__init__(model)
 
-    def query(self, messages, prompt):
+    def query(self, messages, prompt, plaintext_output: bool = False):
         api_messages = self._prepare_api_messages(messages, prompt)
-        response = self._stream_response(api_messages)
+        response = self._stream_response(api_messages, plaintext_output)
         return response
 
     def _prepare_api_messages(self, messages, prompt):
         api_messages = [msg.to_api_format() for msg in messages if msg.role != "system"]
-        if "system" not in api_messages:
+        if not any(msg['role'] == 'system' for msg in api_messages):
             api_messages.insert(0, {"role": "system", "content": config.SYSTEM_MESSAGE.replace("\n", "")})
 
+        api_messages.append({"role": "user", "content": prompt})
+        
         return api_messages
 
-    def _stream_response(self, api_messages):
-        """Stream the response with live updating display."""
-        total_response = ""
-        accumulated_buffer = (
-            ""  # Buffer to collect chunks until we have a complete first paragraph
-        )
-        total_thought = ""
-        thought_buffer = ""
-        first_para_rendered = False
-        in_thought = False
-        live_display = Live(auto_refresh=True, console=self.console)
+    def _stream_response(self, api_messages, plaintext_output: bool = False):
         if config.VERBOSE:
             self.console.print("[bold blue]Verbose Output:[/bold blue]")
-            self.console.print(api_messages)
+            self.console.print_json(json.dumps(api_messages))
 
-        api_request = requests.post(
-            f"{config.OLLAMA_URL}/api/chat",
-            json={"model": self.model, "messages": api_messages, "stream": True},
-            stream=True,
-        )
+        try:
+            response = requests.post(
+                f"{config.OLLAMA_URL}/api/chat",
+                json={"model": self.model, "messages": api_messages, "stream": True},
+                stream=True,
+            )
+            response.raise_for_status()
+        except requests.exceptions.HTTPError as http_err:
+            self.console.print(f"[bold red]HTTP Error:[/bold red] {http_err}")
+            return f"ERROR: {http_err}"
+        except requests.exceptions.ConnectionError:
+            self.console.print("[bold red]Connection Error:[/bold red] Could not connect to Ollama server.")
+            self.console.print("Make sure Ollama is running and accessible at: " + config.OLLAMA_URL)
+            return "ERROR: Could not connect to Ollama server"
+        except Exception as e:
+            self.console.print(f"[bold red]Initial Request Error:[/bold red] {str(e)}")
+            return f"ERROR: {str(e)}"
 
-        # Start by collecting the thought or first paragraph completely separate from the rest
-        for chunk in api_request.iter_lines():
-
-            if not chunk:
-                continue
+        def _iterate_ollama_chunks(http_response):
+            total_thought = ""
+            in_thought = False
+            thought_buffer = ""
             try:
-                chunk = json.loads(chunk)
-            except json.JSONDecodeError:
-                continue
-            if "message" in chunk and "content" in chunk["message"]:
-                content = chunk["message"]["content"]
-                if not content:
-                    continue
+                for line in http_response.iter_lines():
+                    if not line:
+                        continue
+                    try:
+                        chunk = json.loads(line)
+                    except json.JSONDecodeError:
+                        self.console.print(f"[yellow]Warning: Could not decode JSON line: {line}[/yellow]")
+                        continue
 
-            accumulated_buffer += content
-            total_response += content
+                    # Check for error in response chunk
+                    if "error" in chunk:
+                        error_msg = chunk["error"]
+                        if "GGML_ASSERT" in error_msg:
+                            self.console.print(f"[bold red]Model Compatibility Error:[/bold red] {error_msg}")
+                            self.console.print("[yellow]This is likely due to a compatibility issue between your model and Ollama.[/yellow]")
+                            self.console.print("Try using a different quantization format for your model.")
+                        else:
+                            self.console.print(f"[bold red]Ollama Error:[/bold red] {error_msg}")
+                        yield f"ERROR: {error_msg}" # Yield error to be included in output
+                        return # Stop iteration on error
 
-            if live_display.is_started:
-                live_display.update(Markdown(accumulated_buffer), refresh=True)
-                continue
+                    if "message" in chunk and "content" in chunk["message"]:
+                        content = chunk["message"]["content"]
+                        if not content:
+                            continue
+                            
+                        # Handle <thought> tags if not in plaintext mode
+                        if not plaintext_output:
+                            current_content_part = content
+                            processed_content = ""
+                            while current_content_part:
+                                if not in_thought:
+                                    if "<thought>" in current_content_part:
+                                        in_thought = True
+                                        parts = current_content_part.partition("<thought>")
+                                        processed_content += parts[0] # Add text before thought
+                                        thought_buffer += parts[2].replace("\n", "")
+                                        current_content_part = "" # Processed this chunk part
+                                        if parts[0].strip(): # If there was text before thought, yield it
+                                             yield parts[0]
+                                        self.console.print("[blue i]Thinking...[/blue i]") # Indicate thought started
+                                    else:
+                                        processed_content += current_content_part
+                                        current_content_part = ""
+                                else: # in_thought is True
+                                    if "</thought>" in current_content_part:
+                                        in_thought = False
+                                        parts = current_content_part.partition("</thought>")
+                                        thought_buffer += parts[0].replace("\n", "")
+                                        current_content_part = parts[2] # Process text after thought
+                                        total_thought += thought_buffer
+                                        if config.VERBOSE:
+                                            self.console.print(f"[#555555 i]Thought: {total_thought.strip()}[/#555555 i]")
+                                        thought_buffer = ""
+                                    else:
+                                        thought_buffer += current_content_part
+                                        current_content_part = ""
+                            
+                            # Yield any processed non-thought content from this chunk
+                            if processed_content:
+                                yield processed_content
+                        else:
+                             # Plaintext mode, yield content directly
+                             yield content
 
-            if first_para_rendered is False:
-                if "<thought>" in accumulated_buffer:
-                    in_thought = True
-                    buffer_parts = str(accumulated_buffer).partition("<thought>")
-                    thought_buffer += buffer_parts[2].replace("\n", "")
-                    accumulated_buffer = buffer_parts[2]
-                    self.console.print("[blue]Thinking...[/blue]")
-                    continue
-                elif "</thought>" in accumulated_buffer:
-                    in_thought = False
-                    buffer_parts = str(accumulated_buffer).partition("</thought>")
-                    accumulated_buffer = total_response = buffer_parts[2]
-                    total_thought += buffer_parts[0]
-                    if config.VERBOSE:
-                        self.console.print(
-                            f"[#555555]{total_thought.replace('\n\n', '')}[/#555555]"
-                        )
-                    thought_buffer =  content = ""
-                elif in_thought:
-                    thought_buffer += content
-                    continue
+            except Exception as e:
+                 self.console.print(f"\n[bold red]Error during Ollama stream processing:[/bold red] {str(e)}")
+                 yield f"\nERROR: {str(e)}"
+            finally:
+                http_response.close() # Ensure the connection is closed
 
-            if first_para_rendered is False and "\n\n" in accumulated_buffer:
-                buffer_parts = str(accumulated_buffer).partition("\n\n")
-                if not buffer_parts[0].strip():
-                    accumulated_buffer = buffer_parts[2]
-                    continue
-                self._print_assistant_message(buffer_parts[0])
-                first_para_rendered = True
-                accumulated_buffer = content = buffer_parts[2]
-                live_display.start()
-
-        if live_display.is_started:
-            live_display.stop()
-        if not first_para_rendered:
-            self._print_assistant_message(accumulated_buffer)
-
-
-        return total_response
-
-    def format_response(self, response_text):
-        """Format OpenAI response for display with the first paragraph in a box"""
-        self.format_message("assistant", response_text)
-
-    def format_message(self, role, content):
-        """Format a message based on its role"""
-        if role == "user":
-            self._print_user_message(content)
-        elif role == "assistant":
-            self._print_assistant_message(content)
-
-    def _print_user_message(self, content):
-        self.console.print()
-        self.console.print("[bold blue]User:[/bold blue] ", end="")
-        self.console.print(Markdown(content))
-
-    def _print_assistant_message(self, content):
-        """Format the assistant message with a panel for the first paragraph."""
-        paragraphs = [p.strip() for p in content.split("\n\n") if p.strip()]
-
-        if paragraphs:
-            boxed_response = paragraphs[0]
-            extra_response = "\n\n".join(paragraphs[1:]) if len(paragraphs) > 1 else ""
-        else:
-            boxed_response = content.strip()
-            extra_response = ""
-
-        assistant_panel = Panel(
-            Markdown(boxed_response),
-            title=f"[bold green]{self.model}[/bold green]",
-            border_style="green",
-            padding=(1, 4),
+        # Pass the generator to the base handler
+        return self._handle_streaming_output(
+            stream_iterator=_iterate_ollama_chunks(response),
+            plaintext_output=plaintext_output,
+             # Keep Ollama default panel style (green)
+            first_para_panel=True
         )
-
-        self.console.print(Align(assistant_panel, align="right"))
-        self.console.print()
-
-        if extra_response:
-            self.console.print(Markdown(extra_response))
 
     def _print_buffer(self, buffer):
         """Print buffered lines to the console."""

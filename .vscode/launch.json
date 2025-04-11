@@ -5,6 +5,20 @@
     "version": "0.2.0",
     "configurations": [
         {
+            "name": "Python Debugger: Start Main",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/src/ask_llm/main.py",
+            "console": "integratedTerminal",
+            "args": [
+                "-m",
+                "sex"
+            ],
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}/src"
+            }
+        },
+        {
             "arg": [],
             "name": "Debug: LUA",
             "program": "${file}",
@@ -19,16 +33,5 @@
             "program": "${file}",
             "console": "integratedTerminal"
         },
-        {
-            "name": "Python Debugger: Start Main",
-            "type": "debugpy",
-            "request": "launch",
-            "program": "${workspaceFolder}/src/ask_llm/main.py",
-            "console": "integratedTerminal",
-            "args": ["--refresh-models", "-m", "gemma:2b", "hi"],
-            "env": {
-                "PYTHONPATH": "${workspaceFolder}/src"
-            }
-        }
     ]
 }
