@@ -21,7 +21,16 @@ dependencies = [
     "xformers>=0.0.29.post1",
     
     # Testing
-    "pytest>=8.3.5"
+    "pytest>=8.3.5",
+    "pytest-cov>=5.0.0",
+    "pytest-mock>=3.14.0"
+]
+
+[project.optional-dependencies]
+dev = [
+    "ruff",
+    "mypy"
+    # Add other dev tools here if needed
 ]
 
 [project.scripts]

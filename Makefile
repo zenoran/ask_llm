@@ -1,10 +1,26 @@
-.PHONY: clean clean-pyc clean-build clean-test install
+.PHONY: clean clean-pyc clean-build clean-test install develop all test lint format check coverage report
+
+# Variables
+PYTHON := python
+SRC_DIR := src
+TEST_DIR := tests
+COV_TARGET := src/ask_llm
 
 help:
-	@echo "clean - remove all build, test, and Python artifacts"
-	@echo "clean-pyc - remove Python file artifacts"
-	@echo "clean-build - remove build artifacts"
-	@echo "clean-test - remove test and coverage artifacts"
+	@echo "Available targets:"
+	@echo "  install        Install the package in editable mode."
+	@echo "  develop        Install the package with development dependencies."
+	@echo "  clean          Remove temporary files and build artifacts."
+	@echo "  clean-pyc      Remove Python file artifacts."
+	@echo "  clean-build    Remove build artifacts."
+	@echo "  clean-test     Remove test and coverage artifacts."
+	@echo "  clean-venv     Remove virtual environments."
+	@echo "  test           Run tests with coverage report."
+	@echo "  coverage       Alias for 'test'."
+	@echo "  report         Run tests and generate an HTML coverage report."
+	@echo "  lint           Run Ruff linter."
+	@echo "  format         Run Ruff formatter."
+	@echo "  check          Run all checks (lint, format --check, type check)."
 
 clean: clean-pyc clean-build clean-test
 
@@ -47,6 +63,9 @@ clean-venv:
 	rm -rf env/
 	rm -rf ENV/
 
+all: install
+
+# Combined install target
 install:
 	@echo "Setting up environment in ~/.venv/ask-llm"
 	@mkdir -p ~/.venv
@@ -67,4 +86,39 @@ install:
 		echo "ERROR: Virtual environment seems corrupted. Run 'make clean-venv' first."; \
 		exit 1; \
 	fi
-	@echo "Setup complete. Activate with: source ~/.venv/ask-llm/bin/activate" 
+	@echo "Setup complete. Activate with: source ~/.venv/ask-llm/bin/activate"
+	# Alternative short install if env already active
+	# uv pip install -e .
+
+develop:
+	uv pip install -e ".[dev]" # Assuming a [dev] extra for dev dependencies
+	# If no [dev] extra, list dev deps explicitly:
+	# uv pip install -e . pytest pytest-cov ruff mypy
+
+# Testing and Coverage
+test:
+	@echo "Running tests with coverage..."
+	pytest --cov=$(COV_TARGET) --cov-report=term-missing $(TEST_DIR)
+
+coverage: test # Alias for running tests with coverage
+
+report:
+	@echo "Generating HTML coverage report..."
+	pytest --cov=$(COV_TARGET) --cov-report=html $(TEST_DIR)
+	@echo "HTML report generated in htmlcov/ directory."
+
+# Linting and Formatting
+lint:
+	@echo "Running Ruff linter..."
+	ruff check $(SRC_DIR) $(TEST_DIR)
+
+format:
+	@echo "Running Ruff formatter..."
+	ruff format $(SRC_DIR) $(TEST_DIR)
+
+check:
+	@echo "Running Ruff check and format..."
+	ruff check $(SRC_DIR) $(TEST_DIR)
+	ruff format $(SRC_DIR) $(TEST_DIR) --check
+	@echo "Running MyPy type checker..."
+	mypy $(SRC_DIR) 

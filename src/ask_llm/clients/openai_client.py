@@ -36,125 +36,38 @@ class OpenAIClient(LLMClient):
         return api_messages
 
     def _stream_response(self, api_messages, plaintext_output: bool = False):
-        """Stream the response with live updating display."""
-        accumulated_buffer = ""
-        total_response = ""
-        first_para_rendered = False
-        second_display = None
-        second_display_started = False
-
+        """Stream the response using the base class handler."""
         if config.VERBOSE:
             self.console.print("[bold blue]Verbose Output:[/bold blue]")
             self.console.print_json(json.dumps(api_messages))
 
-        api_request = self.client.chat.completions.create(
-            model=self.model, messages=api_messages, stream=True, store=False
-        )
+        try:
+            api_request = self.client.chat.completions.create(
+                model=self.model, messages=api_messages, stream=True, store=False
+            )
+        except Exception as e:
+            self.console.print(f"[bold red]Error making OpenAI API request:[/bold red] {e}")
+            return f"ERROR: {e}"
 
-        if plaintext_output:
-            # Plaintext streaming
-            print("", end='') # Ensure the line starts clear
-            sys.stdout.flush()
+        def _iterate_openai_chunks(stream):
             try:
-                for chunk in api_request:
+                for chunk in stream:
                     content = chunk.choices[0].delta.content
                     if content:
-                        total_response += content
-                        print(content, end='')
-                        sys.stdout.flush()
-                print() # Add final newline
-            except KeyboardInterrupt:
-                self.console.print("\n[bold yellow]Interrupted![/bold yellow]")
-                print() # Ensure newline after interrupt message
-                # Don't raise, just return what we have
+                        yield content
             except Exception as e:
-                 self.console.print(f"\n[bold red]Error during plaintext streaming:[/bold red] {e}")
-                 total_response += f"\nERROR: {e}"
-            return total_response.strip()
-        else:
-            # Rich text streaming (existing logic)
-            # Start by collecting the first paragraph completely separate from the rest
-            try:
-                for chunk in api_request:
-                    content = chunk.choices[0].delta.content
-                    if not content:
-                        continue
-                        
-                    accumulated_buffer += content
-                    total_response += content
-                    
-                    # Check if we have a complete first paragraph
-                    if not first_para_rendered and "\n\n" in accumulated_buffer:
-                        # We found a paragraph boundary
-                        split_at = accumulated_buffer.find("\n\n")
-                        first_para = accumulated_buffer[:split_at].strip()
-                        remaining = accumulated_buffer[split_at + 2:]
-                        
-                        # Display the first paragraph in a panel
-                        assistant_panel = Panel(
-                            Markdown(first_para),
-                            title=f"[bold green]{self.model}[/bold green]",
-                            border_style="green",
-                            padding=(1, 4),
-                        )
-                        self.console.print(Align(assistant_panel, align="right"))
-                        self.console.print()
-                        
-                        first_para_rendered = True
-                        
-                        # Now start fresh with a separate Live display for everything after the first paragraph
-                        if remaining.strip():
-                            # Start with what we already have after the first paragraph
-                            second_display = Live(Markdown(remaining), auto_refresh=True, console=self.console)
-                            second_display.start()
-                            second_display_started = True
-                        break
-                
-                # If we found a paragraph break, continue with remaining content in a new Live context
-                if first_para_rendered:
-                    try:
-                        # Create a completely new Live context for just the remaining text
-                        remaining_text = ""
-                        if second_display_started:
-                            remaining_text = accumulated_buffer[split_at + 2:]
-                        else:
-                            # We didn't have any remaining content yet, so start a fresh Live
-                            second_display = Live("", auto_refresh=True, console=self.console)
-                            second_display.start()
-                            second_display_started = True
-                        
-                        # Continue processing the rest of the chunks
-                        for chunk in api_request:
-                            content = chunk.choices[0].delta.content
-                            if not content:
-                                continue
-                                
-                            total_response += content
-                            remaining_text += content
-                            
-                            if remaining_text.strip():
-                                second_display.update(Markdown(remaining_text))
-                                
-                        if second_display_started:
-                            second_display.stop()
-                            
-                    except KeyboardInterrupt:
-                        self.console.print("\n[bold yellow]Interrupted![/bold yellow]")
-                        if second_display_started:
-                            second_display.stop()
-                        raise
-                else:
-                    # We never found a paragraph break, just display everything as a whole
-                    if not first_para_rendered: # Check if anything was printed at all
-                        self._print_assistant_message(total_response)
-            
-            except KeyboardInterrupt:
-                self.console.print("\n[bold yellow]Interrupted![/bold yellow]")
-                if second_display_started:
-                    second_display.stop()
-                raise
-        
-        return total_response.strip() # Strip for both modes
+                 # This might catch API errors or connection issues during streaming
+                 self.console.print(f"\n[bold red]Error during OpenAI stream processing:[/bold red] {e}")
+                 yield f"\nERROR: {e}"
+                 # We might want to raise an exception here depending on desired handling
+
+        # Pass the iterator to the base handler
+        return self._handle_streaming_output(
+            stream_iterator=_iterate_openai_chunks(api_request),
+            plaintext_output=plaintext_output,
+            # Keep OpenAI default panel style (green)
+            first_para_panel=True
+        )
 
     def get_verbose_output(self, messages, prompt):
         """Get full API response for verbose output"""
@@ -168,44 +81,6 @@ class OpenAIClient(LLMClient):
             model=self.model, messages=api_messages, store=False
         )
         return json.dumps(result, indent=2)
-
-    def format_response(self, response_text):
-        """Format OpenAI response for display with the first paragraph in a box"""
-        self.format_message("assistant", response_text)
-
-    def format_message(self, role, content):
-        """Format a message based on its role"""
-        if role == "user":
-            self._print_user_message(content)
-        elif role == "assistant":
-            self._print_assistant_message(content)
-
-    def _print_user_message(self, content):
-        self.console.print()
-        self.console.print("[bold blue]User:[/bold blue] ", end="")
-        self.console.print(Markdown(content))
-
-    def _print_assistant_message(self, content):
-        """Format the assistant message with a panel for the first paragraph."""
-        paragraphs = [p.strip() for p in content.split("\n\n") if p.strip()]
-
-        if paragraphs:
-            boxed_response = paragraphs[0]
-            extra_response = "\n\n".join(paragraphs[1:]) if len(paragraphs) > 1 else ""
-        else:
-            boxed_response = content.strip()
-            extra_response = ""
-
-        assistant_panel = Panel(
-            Markdown(boxed_response),
-            title=f"[bold green]{self.model}[/bold green]",
-            border_style="green",
-            padding=(1, 4),
-        )
-        self.console.print(Align(assistant_panel, align="right"))
-
-        if extra_response:
-            self.console.print(Markdown(extra_response))
 
     def _print_buffer(self, buffer):
         """Print buffered lines to the console."""

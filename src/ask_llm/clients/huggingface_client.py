@@ -1,18 +1,28 @@
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer, TextIteratorStreamer, BitsAndBytesConfig
+from transformers import (
+    AutoModelForCausalLM,
+    AutoTokenizer,
+    TextIteratorStreamer,
+    BitsAndBytesConfig,
+)
 from threading import Thread
 from rich.markdown import Markdown
 from rich.panel import Panel
-from rich.align import Align
 from rich.rule import Rule
-from rich.live import Live
 from ask_llm.clients.base import LLMClient
 from ask_llm.utils.config import config
-import sys
+
+# Attempt to import bitsandbytes - will be checked later
+try:
+    import bitsandbytes
+except ImportError:
+    bitsandbytes = None  # Set to None if not found
 
 # Set transformers log level to WARNING
 import logging
+
 logging.getLogger("transformers").setLevel(logging.WARNING)
+
 
 class HuggingFaceClient(LLMClient):
     """Client for running Hugging Face transformer models locally."""
@@ -25,93 +35,126 @@ class HuggingFaceClient(LLMClient):
         self._load_model()
 
     def _load_model(self):
-        self.console.print(f"Loading model: [bold cyan]{self.model_id}[/bold cyan]... This may take a while.")
-        
+        self.console.print(
+            f"Loading model: [bold cyan]{self.model_id}[/bold cyan]... This may take a while."
+        )
+
         # Check CUDA availability
         if not torch.cuda.is_available():
-            self.console.print("[bold red]Error: CUDA is not available. Cannot load model on GPU.[/bold red]")
+            self.console.print(
+                "[bold red]Error: CUDA is not available. Cannot load model on GPU.[/bold red]"
+            )
             raise RuntimeError("CUDA not available")
-            
+
         # Set memory efficient parameters for RTX 4090
         torch.cuda.empty_cache()
-        
+
         # Quieter RTX 4090 optimizations
         if torch.cuda.get_device_properties(0).name.find("4090") >= 0:
             # Small amount of VRAM reserved to prevent fragmentation
-            torch.cuda.set_per_process_memory_fraction(0.85)  # Lower memory fraction for less stress
-            
-        # Configure quantization for memory efficiency
+            torch.cuda.set_per_process_memory_fraction(
+                0.85
+            )  # Lower memory fraction for less stress
+
+        # Configure quantization, raising error if bitsandbytes is missing
         quantization_config = None
-        try:
-            import bitsandbytes
-            # RTX 4090 has tensor cores that work well with bfloat16/float16
-            compute_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+        compute_dtype = (
+            torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+        )
+
+        # Check if bitsandbytes was imported successfully
+        if bitsandbytes is None:
+            self.console.print(
+                "[bold red]Error:[/bold red] bitsandbytes not found, which is required for quantization."
+            )
+            self.console.print("Install with: pip install bitsandbytes accelerate")
+            raise RuntimeError("bitsandbytes library not found")
+        else:
             self.console.print(f"Using compute dtype: {compute_dtype}")
-            
+            # bitsandbytes is available, configure quantization
             quantization_config = BitsAndBytesConfig(
                 load_in_4bit=True,
                 bnb_4bit_compute_dtype=compute_dtype,
                 bnb_4bit_quant_type="nf4",
                 bnb_4bit_use_double_quant=True,
             )
-        except ImportError:
-            self.console.print("[yellow]Warning:[/yellow] bitsandbytes not found. Model will not be quantized (requires more memory/VRAM).")
-            self.console.print("Install with: pip install bitsandbytes accelerate")
 
         try:
             self.tokenizer = AutoTokenizer.from_pretrained(self.model_id)
-            
+
             # Ensure pad token is set if missing
             if self.tokenizer.pad_token is None:
                 self.tokenizer.pad_token = self.tokenizer.eos_token
-                self.console.print("Tokenizer `pad_token` was missing, set to `eos_token`.")
+                self.console.print(
+                    "Tokenizer `pad_token` was missing, set to `eos_token`."
+                )
 
             # Optimize model loading for RTX 4090
             model_args = {
-                "torch_dtype": compute_dtype if 'compute_dtype' in locals() else torch.float16,
+                "torch_dtype": compute_dtype,
             }
-            
+
+            # Add quantization_config if it was successfully created
             if quantization_config:
                 model_args["quantization_config"] = quantization_config
+            else:
+                # This case should not be reached due to the check above, but good practice
+                self.console.print(
+                    "[yellow]Warning:[/yellow] Quantization config not set, loading model without quantization."
+                )
 
             # Load model with optimized parameters
             model = AutoModelForCausalLM.from_pretrained(
                 self.model_id,
                 attn_implementation="sdpa",  # Scaled Dot Product Attention for faster generation
-                **model_args
+                **model_args,
             )
-            
-            model.to('cuda')
-            
+
+            model.to("cuda")
+
             # RTX 4090-specific: Try using torch.compile with a safe mode
-            if torch.cuda.get_device_properties(0).name.find("4090") >= 0 and hasattr(torch, "compile"):
+            if torch.cuda.get_device_properties(0).name.find("4090") >= 0 and hasattr(
+                torch, "compile"
+            ):
                 try:
                     # Only compile for known models that work well with compilation
                     safe_models = ["llama", "mistral", "phi", "gemma"]
                     if any(name in self.model_id.lower() for name in safe_models):
                         compiled_model = torch.compile(
-                            model, 
+                            model,
                             mode="default",  # Less aggressive mode that causes less coil whine
                             fullgraph=False,  # Partial compilation is safer
                         )
                         # Test the compiled model with a small input to verify it works
-                        test_input = self.tokenizer("Test compilation", return_tensors="pt").to(model.device)
+                        test_input = self.tokenizer(
+                            "Test compilation", return_tensors="pt"
+                        ).to(model.device)
                         _ = compiled_model.generate(**test_input, max_new_tokens=1)
                         model = compiled_model
-                        self.console.print("[green]Model compilation successful![/green]")
+                        self.console.print(
+                            "[green]Model compilation successful![/green]"
+                        )
                 except Exception as e:
-                    self.console.print(f"[yellow]Compilation skipped: {str(e)}[/yellow]")
-            
+                    self.console.print(
+                        f"[yellow]Compilation skipped: {str(e)}[/yellow]"
+                    )
+
             # Store the model
             self.model = model
-            
+
             # Try enabling efficient attention if available for RTX 4090
             if hasattr(model.config, "attn_implementation"):
-                self.console.print(f"Using attention implementation: {model.config.attn_implementation}")
-            
+                self.console.print(
+                    f"Using attention implementation: {model.config.attn_implementation}"
+                )
+
         except Exception as e:
-            self.console.print(f"[bold red]Error loading model {self.model_id}:[/bold red] {e}")
-            self.console.print("Please ensure you have enough VRAM/RAM and required libraries installed.")
+            self.console.print(
+                f"[bold red]Error loading model {self.model_id}:[/bold red] {e}"
+            )
+            self.console.print(
+                "Please ensure you have enough VRAM/RAM and required libraries installed."
+            )
             raise
 
     def query(self, messages, prompt, plaintext_output: bool = False):
@@ -124,50 +167,56 @@ class HuggingFaceClient(LLMClient):
             # Clear any existing state/cache that might cause repeated outputs
             if hasattr(self.model, "clear_cache"):
                 self.model.clear_cache()
-                
+
             # Create a fresh chat history for each query
             chat_history = [msg.to_api_format() for msg in messages]
             chat_history.append({"role": "user", "content": prompt})
-            
-            if hasattr(self.tokenizer, 'apply_chat_template'):
+
+            if hasattr(self.tokenizer, "apply_chat_template"):
                 # Ensure we're not reusing a cached version
                 formatted_prompt = self.tokenizer.apply_chat_template(
-                    chat_history, 
-                    tokenize=False, 
-                    add_generation_prompt=True
+                    chat_history, tokenize=False, add_generation_prompt=True
                 )
-                if config.VERBOSE: 
+                if config.VERBOSE:
                     self.console.print("[dim]Using tokenizer chat template.[/dim]")
             else:
-                if config.VERBOSE: 
-                    self.console.print("[dim]Tokenizer has no chat template, using basic formatting.[/dim]")
+                if config.VERBOSE:
+                    self.console.print(
+                        "[dim]Tokenizer has no chat template, using basic formatting.[/dim]"
+                    )
                 formatted_prompt = config.SYSTEM_MESSAGE + "\n\n"
                 for msg in chat_history:
-                    formatted_prompt += f"{msg['role'].capitalize()}: {msg['content']}\n\n"
+                    formatted_prompt += (
+                        f"{msg['role'].capitalize()}: {msg['content']}\n\n"
+                    )
         except Exception as e:
             self.console.print(f"[bold red]Error formatting prompt:[/bold red] {e}")
             return "Error: Could not format prompt for the model."
-            
+
         if config.VERBOSE:
             self.console.print("\n[bold blue]Formatted Prompt:[/bold blue]")
             self.console.print(f"[dim]{formatted_prompt}[/dim]")
             self.console.print(Rule(style="#777777"))
 
         # Tokenize the input prompt
-        inputs = self.tokenizer(formatted_prompt, return_tensors="pt").to(self.model.device)
-        
+        inputs = self.tokenizer(formatted_prompt, return_tensors="pt").to(
+            self.model.device
+        )
+
         # Removed dummy tensor allocation which can cause coil whine
-        
+
         # Create streamer and setup generation
-        streamer = TextIteratorStreamer(self.tokenizer, skip_prompt=True, skip_special_tokens=True)
-        
+        streamer = TextIteratorStreamer(
+            self.tokenizer, skip_prompt=True, skip_special_tokens=True
+        )
+
         # Handle stop tokens safely
         try:
             stop_token = "<|im_end|>"
             stop_token_id = self.tokenizer.convert_tokens_to_ids(stop_token)
             if stop_token_id == self.tokenizer.unk_token_id:
                 stop_token_id = None
-        except:
+        except Exception:
             stop_token_id = None
 
         # Optimize generation parameters for speed on RTX 4090
@@ -183,17 +232,22 @@ class HuggingFaceClient(LLMClient):
             "use_cache": True,  # Enable KV caching for faster generation
             "repetition_penalty": 1.05,  # Reduced penalty to prevent power spikes
         }
-        
+
         # Ensure we're not getting stuck in repetition loops
         if "do_sample" in generation_kwargs and generation_kwargs["do_sample"]:
             # Ensure temperature is high enough to avoid deterministic outputs
             min_temp = 0.5
-            if "temperature" in generation_kwargs and generation_kwargs["temperature"] < min_temp:
+            if (
+                "temperature" in generation_kwargs
+                and generation_kwargs["temperature"] < min_temp
+            ):
                 generation_kwargs["temperature"] = min_temp
-                self.console.print(f"[yellow]Set minimum temperature to {min_temp} to avoid repetition.[/yellow]")
+                self.console.print(
+                    f"[yellow]Set minimum temperature to {min_temp} to avoid repetition.[/yellow]"
+                )
 
         # Removed beam search which can cause significant coil whine
-        
+
         # Add stop token if available
         if stop_token_id is not None:
             generation_kwargs["eos_token_id"] = stop_token_id
@@ -202,84 +256,23 @@ class HuggingFaceClient(LLMClient):
         thread = Thread(target=self.model.generate, kwargs=generation_kwargs)
         thread.start()
 
-        # Stream output using Rich Live display OR plaintext
-        generated_text = ""
-        
-        if plaintext_output:
-            # --- Plaintext Streaming --- 
-            print("", end='') # Ensure the line starts clear
-            sys.stdout.flush()
-            try:
-                for new_text in streamer:
-                    generated_text += new_text
-                    print(new_text, end='')
-                    sys.stdout.flush()
-                print() # Add a newline at the end
-                thread.join() # Wait for generation thread
-            except Exception as e:
-                self.console.print(f"\n[bold red]Error during plaintext streaming generation:[/bold red] {e}")
-                import traceback
-                traceback.print_exc()
-                generated_text = f"Error during streaming: {e}"
-            except KeyboardInterrupt:
-                 self.console.print("\n[bold yellow]Streaming interrupted.[/bold yellow]")
-            response_text_final = generated_text.strip()
-            # --------------------------
-        else:
-            # --- Rich Text Streaming --- 
-            panel = Panel(
-                "", 
-                title=f"[bold cyan]{self.model_id}[/bold cyan]", 
-                border_style="cyan",
-                padding=(1,2)
+        # Stream output using the base class handler
+        response_text_final = ""
+        try:
+            response_text_final = self._handle_streaming_output(
+                stream_iterator=streamer,
+                plaintext_output=plaintext_output,
+                panel_title=f"[bold cyan]{self.model_id}[/bold cyan]",
+                panel_border_style="cyan",
+                first_para_panel=False,  # HF client uses a single panel for the whole response
             )
-            live = Live(panel, refresh_per_second=15, console=self.console, vertical_overflow="visible")
-            try:
-                live.start() # Manually start the Live display
-                for new_text in streamer:
-                    generated_text += new_text
-                    # Update the content of the panel within the Live context
-                    live.update(Panel(
-                        Markdown(generated_text.strip()), 
-                        title=f"[bold cyan]{self.model_id}[/bold cyan]", 
-                        border_style="cyan",
-                        padding=(1,2)
-                    ))
-                # Ensure the thread finishes
-                thread.join()
-
-                # Final update to show the complete message
-                live.update(Panel(
-                    Markdown(generated_text.strip()), 
-                    title=f"[bold cyan]{self.model_id}[/bold cyan]", 
-                    border_style="cyan",
-                    padding=(1,2)
-                ))
-                live.stop() # Stop the live display, freezing the final panel
-
-                # Final processing after stream ends
-                response_text_final = generated_text.strip()
-
-                if config.VERBOSE:
-                    self.console.print("\n[bold blue]Final Generated Text:[/bold blue]")
-                    self.console.print(f"[dim]{response_text_final}[/dim]")
-                    self.console.print(Rule(style="#777777"))
-                    
-            except Exception as e:
-                self.console.print(f"[bold red]Error during Rich streaming generation:[/bold red] {e}")
-                import traceback
-                traceback.print_exc()
-                response_text_final = f"Error during streaming: {e}"
-            except KeyboardInterrupt:
-                self.console.print("\n[bold yellow]Streaming interrupted.[/bold yellow]")
-                response_text_final = generated_text.strip()
-            # --------------------------
+        finally:
+            # Ensure the generation thread finishes
+            thread.join()
+            # Clean up resources if needed
+            torch.cuda.empty_cache()
 
         return response_text_final
-
-    def format_response(self, response_text):
-        """Format the model's response for display using Rich."""
-        self._print_assistant_message(response_text)
 
     def format_message(self, role, content):
         """Format a user or assistant message for display."""
@@ -294,14 +287,13 @@ class HuggingFaceClient(LLMClient):
         self.console.print(Markdown(f"**User:** {content}"))
 
     def _print_assistant_message(self, content):
-        """Prints the assistant message using rich Panel."""
-        # Pass - Rendering handled by the query method with Live display
-        pass
-        # self.console.print()
-        # assistant_panel = Panel(
-        #     Markdown(content.strip()),
-        #     title=f"[bold cyan]{self.model_id}[/bold cyan]",
-        #     border_style="cyan",
-        #     padding=(1, 2),
-        # )
-        # self.console.print(assistant_panel) 
+        """Custom implementation for HF assistant message (cyan panel)."""
+        # Basic panel, as streaming handles most formatting
+        assistant_panel = Panel(
+            Markdown(content.strip()),
+            title=f"[bold cyan]{self.model_id}[/bold cyan]",
+            border_style="cyan",
+            padding=(1, 2),
+        )
+        self.console.print(assistant_panel)
+        self.console.print()

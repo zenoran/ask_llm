@@ -1,31 +1,42 @@
-import sys
 import argparse
-from rich.rule import Rule
+import subprocess
 from ask_llm.utils.history import HistoryManager
-from ask_llm.utils.config import config
+from ask_llm.utils.config import Config, config as global_config
 from ask_llm.clients import OpenAIClient, OllamaClient, HuggingFaceClient
 from ask_llm.utils.input_handler import MultilineInputHandler
-from ask_llm.utils.ollama_utils import get_available_models as get_models, find_matching_model
+from ask_llm.utils.ollama_utils import find_matching_model
+
 
 class AskLLM:
-    def __init__(self):  # Removed the model parameter
-        self.model_id = config.DEFAULT_MODEL  # Get model from global config
-        self.client = self.initialize_client(self.model_id)
+    def __init__(self):
+        self.model_id = global_config.DEFAULT_MODEL
+        self.client = self.initialize_client()
         self.history_manager = HistoryManager(client=self.client)
         self.load_history()
-        
 
-    def initialize_client(self, model_id):
-        # Check HuggingFace models first
-        if model_id in config.HUGGINGFACE_MODELS:
-             return HuggingFaceClient(model_id)
-        elif model_id in config.OLLAMA_MODELS:
-            return OllamaClient(model_id)
-        elif model_id in config.OPENAPI_MODELS:
-            return OpenAIClient(model_id)
+    def initialize_client(self):
+        model_id = self.model_id
+
+        client_map = {
+            "huggingface": HuggingFaceClient,
+            "ollama": OllamaClient,
+            "openai": OpenAIClient,
+        }
+
+        if model_id in global_config.HUGGINGFACE_MODELS:
+            model_type = "huggingface"
+        elif model_id in global_config.OLLAMA_MODELS:
+            model_type = "ollama"
+        elif model_id in global_config.OPENAPI_MODELS:
+            model_type = "openai"
         else:
-             # This case should ideally be caught by argparse validation, but good as a fallback
-             raise ValueError(f"Unknown model specified in configuration: {model_id}")
+            raise ValueError(f"Unknown model specified in configuration: {model_id}")
+
+        client_class = client_map.get(model_type)
+        if client_class:
+            return client_class(model_id)
+        else:
+            raise ValueError(f"Could not find a client for model: {model_id}")
 
     def load_history(self):
         self.history_manager.load_history()
@@ -33,69 +44,59 @@ class AskLLM:
     def query(self, prompt, plaintext_output: bool = False):
         try:
             self.history_manager.add_message("user", prompt)
-            # Force a clean query each time
-            response = self.client.query(self.history_manager.get_context_messages(), prompt, plaintext_output=plaintext_output)
-            
-            # Verify we didn't get a duplicate response by checking history
+            context_messages = (
+                self.history_manager.get_context_messages_excluding_last()
+            )
+            response = self.client.query(
+                context_messages, prompt, plaintext_output=plaintext_output
+            )
+
             last_response = self.history_manager.get_last_assistant_message()
             if last_response and response == last_response:
-                # Try once more with increased randomness
-                self.client.console.print("[yellow]Detected duplicate response. Regenerating with higher temperature...[/yellow]")
-                old_temp = config.TEMPERATURE
-                config.TEMPERATURE = 0.9  # Temporarily increase temperature
-                response = self.client.query(self.history_manager.get_context_messages(), prompt, plaintext_output=plaintext_output)
-                config.TEMPERATURE = old_temp  # Reset to previous setting
-            
+                self.client.console.print(
+                    "[yellow]Detected duplicate response. Regenerating with higher temperature...[/yellow]"
+                )
+                old_temp = global_config.TEMPERATURE
+                global_config.TEMPERATURE = 0.9
+                response = self.client.query(
+                    context_messages, prompt, plaintext_output=plaintext_output
+                )
+                global_config.TEMPERATURE = old_temp
+
             self.history_manager.add_message("assistant", response)
             return response
         except KeyboardInterrupt:
             self.client.console.print("\n[bold red]Query interrupted.[/bold red]")
 
-def validate_model(model_name: str) -> str:
+
+def validate_model(model_name: str, current_config: Config = global_config) -> str:
     """
-    Validate model name and support partial matching.
-    Used as a custom type function for argparse.
-    
-    Args:
-        model_name: The model name to validate
-        
-    Returns:
-        The matched model name if valid
-        
-    Raises:
-        argparse.ArgumentTypeError: If the model name is invalid or ambiguous
+    Validate model name using the provided config object.
+    (Docstring content remains the same)
     """
-    # Check OpenAI models first (exact matches only)
-    if model_name in config.OPENAPI_MODELS:
+    if model_name in current_config.MODEL_OPTIONS:
         return model_name
-    
-    # Check HuggingFace models (exact match for now)
-    if model_name in config.HUGGINGFACE_MODELS:
-         return model_name
-    
-    # Check Ollama models with partial matching
-    matched_model = find_matching_model(model_name, config.OLLAMA_MODELS)
+
+    matched_model = find_matching_model(model_name, current_config.OLLAMA_MODELS)
     if matched_model:
         return matched_model
-    
-    # Handle potential partial matches against OpenAI models
-    openai_match = find_matching_model(model_name, config.OPENAPI_MODELS)
-    if openai_match:
-        return openai_match
-        
-    # Try partial matching for HF models if desired (similar to Ollama)
-    hf_match = find_matching_model(model_name, config.HUGGINGFACE_MODELS)
-    if hf_match:
-         return hf_match
-    
-    # No matches at all
-    valid_models = config.MODEL_OPTIONS
+
+    valid_models_str = ", ".join(current_config.MODEL_OPTIONS)
     raise argparse.ArgumentTypeError(
-        f"Invalid model: '{model_name}'. Available models: {', '.join(valid_models)}"
+        f"Invalid model: '{model_name}'. Available models: {valid_models_str}"
     )
 
-def parse_arguments():
-    parser = argparse.ArgumentParser(description="Query LLM models from the command line")
+class ModelValidator:
+    def __init__(self, config_to_use: Config):
+        self.config = config_to_use
+
+    def __call__(self, model_name: str) -> str:
+        return validate_model(model_name, current_config=self.config)
+
+def parse_arguments(current_config: Config = global_config):
+    parser = argparse.ArgumentParser(
+        description="Query LLM models from the command line"
+    )
     parser.add_argument("question", nargs="*", help="Your question for the LLM model")
     parser.add_argument(
         "--verbose",
@@ -105,8 +106,8 @@ def parse_arguments():
     parser.add_argument(
         "-m",
         "--model",
-        default=config.DEFAULT_MODEL,
-        type=validate_model,
+        default=current_config.DEFAULT_MODEL,
+        type=ModelValidator(current_config),
         help="Choose the model to use (supports partial matching).",
     )
     parser.add_argument(
@@ -122,78 +123,127 @@ def parse_arguments():
         const=-1,
         type=int,
         default=None,
-        help="Print the saved conversation history. Optionally specify the number of recent conversation pairs to display. (Use -ph with no number for full history.)",
+        help="Print the saved conversation history. Optionally specify number of recent pairs.",
     )
     parser.add_argument(
         "-c",
         "--command",
         help="Execute a shell command and add its output to the question.",
     )
-    parser.add_argument("--plain", action="store_true", help="Use plain text output (no formatting)")
     parser.add_argument(
-        "--refresh-models", 
-        action="store_true", 
+        "--plain", action="store_true", help="Use plain text output (no formatting)"
+    )
+    parser.add_argument(
+        "--refresh-models",
+        action="store_true",
         default=False,
-        help="Refresh available models in cache"
+        help="Refresh available models in cache",
     )
     return parser.parse_args()
 
-def main() -> None:
 
-    args = parse_arguments()
-    # Update the global config instance directly from args
-    config.update_from_args(args)
-    
-    # Instantiate AskLLM without needing a model parameter
+def main() -> None:
+    args = parse_arguments(current_config=global_config)
+
+    global_config.update_from_args(args)
+
     ask_llm = AskLLM()
-    
+
     if args.delete_history:
         ask_llm.history_manager.clear_history()
-    
+
     if args.print_history is not None:
         ask_llm.history_manager.print_history(args.print_history)
         if not args.question:
             return
     ask_llm.client.console.print("")
 
+    command_output_str = ""
+    if args.command:
+        ask_llm.client.console.print(
+            f"Executing command: [yellow]{args.command}[/yellow]"
+        )
+        try:
+            result = subprocess.run(
+                args.command,
+                shell=True,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            output = result.stdout.strip()
+            error = result.stderr.strip()
+
+            if output:
+                command_output_str += f"Command Output:\n```\n{output}\n```\n\n"
+            if error:
+                command_output_str += f"Command Error:\n```\n{error}\n```\n\n"
+            if result.returncode != 0:
+                ask_llm.client.console.print(
+                    f"[yellow]Warning: Command exited with status {result.returncode}[/yellow]"
+                )
+                command_output_str += (
+                    f"(Command exited with status {result.returncode})\n\n"
+                )
+
+        except Exception as e:
+            ask_llm.client.console.print(
+                f"[bold red]Error executing command:[/bold red] {e}"
+            )
+            command_output_str += f"Error executing command: {e}\n\n"
+
+        ask_llm.client.console.print()
+
     if args.question:
-        question_text = " ".join(args.question)
-        ask_llm.query(question_text, plaintext_output=args.plain)
+        question_text = command_output_str + " ".join(args.question)
+        ask_llm.query(question_text.strip(), plaintext_output=args.plain)
+    elif command_output_str:
+        ask_llm.client.console.print("Command output captured, querying LLM...")
+        ask_llm.query(command_output_str.strip(), plaintext_output=args.plain)
     else:
-        ask_llm.client.console.print("[bold green]Entering interactive mode. Type 'exit' or 'quit' to leave.[/bold green]")
-        ask_llm.client.console.print("[bold green]Type '>' at the beginning to enter multiline input mode.[/bold green]")
+        ask_llm.client.console.print(
+            "[bold green]Entering interactive mode. Type 'exit' or 'quit' to leave.[/bold green]"
+        )
+        ask_llm.client.console.print(
+            "[bold green]Type '>' at the beginning to enter multiline input mode.[/bold green]"
+        )
         input_handler = MultilineInputHandler(console=ask_llm.client.console)
-        
+
         while True:
             try:
-                # Get input and whether it's multiline
-                prompt_text, is_multiline = input_handler.get_input("Enter your question:")
-                
+                prompt_text, is_multiline = input_handler.get_input(
+                    "Enter your question:"
+                )
+
                 if prompt_text.strip().lower() in ["exit", "quit"]:
-                    ask_llm.client.console.print("[bold red]Exiting interactive mode.[/bold red]")
+                    ask_llm.client.console.print(
+                        "[bold red]Exiting interactive mode.[/bold red]"
+                    )
                     ask_llm.client.console.print()
                     break
 
                 if not prompt_text.strip():
-                    ask_llm.client.console.print("[dim]Empty input received. Asking again...[/dim]")
+                    ask_llm.client.console.print(
+                        "[dim]Empty input received. Asking again...[/dim]"
+                    )
                     continue
 
-                # Only show preview for multiline input
                 if is_multiline and prompt_text.strip():
                     prompt_text = input_handler.preview_input(prompt_text)
-                
-                # If we have text after potential preview, query the model
+
                 ask_llm.client.console.print()
                 if prompt_text.strip():
                     ask_llm.query(prompt_text, plaintext_output=args.plain)
                 ask_llm.client.console.print()
-                
+
             except (KeyboardInterrupt, EOFError):
-                # This will catch Ctrl+C at any point in the loop
-                ask_llm.client.console.print("\n[bold red]Exiting interactive mode.[/bold red]")
+                ask_llm.client.console.print(
+                    "\n[bold red]Exiting interactive mode.[/bold red]"
+                )
                 ask_llm.client.console.print()
                 break
     ask_llm.client.console.print()
+
 
 if __name__ == "__main__":
     main()

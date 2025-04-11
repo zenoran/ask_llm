@@ -56,6 +56,24 @@ class HistoryManager:
             messages.insert(0, Message(role="system", content=config.SYSTEM_MESSAGE))
         return messages
     
+    def get_context_messages_excluding_last(self):
+        """Get messages to be used as context, excluding the most recent one."""
+        context_messages = self.get_context_messages()
+        # Return all but the last message if there's more than one
+        if len(context_messages) > 1:
+            return context_messages[:-1]
+        elif context_messages and context_messages[0].role == "system":
+            # If only the system message exists, return it
+            return context_messages
+        else:
+            # If there's only one non-system message (shouldn't happen in normal flow)
+            # or the list is empty, return an empty list or just system message
+            # Let's refine: ensure system message is always present if history is used
+            if any(msg.role == "system" for msg in context_messages):
+                return [msg for msg in context_messages if msg.role == "system"]
+            else:
+                # Add system message if missing (edge case)
+                return [Message(role="system", content=config.SYSTEM_MESSAGE)]
 
     def add_message(self, role, content):
         """Append a message to history."""
