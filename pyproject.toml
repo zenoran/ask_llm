@@ -12,14 +12,6 @@ dependencies = [
     # LLM providers
     "openai>=1.69.0",
     
-    # Hugging Face dependencies
-    "transformers>=4.35.0",
-    "bitsandbytes>=0.42.0",
-    "torch>=2.2.0",
-    "accelerate>=0.29.0",
-    "peft>=0.5.0",
-    "xformers>=0.0.29.post1",
-    
     # Testing
     "pytest>=8.3.5",
     "pytest-cov>=5.0.0",
@@ -31,6 +23,14 @@ dev = [
     "ruff",
     "mypy"
     # Add other dev tools here if needed
+]
+huggingface = [
+    "transformers>=4.35.0",
+    "bitsandbytes>=0.42.0",
+    "torch>=2.2.0",
+    "accelerate>=0.29.0",
+    "peft>=0.5.0",
+    "xformers>=0.0.29.post1",
 ]
 
 [project.scripts]

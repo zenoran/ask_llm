@@ -1,10 +1,13 @@
 import argparse
 import subprocess
 from ask_llm.utils.history import HistoryManager
-from ask_llm.utils.config import Config, config as global_config
-from ask_llm.clients import OpenAIClient, OllamaClient, HuggingFaceClient
+from ask_llm.utils.config import Config, config as global_config, is_huggingface_available
 from ask_llm.utils.input_handler import MultilineInputHandler
 from ask_llm.utils.ollama_utils import find_matching_model
+
+
+# Import clients only after checking availability
+from ask_llm.clients import OpenAIClient, OllamaClient
 
 
 class AskLLM:
@@ -16,15 +19,44 @@ class AskLLM:
 
     def initialize_client(self):
         model_id = self.model_id
-
+        
+        # Define client map based on available dependencies
         client_map = {
-            "huggingface": HuggingFaceClient,
             "ollama": OllamaClient,
             "openai": OpenAIClient,
         }
-
+        
+        # Only add HuggingFace client if dependencies are available
+        hf_available = is_huggingface_available()
+        if hf_available:
+            # Import only when available to avoid ImportError
+            from ask_llm.clients import HuggingFaceClient
+            client_map["huggingface"] = HuggingFaceClient
+        
+        # Determine model type
         if model_id in global_config.HUGGINGFACE_MODELS:
             model_type = "huggingface"
+            # Check if HuggingFace is available
+            if not hf_available:
+                self.client.console.print(
+                    "[bold yellow]Warning: HuggingFace dependencies not installed.[/bold yellow]"
+                ) if hasattr(self, 'client') else print(
+                    "Warning: HuggingFace dependencies not installed."
+                )
+                self.client.console.print(
+                    "[yellow]Install with: pip install ask_llm[huggingface][/yellow]"
+                ) if hasattr(self, 'client') else print(
+                    "Install with: pip install ask_llm[huggingface]"
+                )
+                # Fall back to default model
+                model_id = global_config.DEFAULT_MODEL if model_id != global_config.DEFAULT_MODEL else "gpt-4o"
+                # Re-determine model type
+                if model_id in global_config.OLLAMA_MODELS:
+                    model_type = "ollama"
+                elif model_id in global_config.OPENAPI_MODELS:
+                    model_type = "openai"
+                else:
+                    raise ValueError(f"Could not find a fallback model.")
         elif model_id in global_config.OLLAMA_MODELS:
             model_type = "ollama"
         elif model_id in global_config.OPENAPI_MODELS:
@@ -72,8 +104,15 @@ class AskLLM:
 def validate_model(model_name: str, current_config: Config = global_config) -> str:
     """
     Validate model name using the provided config object.
-    (Docstring content remains the same)
+    Returns the validated model name, or raises an ArgumentTypeError if invalid.
     """
+    # Check if it's a HuggingFace model but dependencies aren't available
+    if model_name in current_config.HUGGINGFACE_MODELS and not is_huggingface_available():
+        print(f"Warning: Model '{model_name}' requires Hugging Face dependencies.")
+        print("Install with: pip install ask_llm[huggingface]")
+        print("Falling back to default model.")
+        return current_config.DEFAULT_MODEL if current_config.DEFAULT_MODEL not in current_config.HUGGINGFACE_MODELS else "gpt-4o"
+    
     if model_name in current_config.MODEL_OPTIONS:
         return model_name
 

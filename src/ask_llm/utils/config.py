@@ -6,6 +6,38 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import Field, computed_field
 from ask_llm.utils.ollama_utils import init_models
 
+
+def is_huggingface_available():
+    """Check if Hugging Face dependencies are available."""
+    try:
+        # Try importing the essential dependencies
+        import torch
+        import transformers
+        import bitsandbytes
+        
+        # Try importing the optional dependencies, but don't fail if they're not available
+        try:
+            import peft
+        except ImportError:
+            pass
+            
+        try:
+            import accelerate
+        except ImportError:
+            pass
+            
+        try:
+            import xformers
+        except ImportError:
+            pass
+            
+        return True
+    except (ImportError, Exception) as e:
+        # Print debug info if in verbose mode (can be enabled in future)
+        # print(f"HuggingFace dependencies not available: {e}")
+        return False
+
+
 class Config(BaseSettings):
     HISTORY_FILE: str = Field(default=os.path.expanduser("~/.ask-llm-chat-history"))
     HISTORY_DURATION: int = Field(default=60 * 10)  # retain messages for 60 minutes
@@ -62,7 +94,11 @@ Respond using clean and properly formatted Markdown. Use the following formattin
 
     @computed_field
     def MODEL_OPTIONS(self) -> list[str]:
-        return self.OPENAPI_MODELS + self.OLLAMA_MODELS + self.HUGGINGFACE_MODELS
+        """Return all available models, excluding HuggingFace models if dependencies are missing."""
+        if is_huggingface_available():
+            return self.OPENAPI_MODELS + self.OLLAMA_MODELS + self.HUGGINGFACE_MODELS
+        else:
+            return self.OPENAPI_MODELS + self.OLLAMA_MODELS
 
     def update_from_args(self, args: Namespace) -> "Config":
         """Update config based on command line arguments"""
