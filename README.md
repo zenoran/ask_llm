@@ -103,8 +103,6 @@ sum = a + b
 print("The sum is:", sum)
 ```
 
-Want code in another language or something more advanced? Just let me know! 😄
-
 ### Enter interactive mode
 `> llm`
 
