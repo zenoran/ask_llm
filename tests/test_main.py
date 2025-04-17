@@ -256,6 +256,8 @@ def test_main_simple_question(patch_main_dependencies, mock_ask_llm_instance):
         delete_history=False,
         print_history=None,
         plain=False,
+        model=None,
+        no_stream=False,
         # other args defaults don't affect this path directly
     )
     patch_main_dependencies["parse_arguments"].return_value = args
@@ -264,8 +266,8 @@ def test_main_simple_question(patch_main_dependencies, mock_ask_llm_instance):
 
     patch_main_dependencies["parse_arguments"].assert_called_once()
     patch_main_dependencies["config"].update_from_args.assert_called_once_with(args)
-    patch_main_dependencies["AskLLM"].assert_called_once_with()
-    mock_ask_llm_instance.query.assert_called_once_with("Hello?", plaintext_output=False)
+    patch_main_dependencies["AskLLM"].assert_called_once_with(model_id=None)
+    mock_ask_llm_instance.query.assert_called_once_with("Hello?", plaintext_output=False, stream=True)
     mock_ask_llm_instance.history_manager.clear_history.assert_not_called()
     mock_ask_llm_instance.history_manager.print_history.assert_not_called()
     patch_main_dependencies["subprocess_run"].assert_not_called()
@@ -273,7 +275,7 @@ def test_main_simple_question(patch_main_dependencies, mock_ask_llm_instance):
 def test_main_delete_history(patch_main_dependencies, mock_ask_llm_instance):
     """Test main with --delete-history flag."""
     args = Namespace(
-        question=[], command=None, delete_history=True, print_history=None, plain=False
+        question=[], command=None, delete_history=True, print_history=None, plain=False, model=None, no_stream=False
     )
     patch_main_dependencies["parse_arguments"].return_value = args
     
@@ -286,20 +288,20 @@ def test_main_delete_history(patch_main_dependencies, mock_ask_llm_instance):
 
     patch_main_dependencies["parse_arguments"].assert_called_once()
     patch_main_dependencies["config"].update_from_args.assert_called_once_with(args)
-    patch_main_dependencies["AskLLM"].assert_called_once_with()
+    patch_main_dependencies["AskLLM"].assert_called_once_with(model_id=None)
     mock_ask_llm_instance.history_manager.clear_history.assert_called_once()
     
 def test_main_print_history(patch_main_dependencies, mock_ask_llm_instance):
     """Test main with --print-history flag (and no question)."""
     history_limit = 5
     args = Namespace(
-        question=[], command=None, delete_history=False, print_history=history_limit, plain=False
+        question=[], command=None, delete_history=False, print_history=history_limit, plain=False, model=None, no_stream=False
     )
     patch_main_dependencies["parse_arguments"].return_value = args
 
     main()
 
-    patch_main_dependencies["AskLLM"].assert_called_once_with()
+    patch_main_dependencies["AskLLM"].assert_called_once_with(model_id=None)
     mock_ask_llm_instance.history_manager.print_history.assert_called_once_with(history_limit)
     # Should exit after printing history if no question
     mock_ask_llm_instance.query.assert_not_called()
@@ -310,16 +312,16 @@ def test_main_print_history_with_question(patch_main_dependencies, mock_ask_llm_
     history_limit = -1 # Print all
     question = ["Follow", "up?"]
     args = Namespace(
-        question=question, command=None, delete_history=False, print_history=history_limit, plain=True
+        question=question, command=None, delete_history=False, print_history=history_limit, plain=True, model=None, no_stream=False
     )
     patch_main_dependencies["parse_arguments"].return_value = args
 
     main()
 
-    patch_main_dependencies["AskLLM"].assert_called_once_with()
+    patch_main_dependencies["AskLLM"].assert_called_once_with(model_id=None)
     mock_ask_llm_instance.history_manager.print_history.assert_called_once_with(history_limit)
     # Should proceed to query
-    mock_ask_llm_instance.query.assert_called_once_with("Follow up?", plaintext_output=True)
+    mock_ask_llm_instance.query.assert_called_once_with("Follow up?", plaintext_output=True, stream=True)
     patch_main_dependencies["InputHandler"].assert_not_called()
 
 def test_main_command_execution_success(patch_main_dependencies, mock_ask_llm_instance):
@@ -332,7 +334,7 @@ def test_main_command_execution_success(patch_main_dependencies, mock_ask_llm_in
     expected_query_text = f"Command Output:\n```\n{command_output}\n```\n\nWhat about this?"
 
     args = Namespace(
-        question=question, command=command, delete_history=False, print_history=None, plain=False
+        question=question, command=command, delete_history=False, print_history=None, plain=False, model=None, no_stream=False
     )
     patch_main_dependencies["parse_arguments"].return_value = args
 
@@ -348,7 +350,8 @@ def test_main_command_execution_success(patch_main_dependencies, mock_ask_llm_in
     patch_main_dependencies["subprocess_run"].assert_called_once_with(
         command, shell=True, capture_output=True, text=True, check=False
     )
-    mock_ask_llm_instance.query.assert_called_once_with(expected_query_text, plaintext_output=False)
+    patch_main_dependencies["AskLLM"].assert_called_once_with(model_id=None)
+    mock_ask_llm_instance.query.assert_called_once_with(expected_query_text, plaintext_output=False, stream=True)
 
 def test_main_command_execution_error(patch_main_dependencies, mock_ask_llm_instance):
     """Test main with command execution (non-zero exit code)."""
@@ -359,7 +362,7 @@ def test_main_command_execution_error(patch_main_dependencies, mock_ask_llm_inst
     expected_query_text = f"Command Error:\n```\n{command_error}\n```\n\n(Command exited with status 2)"
 
     args = Namespace(
-        question=[], command=command, delete_history=False, print_history=None, plain=False
+        question=[], command=command, delete_history=False, print_history=None, plain=False, model=None, no_stream=False
     )
     patch_main_dependencies["parse_arguments"].return_value = args
 
@@ -380,14 +383,15 @@ def test_main_command_execution_error(patch_main_dependencies, mock_ask_llm_inst
          f"[yellow]Warning: Command exited with status 2[/yellow]"
     )
     # Should query with error output if no question provided
-    mock_ask_llm_instance.query.assert_called_once_with(expected_query_text, plaintext_output=False)
+    patch_main_dependencies["AskLLM"].assert_called_once_with(model_id=None)
+    mock_ask_llm_instance.query.assert_called_once_with(expected_query_text, plaintext_output=False, stream=True)
 
 def test_main_interactive_mode(patch_main_dependencies, mock_ask_llm_instance):
     """Test main in interactive mode with simple input."""
     simple_input = "Tell me a joke"
     
     args = Namespace(
-        question=[], command=None, delete_history=False, print_history=None, plain=False
+        question=[], command=None, delete_history=False, print_history=None, plain=False, model=None, no_stream=False
     )
     patch_main_dependencies["parse_arguments"].return_value = args
     
@@ -404,7 +408,7 @@ def test_main_interactive_mode(patch_main_dependencies, mock_ask_llm_instance):
     # Verify setup
     patch_main_dependencies["parse_arguments"].assert_called_once()
     patch_main_dependencies["config"].update_from_args.assert_called_once_with(args)
-    patch_main_dependencies["AskLLM"].assert_called_once_with()
+    patch_main_dependencies["AskLLM"].assert_called_once_with(model_id=None)
     
     # Verify we entered interactive mode
     mock_ask_llm_instance.client.console.print.assert_any_call(
@@ -412,14 +416,14 @@ def test_main_interactive_mode(patch_main_dependencies, mock_ask_llm_instance):
     )
     
     # Verify the LLM was queried with our simple input
-    mock_ask_llm_instance.query.assert_called_with(simple_input, plaintext_output=False)
+    mock_ask_llm_instance.query.assert_called_with(simple_input, plaintext_output=False, stream=True)
     
 def test_main_interactive_mode_multiline(patch_main_dependencies, mock_ask_llm_instance):
     """Test main in interactive mode with multiline input."""
     multiline_input = "Here is\nsome multiline\ninput"
     
     args = Namespace(
-        question=[], command=None, delete_history=False, print_history=None, plain=False
+        question=[], command=None, delete_history=False, print_history=None, plain=False, model=None, no_stream=False
     )
     patch_main_dependencies["parse_arguments"].return_value = args
     
@@ -435,13 +439,13 @@ def test_main_interactive_mode_multiline(patch_main_dependencies, mock_ask_llm_i
     main()
     
     # Verify basic setup
-    patch_main_dependencies["AskLLM"].assert_called_once_with()
+    patch_main_dependencies["AskLLM"].assert_called_once_with(model_id=None)
     
     # Verify preview was called for multiline input
     mock_input_handler.preview_input.assert_called_once_with(multiline_input)
     
     # Verify the LLM was queried with our multiline input
-    mock_ask_llm_instance.query.assert_called_with(multiline_input, plaintext_output=False)
+    mock_ask_llm_instance.query.assert_called_with(multiline_input, plaintext_output=False, stream=True)
 
 def test_initialize_client_not_found(mock_config_for_parse):
     """Test when client type is not found in the client map."""
@@ -490,7 +494,7 @@ def test_main_command_execution_error_specific():
     """Test specific error when executing command."""
     # Set up the test
     args = Namespace(
-        question=[], command="invalid_command", delete_history=False, print_history=None, plain=False
+        question=[], command="invalid_command", delete_history=False, print_history=None, plain=False, model=None, no_stream=False
     )
     
     # Create a mock config
@@ -522,7 +526,7 @@ def test_main_empty_multiline_input():
     """Test handling of empty multiline input in interactive mode."""
     # Set up the test with no question or command
     args = Namespace(
-        question=[], command=None, delete_history=False, print_history=None, plain=False
+        question=[], command=None, delete_history=False, print_history=None, plain=False, model=None, no_stream=False
     )
     
     # Mock the input handler
@@ -555,7 +559,7 @@ def test_main_empty_multiline_input():
 def test_main_keyboard_interrupt():
     """Test handling of KeyboardInterrupt in interactive mode."""
     args = Namespace(
-        question=[], command=None, delete_history=False, print_history=None, plain=False
+        question=[], command=None, delete_history=False, print_history=None, plain=False, model=None, no_stream=False
     )
     
     # Mock the input handler
@@ -582,7 +586,7 @@ def test_main_keyboard_interrupt():
 def test_main_final_newline():
     """Test that final newline is always printed."""
     args = Namespace(
-        question=["test question"], command=None, delete_history=False, print_history=None, plain=False
+        question=["test question"], command=None, delete_history=False, print_history=None, plain=False, model=None, no_stream=False
     )
     
     # Create mock ask_llm instance

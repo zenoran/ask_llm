@@ -1,33 +1,74 @@
 import json
 import requests
-from rich.markdown import Markdown
-from rich.panel import Panel
-from rich.align import Align
-from rich.live import Live
 from ask_llm.clients.base import LLMClient
 from ask_llm.utils.config import config
 from typing import List
 from ask_llm.utils.ollama_utils import get_available_models as get_models
-import sys
 
 
 class OllamaClient(LLMClient):
     def __init__(self, model):
         super().__init__(model)
 
-    def query(self, messages, prompt, plaintext_output: bool = False):
-        api_messages = self._prepare_api_messages(messages, prompt)
+    def query(self, messages, plaintext_output: bool = False):
+        """Query Ollama API with full message history, using streaming by default.
+
+        Args:
+            messages: List of message dictionaries (including the latest user prompt).
+            plaintext_output: If True, return raw text. Otherwise, format output.
+        """
+        api_messages = self._prepare_api_messages(messages)
         response = self._stream_response(api_messages, plaintext_output)
         return response
 
-    def _prepare_api_messages(self, messages, prompt):
-        api_messages = [msg.to_api_format() for msg in messages if msg.role != "system"]
-        if not any(msg['role'] == 'system' for msg in api_messages):
-            api_messages.insert(0, {"role": "system", "content": config.SYSTEM_MESSAGE.replace("\n", "")})
+    def _prepare_api_messages(self, messages):
+        # Convert messages, ensuring system message is present and user prompt is last
+        api_messages = []
+        has_system_message = False
+        for msg in messages:
+            if hasattr(msg, 'to_api_format'):
+                formatted_msg = msg.to_api_format()
+            else:
+                # Fallback: assume msg has .role and .content attributes
+                try:
+                    formatted_msg = {"role": msg.role, "content": msg.content}
+                except AttributeError:
+                    self.console.print(f"[bold red]Error:[/bold red] Message object missing 'role' or 'content' attribute: {msg}")
+                    # Skip this message or handle error appropriately
+                    continue 
 
-        api_messages.append({"role": "user", "content": prompt})
+            if formatted_msg['role'] == 'system':
+                has_system_message = True
+                # Ollama expects the system message first (if provided)
+                api_messages.insert(0, formatted_msg)
+            else:
+                api_messages.append(formatted_msg)
+
+        # If no system message was found in the input, add the default one
+        if not has_system_message:
+            api_messages.insert(0, {"role": "system", "content": config.SYSTEM_MESSAGE.replace("\n", "")})
         
-        return api_messages
+        # Ensure the final list doesn't contain duplicate consecutive roles (Ollama requirement)
+        # And ensure the final message is from the user
+        # This is a basic cleanup; more robust history management might be needed
+        cleaned_messages = []
+        if api_messages:
+            cleaned_messages.append(api_messages[0])
+            for i in range(1, len(api_messages)):
+                if api_messages[i]['role'] != api_messages[i-1]['role']:
+                    cleaned_messages.append(api_messages[i])
+            # Ensure the very last message is 'user'
+            if cleaned_messages[-1]['role'] != 'user':
+                 # This might happen if the last message added was assistant or system somehow
+                 # Find the last user message and append it again if necessary, or handle error
+                 # For now, we assume the input `messages` had the user prompt last correctly
+                 pass # Revisit if issues persist
+
+        # Add verbose logging to see the final payload being prepared
+        # Filter out previous assistant messages that were just error strings
+        final_messages = [msg for msg in cleaned_messages if not (msg.get('role') == 'assistant' and msg.get('content', '').startswith('ERROR:'))]
+
+        return final_messages
 
     def _stream_response(self, api_messages, plaintext_output: bool = False):
         if config.VERBOSE:
