@@ -1,4 +1,5 @@
 import torch
+import time
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
@@ -157,20 +158,26 @@ class HuggingFaceClient(LLMClient):
             )
             raise
 
-    def query(self, messages, prompt, plaintext_output: bool = False):
-        """Query the local Hugging Face model with streaming output."""
+    def query(self, messages, plaintext_output: bool = False, stream: bool = True):
+        """Query the local Hugging Face model with optional streaming output.
+        
+        Args:
+            messages: List of message dictionaries (including the latest user prompt).
+            plaintext_output: If True, return raw text. Otherwise, format output.
+            stream: If True, stream the output token by token.
+        """
         if not self.tokenizer or not self.model:
             return "Error: Model or Tokenizer not properly initialized."
 
-        # Prepare chat input
+        # Prepare chat input using the full message list provided
         try:
             # Clear any existing state/cache that might cause repeated outputs
             if hasattr(self.model, "clear_cache"):
                 self.model.clear_cache()
 
-            # Create a fresh chat history for each query
-            chat_history = [msg.to_api_format() for msg in messages]
-            chat_history.append({"role": "user", "content": prompt})
+            # Use the messages list directly, assuming it includes the latest user prompt
+            chat_history = [msg.to_api_format() if hasattr(msg, 'to_api_format') else msg for msg in messages]
+            # chat_history.append({"role": "user", "content": prompt}) # REMOVED - Prompt is already in messages
 
             if hasattr(self.tokenizer, "apply_chat_template"):
                 # Ensure we're not reusing a cached version
@@ -180,6 +187,7 @@ class HuggingFaceClient(LLMClient):
                 if config.VERBOSE:
                     self.console.print("[dim]Using tokenizer chat template.[/dim]")
             else:
+                # Fallback formatting (less likely needed if using models with templates)
                 if config.VERBOSE:
                     self.console.print(
                         "[dim]Tokenizer has no chat template, using basic formatting.[/dim]"
@@ -202,13 +210,7 @@ class HuggingFaceClient(LLMClient):
         inputs = self.tokenizer(formatted_prompt, return_tensors="pt").to(
             self.model.device
         )
-
-        # Removed dummy tensor allocation which can cause coil whine
-
-        # Create streamer and setup generation
-        streamer = TextIteratorStreamer(
-            self.tokenizer, skip_prompt=True, skip_special_tokens=True
-        )
+        input_len = inputs.input_ids.shape[-1]
 
         # Handle stop tokens safely
         try:
@@ -219,60 +221,76 @@ class HuggingFaceClient(LLMClient):
         except Exception:
             stop_token_id = None
 
-        # Optimize generation parameters for speed on RTX 4090
+        # Base generation parameters
         generation_kwargs = {
             "input_ids": inputs.input_ids,
             "attention_mask": inputs.attention_mask,
-            "streamer": streamer,
             "max_new_tokens": config.MAX_TOKENS or 1024,
             "do_sample": True,
-            "temperature": config.TEMPERATURE or 0.7,
-            "top_p": 0.95,
             "pad_token_id": self.tokenizer.pad_token_id,
-            "use_cache": True,  # Enable KV caching for faster generation
-            "repetition_penalty": 1.05,  # Reduced penalty to prevent power spikes
+            "use_cache": True,
         }
-
-        # Ensure we're not getting stuck in repetition loops
-        if "do_sample" in generation_kwargs and generation_kwargs["do_sample"]:
-            # Ensure temperature is high enough to avoid deterministic outputs
-            min_temp = 0.5
-            if (
-                "temperature" in generation_kwargs
-                and generation_kwargs["temperature"] < min_temp
-            ):
-                generation_kwargs["temperature"] = min_temp
-                self.console.print(
-                    f"[yellow]Set minimum temperature to {min_temp} to avoid repetition.[/yellow]"
-                )
-
-        # Removed beam search which can cause significant coil whine
-
-        # Add stop token if available
         if stop_token_id is not None:
             generation_kwargs["eos_token_id"] = stop_token_id
 
-        # Start generation in a separate thread
-        thread = Thread(target=self.model.generate, kwargs=generation_kwargs)
-        thread.start()
 
-        # Stream output using the base class handler
-        response_text_final = ""
-        try:
-            response_text_final = self._handle_streaming_output(
-                stream_iterator=streamer,
-                plaintext_output=plaintext_output,
-                panel_title=f"[bold cyan]{self.model_id}[/bold cyan]",
-                panel_border_style="cyan",
-                first_para_panel=False,  # HF client uses a single panel for the whole response
+        if stream:
+            # Setup for streaming
+            streamer = TextIteratorStreamer(
+                self.tokenizer, skip_prompt=True, skip_special_tokens=True
             )
-        finally:
-            # Ensure the generation thread finishes
-            thread.join()
-            # Clean up resources if needed
+            generation_kwargs["streamer"] = streamer
+
+            # Start generation in a separate thread
+            thread = Thread(target=self.model.generate, kwargs=generation_kwargs)
+            thread.start()
+
+            # Stream output using the base class handler
+            response_text_final = ""
+            try:
+                response_text_final = self._handle_streaming_output(
+                    stream_iterator=streamer,
+                    plaintext_output=plaintext_output,
+                    panel_title=f"[bold cyan]{self.model_id}[/bold cyan]",
+                    panel_border_style="cyan",
+                    first_para_panel=False,  # HF client uses a single panel for the whole response
+                )
+            finally:
+                # Ensure the generation thread finishes
+                thread.join()
+                # Clean up resources if needed
+                torch.cuda.empty_cache()
+
+            return response_text_final
+
+        else:
+            # Non-streaming generation
+            start_time = time.time()
+            with torch.inference_mode():
+                generation = self.model.generate(**generation_kwargs)
+            end_time = time.time()
+            
+            output_ids = generation[0][input_len:]
+            response_text_final = self.tokenizer.decode(output_ids, skip_special_tokens=True)
+
+            # Calculate and print tokens/second
+            elapsed_time = end_time - start_time
+            num_tokens = output_ids.numel()
+            if elapsed_time > 0:
+                tokens_per_sec = num_tokens / elapsed_time
+                self.console.print(f"[dim]Generated {num_tokens} tokens in {elapsed_time:.2f}s ({tokens_per_sec:.2f} tokens/sec)[/dim]")
+            else:
+                 self.console.print(f"[dim]Generated {num_tokens} tokens (elapsed time too short to calculate rate)[/dim]")
+
+
+            # Print formatted output if not plaintext
+            if not plaintext_output:
+                self._print_assistant_message(response_text_final)
+
+            # Clean up resources
             torch.cuda.empty_cache()
 
-        return response_text_final
+            return response_text_final
 
     def format_message(self, role, content):
         """Format a user or assistant message for display."""

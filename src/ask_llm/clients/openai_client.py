@@ -24,15 +24,22 @@ class OpenAIClient(LLMClient):
             raise Exception("Please set your OPENAI_API_KEY environment variable.")
         return api_key
 
-    def query(self, messages, prompt, plaintext_output: bool = False):
-        """Query OpenAI API with full message history, using streaming by default"""
-        api_messages = self._prepare_api_messages(messages, prompt)
+    def query(self, messages, plaintext_output: bool = False):
+        """Query OpenAI API with full message history, using streaming by default.
+
+        Args:
+            messages: List of message dictionaries (including the latest user prompt).
+            plaintext_output: If True, return raw text. Otherwise, format output.
+        """
+        # Messages are now passed directly, assuming the prompt is the last one
+        api_messages = self._prepare_api_messages(messages)
         response = self._stream_response(api_messages, plaintext_output)
         return response
 
-    def _prepare_api_messages(self, messages, prompt):
-        api_messages = [msg.to_api_format() for msg in messages]
-        api_messages.append({"role": "user", "content": prompt})
+    def _prepare_api_messages(self, messages):
+        # Convert all messages in the list to API format
+        api_messages = [msg.to_api_format() if hasattr(msg, 'to_api_format') else msg for msg in messages]
+        # api_messages.append({"role": "user", "content": prompt}) # REMOVED
         return api_messages
 
     def _stream_response(self, api_messages, plaintext_output: bool = False):
@@ -69,13 +76,11 @@ class OpenAIClient(LLMClient):
             first_para_panel=True
         )
 
-    def get_verbose_output(self, messages, prompt):
+    def get_verbose_output(self, messages):
         """Get full API response for verbose output"""
-        api_messages = []
-        for message in messages:
-            api_messages.append(message.to_api_format())
-
-        api_messages.append({"role": "user", "content": prompt})
+        # Convert all messages in the list to API format
+        api_messages = [msg.to_api_format() if hasattr(msg, 'to_api_format') else msg for msg in messages]
+        # api_messages.append({"role": "user", "content": prompt}) # REMOVED
 
         result = self.client.chat.completions.create(
             model=self.model, messages=api_messages, store=False

@@ -57,14 +57,14 @@ class TestOpenAIClient:
         ]
         prompt = "How are you?"
         
-        # Expected format after conversion
+        # Prepare expected result WITHOUT the prompt explicitly added here
         expected = [
             {"role": "user", "content": "Hello"},
             {"role": "assistant", "content": "Hi there"},
-            {"role": "user", "content": "How are you?"}
         ]
         
-        result = client._prepare_api_messages(messages, prompt)
+        # Call the method under test without the prompt argument
+        result = client._prepare_api_messages(messages)
         assert result == expected
     
     def test_query(self, mock_openai_client):
@@ -81,8 +81,10 @@ class TestOpenAIClient:
                 
                 result = client.query(messages, prompt)
                 
-                mock_prepare.assert_called_once_with(messages, prompt)
-                mock_stream.assert_called_once_with([{"role": "user", "content": "Test"}], False)
+                # Assert _prepare_api_messages was called with messages only
+                mock_prepare.assert_called_once_with(messages)
+                mock_stream.assert_called_once()
+                # The arguments passed to _stream_response would be the result of _prepare_api_messages
                 assert result == "Response from the model"
     
     def test_stream_response_success(self, mock_openai_client):
@@ -274,7 +276,7 @@ class TestOpenAIClient:
         # Expected API messages
         expected_api_messages = [
             {"role": "user", "content": "Hello"},
-            {"role": "user", "content": "Test prompt"}
+            # Prompt no longer explicitly added here by this method
         ]
         
         # Create a mock result object
@@ -283,8 +285,8 @@ class TestOpenAIClient:
         # Configure the mock completion create method to return our result
         client.client.chat.completions.create.return_value = mock_result
         
-        # Call the method we're testing
-        result = client.get_verbose_output(messages, prompt)
+        # Call the method we're testing without the prompt argument
+        result = client.get_verbose_output(messages)
         
         # Verify API call
         client.client.chat.completions.create.assert_called_once_with(

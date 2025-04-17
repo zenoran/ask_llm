@@ -6,6 +6,7 @@ from rich.live import Live
 from abc import ABC, abstractmethod
 from typing import Iterator
 import sys
+import time
 
 class LLMClient(ABC):
     """Abstract base class for LLM clients."""
@@ -81,7 +82,11 @@ class LLMClient(ABC):
     ) -> str:
         """Handles streaming output for both plaintext and Rich display."""
         total_response = ""
+        start_time = time.time()
+        token_count = 0
+        
         if plaintext_output:
+
             # --- Plaintext Streaming --- 
             print("", end='') # Ensure the line starts clear
             sys.stdout.flush()
@@ -89,6 +94,7 @@ class LLMClient(ABC):
                 for content in stream_iterator:
                     if content:
                         total_response += content
+                        token_count += len(content.split())
                         print(content, end='')
                         sys.stdout.flush()
                 print() # Add final newline
@@ -99,7 +105,7 @@ class LLMClient(ABC):
                 # Log specific errors if needed, return what we have + error
                 self.console.print(f"\n[bold red]Error during plaintext streaming:[/bold red] {e}")
                 total_response += f"\nERROR: {e}"
-            # --- End Plaintext --- 
+            # --- End Plaintext ---
         else:
             # --- Rich Streaming --- 
             accumulated_buffer = ""
@@ -116,6 +122,7 @@ class LLMClient(ABC):
                         continue
                         
                     total_response += content
+                    token_count += len(content.split())
                     
                     if not first_para_panel:
                         # Simple Rich streaming: update a single panel
@@ -202,5 +209,12 @@ class LLMClient(ABC):
                     remaining_text_live.stop()
                 self.console.print() # Ensure a newline after Rich output finishes or is interrupted
             # --- End Rich --- 
+            
+        # Calculate and display tokens per second
+        end_time = time.time()
+        elapsed_time = end_time - start_time
+        if elapsed_time > 0:
+            tokens_per_second = token_count / elapsed_time
+            self.console.print(f"[dim]Debug: {token_count} tokens in {elapsed_time:.2f}s ({tokens_per_second:.2f} tokens/sec)[/dim]")
             
         return total_response.strip()

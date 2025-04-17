@@ -44,21 +44,22 @@ class Config(BaseSettings):
     OLLAMA_URL: str = Field(default="http://localhost:11434")
     OLLAMA_MODELS: list[str] = Field(default_factory=list)  # Will be populated dynamically
     OLLAMA_FALLBACK_MODELS: list[str] = Field(
-        default=["exaone-deep", "deepseek-r1", "llama3.2", "llama3", "gemma3"]
+        default=["gemma3"]
     )
     OLLAMA_MODELS_CACHE: str = Field(default=os.path.expanduser("~/.ollama-models"))
     OPENAPI_MODELS: list[str] = Field(
-        default=["gpt-4o", "gpt-4.5-preview", "o1", "o3-mini", "chatgpt-4o-latest"]
+        default=["gpt-4.1", "gpt-4o", "o4-mini", "o1", "o3-mini", "chatgpt-4o-latest"]
     )
     HUGGINGFACE_MODELS: list[str] = Field(
         default=[
             "PygmalionAI/pygmalion-3-12b",
-            # Add other local HF models here in the future
+            "soob3123/amoral-gemma3-4B-v1",
         ]
     )
     DEFAULT_MODEL: str = Field(default="chatgpt-4o-latest")
     MAX_TOKENS: int = Field(default=1024, description="Default maximum tokens to generate")
     TEMPERATURE: float = Field(default=0.8, description="Default generation temperature")
+    DEFAULT_VOICE: str = Field(default="melina", description="Default voice for TTS")
     BUFFER_LINES: int = Field(default=3)  # Number of lines to collect before printing
     PRESERVE_CODE_BLOCKS: bool = Field(
         default=True
@@ -91,6 +92,8 @@ Respond using clean and properly formatted Markdown. Use the following formattin
         super().__init__(**data)
         refresh_models = "--refresh-models" in sys.argv
         self.OLLAMA_MODELS = init_models(self.OLLAMA_URL, self.OLLAMA_MODELS_CACHE, refresh_models)
+        if self.OPENAPI_MODELS:
+            self.DEFAULT_MODEL = self.OPENAPI_MODELS[0]
 
     @computed_field
     def MODEL_OPTIONS(self) -> list[str]:
@@ -108,6 +111,10 @@ Respond using clean and properly formatted Markdown. Use the following formattin
             self.VERBOSE = True
         if args.model:
             self.DEFAULT_MODEL = args.model
+        if hasattr(args, 'llm') and args.llm and args.llm != args.model:
+            self.DEFAULT_MODEL = args.llm
+        if hasattr(args, 'voice') and args.voice:
+            self.DEFAULT_VOICE = args.voice
         if not args.question:
             self.INTERACTIVE_MODE = True
         return self
