@@ -89,7 +89,7 @@ class AskLLM:
             }
 
             # Only add the stream argument if the client is HuggingFaceClient
-            if isinstance(self.client, HuggingFaceClient):
+            if type(self.client).__name__ == "HuggingFaceClient":
                 query_kwargs["stream"] = stream
 
             response = self.client.query(**query_kwargs)
@@ -103,7 +103,7 @@ class AskLLM:
                 global_config.TEMPERATURE = 0.9
 
                 # Re-query with adjusted temperature (using the same complete context)
-                if isinstance(self.client, HuggingFaceClient):
+                if type(self.client).__name__ == "HuggingFaceClient":
                      query_kwargs["stream"] = stream # Ensure stream kwarg is passed on retry
                 response = self.client.query(**query_kwargs)
                 global_config.TEMPERATURE = old_temp
