@@ -97,7 +97,11 @@ Respond using clean and properly formatted Markdown. Use the following formattin
 
     @computed_field
     def MODEL_OPTIONS(self) -> list[str]:
-        return self.OPENAPI_MODELS + self.OLLAMA_MODELS + self.HUGGINGFACE_MODELS
+        """Return all available models, excluding HuggingFace models if dependencies are missing."""
+        if is_huggingface_available():
+            return self.OPENAPI_MODELS + self.OLLAMA_MODELS + self.HUGGINGFACE_MODELS
+        else:
+            return self.OPENAPI_MODELS + self.OLLAMA_MODELS
 
     def update_from_args(self, args: Namespace) -> "Config":
         """Update config based on command line arguments"""

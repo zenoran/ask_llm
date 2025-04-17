@@ -6,7 +6,13 @@ from src.ask_llm.main import AskLLM
 
 # Import things that might be needed for mocking config/clients
 from src.ask_llm.utils.config import Config
-from src.ask_llm.clients import OpenAIClient, OllamaClient, HuggingFaceClient
+from src.ask_llm.clients import OpenAIClient, OllamaClient
+
+# Try to import HuggingFaceClient, but mock it if unavailable
+try:
+    from src.ask_llm.clients import HuggingFaceClient
+except ImportError:
+    HuggingFaceClient = MagicMock()  # Mock the HuggingFaceClient for tests
 
 
 # Mock client classes to prevent actual client initialization
@@ -15,6 +21,7 @@ def mock_clients():
     # Revert target back to where AskLLM looks up the names
     with patch('src.ask_llm.main.OpenAIClient', autospec=True) as mock_openai, \
          patch('src.ask_llm.main.OllamaClient', autospec=True) as mock_ollama, \
+         patch('src.ask_llm.main.is_huggingface_available', return_value=True), \
          patch('src.ask_llm.main.HuggingFaceClient', autospec=True) as mock_hf:
         yield {
             "openai": mock_openai,

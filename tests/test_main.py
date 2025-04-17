@@ -5,7 +5,14 @@ from unittest.mock import patch, MagicMock, call
 # Import the refactored functions and the validator class
 from src.ask_llm.main import parse_arguments, validate_model, ModelValidator
 # Import client classes for mocking
-from src.ask_llm.clients import OpenAIClient, OllamaClient, HuggingFaceClient
+from src.ask_llm.clients import OpenAIClient, OllamaClient
+
+# Try to import HuggingFaceClient, but mock it if unavailable
+try:
+    from src.ask_llm.clients import HuggingFaceClient
+except ImportError:
+    HuggingFaceClient = MagicMock()  # Mock the HuggingFaceClient for tests
+
 # No longer need to import the global config object here
 
 # --- Define Mock Models Globally for Reuse --- #
