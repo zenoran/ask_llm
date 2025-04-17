@@ -1,62 +1,30 @@
 import argparse
 import subprocess
 from ask_llm.utils.history import HistoryManager
-from ask_llm.utils.config import Config, config as global_config, is_huggingface_available
+from ask_llm.utils.config import Config, config as global_config
+from ask_llm.clients import OpenAIClient, OllamaClient, HuggingFaceClient
 from ask_llm.utils.input_handler import MultilineInputHandler
 from ask_llm.utils.ollama_utils import find_matching_model
 
 
-# Import clients only after checking availability
-from ask_llm.clients import OpenAIClient, OllamaClient
-
-
 class AskLLM:
-    def __init__(self):
-        self.model_id = global_config.DEFAULT_MODEL
+    def __init__(self, model_id=None):
+        self.model_id = model_id or global_config.DEFAULT_MODEL
         self.client = self.initialize_client()
         self.history_manager = HistoryManager(client=self.client)
         self.load_history()
 
     def initialize_client(self):
         model_id = self.model_id
-        
-        # Define client map based on available dependencies
+
         client_map = {
+            "huggingface": HuggingFaceClient,
             "ollama": OllamaClient,
             "openai": OpenAIClient,
         }
-        
-        # Only add HuggingFace client if dependencies are available
-        hf_available = is_huggingface_available()
-        if hf_available:
-            # Import only when available to avoid ImportError
-            from ask_llm.clients import HuggingFaceClient
-            client_map["huggingface"] = HuggingFaceClient
-        
-        # Determine model type
+
         if model_id in global_config.HUGGINGFACE_MODELS:
             model_type = "huggingface"
-            # Check if HuggingFace is available
-            if not hf_available:
-                self.client.console.print(
-                    "[bold yellow]Warning: HuggingFace dependencies not installed.[/bold yellow]"
-                ) if hasattr(self, 'client') else print(
-                    "Warning: HuggingFace dependencies not installed."
-                )
-                self.client.console.print(
-                    "[yellow]Install with: pip install ask_llm[huggingface][/yellow]"
-                ) if hasattr(self, 'client') else print(
-                    "Install with: pip install ask_llm[huggingface]"
-                )
-                # Fall back to default model
-                model_id = global_config.DEFAULT_MODEL if model_id != global_config.DEFAULT_MODEL else "gpt-4o"
-                # Re-determine model type
-                if model_id in global_config.OLLAMA_MODELS:
-                    model_type = "ollama"
-                elif model_id in global_config.OPENAPI_MODELS:
-                    model_type = "openai"
-                else:
-                    raise ValueError(f"Could not find a fallback model.")
         elif model_id in global_config.OLLAMA_MODELS:
             model_type = "ollama"
         elif model_id in global_config.OPENAPI_MODELS:
@@ -73,15 +41,26 @@ class AskLLM:
     def load_history(self):
         self.history_manager.load_history()
 
-    def query(self, prompt, plaintext_output: bool = False):
+    def query(self, prompt, plaintext_output: bool = False, stream: bool = True):
+        """Add user prompt, query client, handle retries, add assistant response."""
         try:
+            # Add the current user prompt to the history first
             self.history_manager.add_message("user", prompt)
-            context_messages = (
-                self.history_manager.get_context_messages_excluding_last()
-            )
-            response = self.client.query(
-                context_messages, prompt, plaintext_output=plaintext_output
-            )
+            # Get the complete context, including the message just added
+            complete_context_messages = self.history_manager.get_context_messages()
+
+            # Prepare kwargs for the client query using the complete context
+            query_kwargs = {
+                "messages": complete_context_messages,
+                # "prompt": prompt, # REMOVED - prompt is now the last item in messages
+                "plaintext_output": plaintext_output,
+            }
+
+            # Only add the stream argument if the client is HuggingFaceClient
+            if isinstance(self.client, HuggingFaceClient):
+                query_kwargs["stream"] = stream
+
+            response = self.client.query(**query_kwargs)
 
             last_response = self.history_manager.get_last_assistant_message()
             if last_response and response == last_response:
@@ -90,11 +69,14 @@ class AskLLM:
                 )
                 old_temp = global_config.TEMPERATURE
                 global_config.TEMPERATURE = 0.9
-                response = self.client.query(
-                    context_messages, prompt, plaintext_output=plaintext_output
-                )
+
+                # Re-query with adjusted temperature (using the same complete context)
+                if isinstance(self.client, HuggingFaceClient):
+                     query_kwargs["stream"] = stream # Ensure stream kwarg is passed on retry
+                response = self.client.query(**query_kwargs)
                 global_config.TEMPERATURE = old_temp
 
+            # Add the assistant response to history
             self.history_manager.add_message("assistant", response)
             return response
         except KeyboardInterrupt:
@@ -104,19 +86,23 @@ class AskLLM:
 def validate_model(model_name: str, current_config: Config = global_config) -> str:
     """
     Validate model name using the provided config object.
-    Returns the validated model name, or raises an ArgumentTypeError if invalid.
+    (Docstring content remains the same)
     """
-    # Check if it's a HuggingFace model but dependencies aren't available
-    if model_name in current_config.HUGGINGFACE_MODELS and not is_huggingface_available():
-        print(f"Warning: Model '{model_name}' requires Hugging Face dependencies.")
-        print("Install with: pip install ask_llm[huggingface]")
-        print("Falling back to default model.")
-        return current_config.DEFAULT_MODEL if current_config.DEFAULT_MODEL not in current_config.HUGGINGFACE_MODELS else "gpt-4o"
-    
     if model_name in current_config.MODEL_OPTIONS:
         return model_name
 
+    # Check OpenAI models for partial matches
+    matched_model = find_matching_model(model_name, current_config.OPENAPI_MODELS)
+    if matched_model:
+        return matched_model
+
+    # Check Ollama models for partial matches
     matched_model = find_matching_model(model_name, current_config.OLLAMA_MODELS)
+    if matched_model:
+        return matched_model
+        
+    # Check HuggingFace models for partial matches
+    matched_model = find_matching_model(model_name, current_config.HUGGINGFACE_MODELS)
     if matched_model:
         return matched_model
 
@@ -178,6 +164,12 @@ def parse_arguments(current_config: Config = global_config):
         default=False,
         help="Refresh available models in cache",
     )
+    parser.add_argument(
+        "--no-stream",
+        action="store_true",
+        default=False,
+        help="Disable streaming output (only affects HuggingFace models).",
+    )
     return parser.parse_args()
 
 
@@ -186,7 +178,7 @@ def main() -> None:
 
     global_config.update_from_args(args)
 
-    ask_llm = AskLLM()
+    ask_llm = AskLLM(model_id=args.model)
 
     if args.delete_history:
         ask_llm.history_manager.clear_history()
@@ -235,10 +227,10 @@ def main() -> None:
 
     if args.question:
         question_text = command_output_str + " ".join(args.question)
-        ask_llm.query(question_text.strip(), plaintext_output=args.plain)
+        ask_llm.query(question_text.strip(), plaintext_output=args.plain, stream=(not args.no_stream))
     elif command_output_str:
         ask_llm.client.console.print("Command output captured, querying LLM...")
-        ask_llm.query(command_output_str.strip(), plaintext_output=args.plain)
+        ask_llm.query(command_output_str.strip(), plaintext_output=args.plain, stream=(not args.no_stream))
     else:
         ask_llm.client.console.print(
             "[bold green]Entering interactive mode. Type 'exit' or 'quit' to leave.[/bold green]"
@@ -272,7 +264,7 @@ def main() -> None:
 
                 ask_llm.client.console.print()
                 if prompt_text.strip():
-                    ask_llm.query(prompt_text, plaintext_output=args.plain)
+                    ask_llm.query(prompt_text, plaintext_output=args.plain, stream=(not args.no_stream))
                 ask_llm.client.console.print()
 
             except (KeyboardInterrupt, EOFError):

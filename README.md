@@ -21,22 +21,9 @@ Ask LLM is a Python-based command-line tool for interacting with various languag
 - Python 3.12 or higher
 - For Hugging Face models: CUDA-compatible GPU
 
-### Basic Installation
-The basic installation includes support for OpenAI and Ollama models:
-
+### Installation as a Package
 ```bash
-# Install from GitHub
 pip install git+https://github.com/zenoran/ask_llm.git
-```
-
-### Installing with Optional Dependencies
-
-#### Hugging Face Support
-To use Hugging Face models locally, install with the huggingface extra:
-
-```bash
-# Install from GitHub
-pip install "git+https://github.com/zenoran/ask_llm.git#egg=ask_llm[huggingface]"
 ```
 
 The `huggingface` extra includes the following dependencies:
@@ -136,8 +123,6 @@ In interactive mode:
 - PygmalionAI/pygmalion-3-12b
 - Add other models by modifying the configuration
 
-**Note:** Hugging Face models are only available if you install the package with the `[huggingface]` extra. If you try to use a Hugging Face model without the required dependencies, the application will automatically fall back to the default model and display instructions for installing the necessary dependencies.
-
 ### Ollama
 Dynamically discovers available models from your local Ollama installation.
 
@@ -176,23 +161,10 @@ Ask LLM uses environment variables with the prefix `ASK_LLM_` for configuration:
 - `ASK_LLM_MAX_TOKENS`: Maximum tokens to generate (default: 1024)
 - `ASK_LLM_TEMPERATURE`: Temperature for generation (default: 0.8)
 
-## Error Handling and Graceful Degradation
-
-Ask LLM is designed to handle missing dependencies gracefully:
-
-- **Missing Hugging Face Dependencies**: If you attempt to use a Hugging Face model without installing the required dependencies, the application will:
-  - Display a warning message with instructions on how to install the dependencies
-  - Automatically fall back to the default model (OpenAI or Ollama)
-  - Continue operation without requiring immediate action
-
-- **Model Validation**: When specifying a model with the `-m` flag, the application validates if the required dependencies are available and provides helpful feedback if they're not.
-
-- **Available Models**: When listing available models (e.g., in error messages), only models with available dependencies are shown.
-
-This approach ensures that users can always use the application even if certain optional features aren't available, while making it clear how to enable those features if desired.
 
 ## Provides LLM access to other Python Apps
 Setting up the clients was also a means to providing future projects with LLM access in a way I have control over.  i.e. The SesameAI CSM TTS project I'm working on which uses this LLM to generate iterative stories from prompts and play the audio for listening or downloading from a web interface.
+
 
 ## License
 This project is licensed under the MIT License.
