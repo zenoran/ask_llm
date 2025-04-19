@@ -2,12 +2,16 @@ import pytest
 from argparse import Namespace, ArgumentTypeError
 from unittest.mock import patch, MagicMock, call
 import subprocess # Import subprocess
+import shutil
+from pathlib import Path
 
 # Import the refactored functions
 from src.ask_llm.cli import parse_arguments # Moved from main
-from src.ask_llm.model_manager import resolve_model_alias # Replaces validate_model
-from src.ask_llm.core import AskLLM # Moved from main
+from src.ask_llm.model_manager import ModelManager # Replaced resolve_model_alias
+from src.ask_llm.core import AskLLM # Removed DEFAULT_SYSTEM_PROMPT
 from src.ask_llm.utils.input_handler import MultilineInputHandler # Moved from main
+from src.ask_llm.utils.config import Config
+from src.ask_llm.utils.history import HistoryManager # Renamed from ChatHistoryManager
 
 # Import client classes for mocking
 from src.ask_llm.clients import OpenAIClient, OllamaClient
@@ -58,7 +62,7 @@ def mock_config_for_parse():
 def test_parse_arguments_defaults(mock_config_for_parse):
     """Test default argument values using injected mock config."""
     with patch('sys.argv', ['script_name']):
-        args = parse_arguments(current_config=mock_config_for_parse)
+        args = parse_arguments(config_obj=mock_config_for_parse)
     assert args.question == []
     assert args.verbose is False
     # Check against the DEFAULT_MODEL_ALIAS used in the fixture
@@ -76,30 +80,30 @@ def test_parse_arguments_simple_question(mock_config_for_parse):
     """Test parsing a simple question."""
     question = "What is the weather?"
     with patch('sys.argv', ['script_name', question]):
-        args = parse_arguments(current_config=mock_config_for_parse)
+        args = parse_arguments(config_obj=mock_config_for_parse)
     assert args.question == [question]
 
 def test_parse_arguments_flags(mock_config_for_parse):
     """Test parsing boolean flags."""
     with patch('sys.argv', ['script_name', '--verbose', '--plain']):
-        args = parse_arguments(current_config=mock_config_for_parse)
+        args = parse_arguments(config_obj=mock_config_for_parse)
     assert args.verbose is True
     assert args.plain is True
 
 def test_parse_arguments_history_flags(mock_config_for_parse):
     """Test parsing history-related flags."""
     with patch('sys.argv', ['script_name', '--delete-history']):
-        args = parse_arguments(current_config=mock_config_for_parse)
+        args = parse_arguments(config_obj=mock_config_for_parse)
     assert args.delete_history is True
     assert args.print_history is None
 
     with patch('sys.argv', ['script_name', '--print-history']):
-        args = parse_arguments(current_config=mock_config_for_parse)
+        args = parse_arguments(config_obj=mock_config_for_parse)
     assert args.delete_history is False
     assert args.print_history == -1
 
     with patch('sys.argv', ['script_name', '--print-history', '5']):
-        args = parse_arguments(current_config=mock_config_for_parse)
+        args = parse_arguments(config_obj=mock_config_for_parse)
     assert args.delete_history is False
     assert args.print_history == 5
 
@@ -107,35 +111,35 @@ def test_parse_arguments_command(mock_config_for_parse):
     """Test parsing the command argument."""
     command = "ls -l"
     with patch('sys.argv', ['script_name', '-c', command]):
-        args = parse_arguments(current_config=mock_config_for_parse)
+        args = parse_arguments(config_obj=mock_config_for_parse)
     assert args.command == command
 
 def test_parse_arguments_refresh_models_choices(mock_config_for_parse):
     """Test parsing the --refresh-models argument with choices."""
     with patch('sys.argv', ['script_name', '--refresh-models', 'openai']):
-        args = parse_arguments(current_config=mock_config_for_parse)
+        args = parse_arguments(config_obj=mock_config_for_parse)
     assert args.refresh_models == 'openai'
 
     with patch('sys.argv', ['script_name', '--refresh-models', 'ollama']):
-        args = parse_arguments(current_config=mock_config_for_parse)
+        args = parse_arguments(config_obj=mock_config_for_parse)
     assert args.refresh_models == 'ollama'
 
     # Test invalid choice (argparse handles this)
     with patch('sys.argv', ['script_name', '--refresh-models', 'invalid']):
         with pytest.raises(SystemExit):
-            parse_arguments(current_config=mock_config_for_parse)
+            parse_arguments(config_obj=mock_config_for_parse)
 
 def test_parse_arguments_delete_model(mock_config_for_parse):
     """Test parsing the --delete-model flag."""
     alias_to_delete = "some_alias"
     with patch('sys.argv', ['script_name', '--delete-model', alias_to_delete]):
-        args = parse_arguments(current_config=mock_config_for_parse)
+        args = parse_arguments(config_obj=mock_config_for_parse)
     assert args.delete_model == alias_to_delete
 
 # === Tests for main function execution paths ===
 
 # Import main and necessary functions/classes for patching
-from src.ask_llm.main import main
+from ask_llm.cli import main # Import main from cli instead of main.py
 from argparse import Namespace
 
 @pytest.fixture
@@ -152,35 +156,36 @@ def mock_ask_llm_instance():
 def patch_main_dependencies(mocker, mock_ask_llm_instance):
     """Patches dependencies used directly by the main function."""
     # Patch parse_arguments (now imported from cli)
-    mock_parse = mocker.patch('src.ask_llm.main.parse_arguments')
+    mock_parse = mocker.patch('ask_llm.cli.parse_arguments') # Target cli
     
-    # Mock config (patch global import)
+    # Mock config (patch global import in cli if needed, or pass instance)    
     mock_config = create_mock_config()
     mock_config.update_from_args = MagicMock(return_value=mock_config)
-    mocker.patch('src.ask_llm.main.global_config', mock_config)
+    mocker.patch('ask_llm.main.global_config', mock_config) # Removed global patch (use cli.Config)
 
-    # Patch functions called for action flags
-    mock_list_models = mocker.patch('src.ask_llm.main.list_available_models')
-    mock_add_gguf = mocker.patch('src.ask_llm.main.handle_add_gguf')
-    mock_update_openai = mocker.patch('src.ask_llm.main.update_openai_models_from_api')
-    mock_delete_model = mocker.patch('src.ask_llm.main.delete_model_from_config')
+    # Patch functions called for action flags (target cli module)
+    mock_list_models = mocker.patch('ask_llm.cli.list_models')
+    mock_add_gguf = mocker.patch('ask_llm.cli.handle_add_gguf')
+    # The old update_openai function seems replaced by update_models_interactive
+    mock_update_models = mocker.patch('ask_llm.cli.update_models_interactive') 
+    mock_delete_model = mocker.patch('ask_llm.cli.delete_model')
 
-    # Patch resolve_model_alias (return value set per test)
-    mock_resolve = mocker.patch('src.ask_llm.main.resolve_model_alias')
+    # Patch resolve_model_alias placeholder (will use ModelManager instance mock in tests)
+    mock_resolve = MagicMock()
 
-    # Patch run_app (now imported from cli)
-    mock_run_app = mocker.patch('src.ask_llm.main.run_app')
+    # Patch run_app (target cli module)
+    mock_run_app = mocker.patch('ask_llm.cli.run_app') 
     
-    # Patch sys.exit to prevent test termination
-    mock_exit = mocker.patch('sys.exit')
+    # Patch sys.exit in cli module so calls to sys.exit() in main() are intercepted
+    mock_exit = mocker.patch('ask_llm.cli.sys.exit')
 
     return {
         'parse_arguments': mock_parse,
         'config': mock_config,
-        'list_available_models': mock_list_models,
+        'list_available_models': mock_list_models, # Key name kept for compatibility
         'handle_add_gguf': mock_add_gguf,
-        'update_openai_models_from_api': mock_update_openai,
-        'delete_model_from_config': mock_delete_model,
+        'update_models_interactive': mock_update_models, # New key name
+        'delete_model_from_config': mock_delete_model, # Key name kept
         'resolve_model_alias': mock_resolve,
         'run_app': mock_run_app,
         'sys_exit': mock_exit
@@ -211,11 +216,25 @@ def test_main_simple_question(patch_main_dependencies):
     mock_args = create_default_mock_args(question=["Hello"], model='gpt4o')
     patch_main_dependencies['parse_arguments'].return_value = mock_args
     patch_main_dependencies['resolve_model_alias'].return_value = 'gpt4o'
-    main()
+    
+    # Call main (adjust if main's structure changed)
+    # We might need to mock Config instantiation if main creates it
+    with patch('ask_llm.cli.Config', return_value=patch_main_dependencies['config']) as mock_config_init, \
+         patch('ask_llm.cli.ModelManager') as mock_model_manager_class: # Patch ModelManager
+        
+        # Configure the mock ModelManager instance
+        mock_manager_instance = mock_model_manager_class.return_value
+        mock_manager_instance.resolve_model_alias.return_value = 'gpt4o'
+        # Re-patch the specific mock instance might be more robust here
+        patch_main_dependencies['resolve_model_alias'] = mock_manager_instance.resolve_model_alias
+
+        main() # Call the cli.main directly
+
     patch_main_dependencies['parse_arguments'].assert_called_once()
-    patch_main_dependencies['config'].update_from_args.assert_called_once_with(mock_args)
-    patch_main_dependencies['resolve_model_alias'].assert_called_once()
-    patch_main_dependencies['run_app'].assert_called_once_with(args=mock_args, config=patch_main_dependencies['config'], resolved_alias='gpt4o')
+    # Check that resolve_model_alias on the model_manager instance was called
+    mock_manager_instance.resolve_model_alias.assert_called_once_with(mock_args.model)
+    # Assert run_app was called with positional args
+    patch_main_dependencies['run_app'].assert_called_once_with(mock_args, patch_main_dependencies['config'], 'gpt4o')
     patch_main_dependencies['sys_exit'].assert_called_once_with(0)
 
 def test_main_list_models(patch_main_dependencies):
@@ -226,7 +245,8 @@ def test_main_list_models(patch_main_dependencies):
     # Reset sys_exit mock to clear any previous calls
     patch_main_dependencies['sys_exit'].reset_mock()
     
-    main()
+    with patch('ask_llm.cli.Config', return_value=patch_main_dependencies['config']): # Mock Config instantiation
+        main() # Call the cli.main directly
     patch_main_dependencies['list_available_models'].assert_called_once_with(patch_main_dependencies['config'])
     
     # Assert sys_exit was called with 0
@@ -237,11 +257,13 @@ def test_main_add_gguf(patch_main_dependencies):
     # Use helper to create args, override add_gguf
     mock_args = create_default_mock_args(add_gguf=repo_id)
     patch_main_dependencies['parse_arguments'].return_value = mock_args
+    patch_main_dependencies['handle_add_gguf'].return_value = True # Assume success
     
     # Reset sys_exit mock to clear any previous calls
     patch_main_dependencies['sys_exit'].reset_mock()
     
-    main()
+    with patch('ask_llm.cli.Config', return_value=patch_main_dependencies['config']): # Mock Config instantiation
+        main() # Call the cli.main directly
     patch_main_dependencies['handle_add_gguf'].assert_called_once_with(repo_id, patch_main_dependencies['config'])
     
     # Assert sys_exit was called with 0
@@ -251,13 +273,14 @@ def test_main_refresh_openai(patch_main_dependencies):
     # Use helper, override refresh_models
     mock_args = create_default_mock_args(refresh_models='openai')
     patch_main_dependencies['parse_arguments'].return_value = mock_args
-    patch_main_dependencies['update_openai_models_from_api'].return_value = True
+    patch_main_dependencies['update_models_interactive'].return_value = True
     
     # Reset sys_exit mock to clear any previous calls
     patch_main_dependencies['sys_exit'].reset_mock()
     
-    main()
-    patch_main_dependencies['update_openai_models_from_api'].assert_called_once_with(patch_main_dependencies['config'])
+    with patch('ask_llm.cli.Config', return_value=patch_main_dependencies['config']): # Mock Config instantiation
+        main() # Call the cli.main directly
+    patch_main_dependencies['update_models_interactive'].assert_called_once_with(patch_main_dependencies['config'], provider='openai')
     
     # Assert sys_exit was called with 0
     patch_main_dependencies['sys_exit'].assert_called_with(0)
@@ -266,11 +289,14 @@ def test_main_refresh_ollama(patch_main_dependencies):
     # Use helper, override refresh_models
     mock_args = create_default_mock_args(refresh_models='ollama')
     patch_main_dependencies['parse_arguments'].return_value = mock_args
+    patch_main_dependencies['update_models_interactive'].return_value = True # Assume success
     
     # Reset sys_exit mock to clear any previous calls
     patch_main_dependencies['sys_exit'].reset_mock()
     
-    main()
+    with patch('ask_llm.cli.Config', return_value=patch_main_dependencies['config']): # Mock Config instantiation
+        main() # Call the cli.main directly
+    patch_main_dependencies['update_models_interactive'].assert_called_once_with(patch_main_dependencies['config'], provider='ollama')
     
     # Assert sys_exit was called with 0
     patch_main_dependencies['sys_exit'].assert_called_with(0)
@@ -285,7 +311,8 @@ def test_main_delete_model(patch_main_dependencies):
     # Reset sys_exit mock to clear any previous calls
     patch_main_dependencies['sys_exit'].reset_mock()
     
-    main()
+    with patch('ask_llm.cli.Config', return_value=patch_main_dependencies['config']): # Mock Config instantiation
+        main() # Call the cli.main directly
     patch_main_dependencies['delete_model_from_config'].assert_called_once_with(alias, patch_main_dependencies['config'])
     
     # Assert sys_exit was called with 0
@@ -293,96 +320,126 @@ def test_main_delete_model(patch_main_dependencies):
 
 def test_main_resolve_alias_fails(patch_main_dependencies):
     """Test main pathway when resolve_model_alias returns None."""
-    pytest.skip("Skipping this test due to issues with mocking in the right order - needs further investigation")
+    mock_args = create_default_mock_args(model='bad-alias')
+    patch_main_dependencies['parse_arguments'].return_value = mock_args
     
-    # Create a direct mock of main module functions
-    from src.ask_llm.main import main
+    # Patch ModelManager constructor to return our specific mock instance
+    mock_manager_instance = MagicMock()
+    mock_manager_instance.resolve_model_alias.return_value = None
     
-    # Explicitly patch the specific function we need to test
-    with patch('src.ask_llm.main.run_app') as mock_run_app, \
-         patch('src.ask_llm.main.sys.exit') as mock_exit, \
-         patch('src.ask_llm.main.resolve_model_alias', return_value=None) as mock_resolve_alias, \
-         patch('src.ask_llm.main.parse_arguments') as mock_parse_args:
+    with patch('ask_llm.cli.Config', return_value=patch_main_dependencies['config']), \
+         patch('ask_llm.cli.ModelManager', return_value=mock_manager_instance) as mock_model_manager_ctor: # Patch constructor
         
-        # Setup mock args
-        mock_args = create_default_mock_args(model='bad-alias')
-        mock_parse_args.return_value = mock_args
+        main() # Call the cli.main directly
         
-        # Run the main function directly with our patched functions
-        main()
-        
-        # Test that run_app was not called
-        mock_run_app.assert_not_called()
-        
-        # Test that sys.exit was called with 1
-        mock_exit.assert_called_once_with(1)
-        
-        # Test that resolve_model_alias was called with the right args
-        mock_resolve_alias.assert_called_once_with('bad-alias', patch_main_dependencies['config'])
+    # Assertions *after* main() is called
+    mock_model_manager_ctor.assert_called_once_with(patch_main_dependencies['config']) # Check manager init
+    mock_manager_instance.resolve_model_alias.assert_called_once_with('bad-alias') # Check resolve call
+    patch_main_dependencies['run_app'].assert_not_called() # Should pass now
+    patch_main_dependencies['sys_exit'].assert_called_once_with(1)
+
+# --- Tests for other main paths (delete_history, print_history, command, interactive) ---
+# These tests primarily assert that run_app is called correctly, so the patching 
+# of run_app should be sufficient if main() logic correctly passes args/config.
+# We might need to add the Config instantiation mock as done in other tests.
 
 def test_main_delete_history_path(patch_main_dependencies):
     """Test main pathway when --delete-history is used."""
-    # Use helper, override delete_history
     mock_args = create_default_mock_args(delete_history=True)
     patch_main_dependencies['parse_arguments'].return_value = mock_args
-    patch_main_dependencies['resolve_model_alias'].return_value = 'gpt4o'
-    main()
-    patch_main_dependencies['run_app'].assert_called_once_with(args=mock_args, config=patch_main_dependencies['config'], resolved_alias='gpt4o')
+    # patch_main_dependencies['resolve_model_alias\'].return_value = \'gpt4o\' # Don't preset globally
+    with patch('ask_llm.cli.Config', return_value=patch_main_dependencies['config']), \
+         patch('ask_llm.cli.ModelManager') as mock_model_manager_class:
+        mock_manager_instance = mock_model_manager_class.return_value
+        mock_manager_instance.resolve_model_alias.return_value = 'gpt4o' # Mock resolve for this path
+        # patch_main_dependencies['resolve_model_alias\'] = mock_manager_instance.resolve_model_alias # Not needed
+        main() # Call the cli.main directly
+    mock_manager_instance.resolve_model_alias.assert_called_once_with(mock_args.model)
+    # Assert run_app was called with positional args
+    patch_main_dependencies['run_app'].assert_called_once_with(mock_args, patch_main_dependencies['config'], 'gpt4o')
     patch_main_dependencies['sys_exit'].assert_called_once_with(0)
 
 def test_main_print_history_path(patch_main_dependencies):
     """Test main pathway when --print-history is used."""
-    # Use helper, override print_history
     mock_args = create_default_mock_args(print_history=5)
     patch_main_dependencies['parse_arguments'].return_value = mock_args
-    patch_main_dependencies['resolve_model_alias'].return_value = 'gpt4o'
-    main()
-    patch_main_dependencies['run_app'].assert_called_once_with(args=mock_args, config=patch_main_dependencies['config'], resolved_alias='gpt4o')
+    # patch_main_dependencies['resolve_model_alias\'].return_value = \'gpt4o\'
+    with patch('ask_llm.cli.Config', return_value=patch_main_dependencies['config']), \
+         patch('ask_llm.cli.ModelManager') as mock_model_manager_class:
+        mock_manager_instance = mock_model_manager_class.return_value
+        mock_manager_instance.resolve_model_alias.return_value = 'gpt4o'
+        # patch_main_dependencies['resolve_model_alias\'] = mock_manager_instance.resolve_model_alias
+        main() # Call the cli.main directly
+    mock_manager_instance.resolve_model_alias.assert_called_once_with(mock_args.model)
+    # Assert run_app was called with positional args
+    patch_main_dependencies['run_app'].assert_called_once_with(mock_args, patch_main_dependencies['config'], 'gpt4o')
     patch_main_dependencies['sys_exit'].assert_called_once_with(0)
 
 def test_main_command_path(patch_main_dependencies):
     """Test main pathway when -c command is used."""
-    # Use helper, override command
     mock_args = create_default_mock_args(command="echo hello")
     patch_main_dependencies['parse_arguments'].return_value = mock_args
-    patch_main_dependencies['resolve_model_alias'].return_value = 'gpt4o'
-    main()
-    patch_main_dependencies['run_app'].assert_called_once_with(args=mock_args, config=patch_main_dependencies['config'], resolved_alias='gpt4o')
+    # patch_main_dependencies['resolve_model_alias\'].return_value = \'gpt4o\'
+    with patch('ask_llm.cli.Config', return_value=patch_main_dependencies['config']), \
+         patch('ask_llm.cli.ModelManager') as mock_model_manager_class:
+        mock_manager_instance = mock_model_manager_class.return_value
+        mock_manager_instance.resolve_model_alias.return_value = 'gpt4o'
+        # patch_main_dependencies['resolve_model_alias\'] = mock_manager_instance.resolve_model_alias
+        main() # Call the cli.main directly
+    mock_manager_instance.resolve_model_alias.assert_called_once_with(mock_args.model)
+    # Assert run_app was called with positional args
+    patch_main_dependencies['run_app'].assert_called_once_with(mock_args, patch_main_dependencies['config'], 'gpt4o')
     patch_main_dependencies['sys_exit'].assert_called_once_with(0)
 
 def test_main_interactive_path(patch_main_dependencies):
     """Test main pathway when no question or command leads to interactive."""
-    # Use helper, default question=[] and command=None leads to interactive
-    mock_args = create_default_mock_args() 
+    mock_args = create_default_mock_args()
     patch_main_dependencies['parse_arguments'].return_value = mock_args
-    patch_main_dependencies['resolve_model_alias'].return_value = 'gpt4o'
-    main()
-    patch_main_dependencies['run_app'].assert_called_once_with(args=mock_args, config=patch_main_dependencies['config'], resolved_alias='gpt4o')
+    # patch_main_dependencies['resolve_model_alias\'].return_value = \'gpt4o\'
+    with patch('ask_llm.cli.Config', return_value=patch_main_dependencies['config']), \
+         patch('ask_llm.cli.ModelManager') as mock_model_manager_class:
+        mock_manager_instance = mock_model_manager_class.return_value
+        mock_manager_instance.resolve_model_alias.return_value = 'gpt4o'
+        # patch_main_dependencies['resolve_model_alias\'] = mock_manager_instance.resolve_model_alias
+        main() # Call the cli.main directly
+    mock_manager_instance.resolve_model_alias.assert_called_once_with(mock_args.model)
+    # Assert run_app was called with positional args
+    patch_main_dependencies['run_app'].assert_called_once_with(mock_args, patch_main_dependencies['config'], 'gpt4o')
     patch_main_dependencies['sys_exit'].assert_called_once_with(0)
 
 def test_main_run_app_exception(patch_main_dependencies):
     """Test main handling when run_app raises an exception."""
-    # Use helper
     mock_args = create_default_mock_args(question=["Hi"])
     patch_main_dependencies['parse_arguments'].return_value = mock_args
     patch_main_dependencies['resolve_model_alias'].return_value = 'gpt4o'
     patch_main_dependencies['run_app'].side_effect = Exception("Run app failed")
-    with patch('traceback.print_exc') as mock_traceback:
-        main()
+    # Mock config VERBOSE for the try/except block in main
+    patch_main_dependencies['config'].VERBOSE = False 
+    with patch('ask_llm.cli.Config', return_value=patch_main_dependencies['config']), \
+         patch('ask_llm.cli.ModelManager') as mock_model_manager_class, \
+         patch('traceback.print_exc') as mock_traceback:
+        mock_manager_instance = mock_model_manager_class.return_value
+        mock_manager_instance.resolve_model_alias.return_value = 'gpt4o'
+        patch_main_dependencies['resolve_model_alias'] = mock_manager_instance.resolve_model_alias
+        main() # Call the cli.main directly
     patch_main_dependencies['run_app'].assert_called_once()
     patch_main_dependencies['sys_exit'].assert_called_once_with(1)
     mock_traceback.assert_not_called()
 
 def test_main_run_app_exception_verbose(patch_main_dependencies):
     """Test main handling when run_app raises an exception in verbose mode."""
-    # Use helper, override verbose
     mock_args = create_default_mock_args(question=["Hi"], verbose=True)
     patch_main_dependencies['parse_arguments'].return_value = mock_args
     patch_main_dependencies['resolve_model_alias'].return_value = 'gpt4o'
     patch_main_dependencies['run_app'].side_effect = Exception("Run app failed")
-    patch_main_dependencies['config'].VERBOSE = True
-    with patch('traceback.print_exc') as mock_traceback:
-        main()
+    patch_main_dependencies['config'].VERBOSE = True # Ensure config mock reflects verbose
+    with patch('ask_llm.cli.Config', return_value=patch_main_dependencies['config']), \
+         patch('ask_llm.cli.ModelManager') as mock_model_manager_class, \
+         patch('traceback.print_exc') as mock_traceback:
+        mock_manager_instance = mock_model_manager_class.return_value
+        mock_manager_instance.resolve_model_alias.return_value = 'gpt4o'
+        patch_main_dependencies['resolve_model_alias'] = mock_manager_instance.resolve_model_alias
+        main() # Call the cli.main directly
     patch_main_dependencies['run_app'].assert_called_once()
     patch_main_dependencies['sys_exit'].assert_called_once_with(1)
     mock_traceback.assert_called_once() 

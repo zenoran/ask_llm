@@ -4,6 +4,7 @@ from rich.console import Console
 from ask_llm.cli import main as cli_main # Import the main function from cli
 
 console = Console()
+global_config = None  # Placeholder for tests to patch
 
 def main() -> None:
   

@@ -90,8 +90,11 @@ def test_ask_llm_init(mock_global_config, mock_clients, mock_history_manager):
         mock_init_client.assert_called_once()
         # Check load_history was called on the instance
         mock_load_hist.assert_called_once()
-        # Check HistoryManager was called with the client from initialize_client
-        mock_hm_class.assert_called_once_with(client=mock_init_client.return_value)
+        # Check HistoryManager was called with the client and config
+        mock_hm_class.assert_called_once_with(client=mock_init_client.return_value, config=mock_global_config)
+
+        # Verify attributes
+        assert instance.resolved_model_alias == mock_global_config.DEFAULT_MODEL_ALIAS
 
 
 @pytest.mark.parametrize(
@@ -125,7 +128,7 @@ def test_ask_llm_initialize_client(
                 instance = AskLLM(resolved_model_alias=resolved_alias, config=mock_global_config)
             
             # Check if OllamaClient was initialized correctly
-            patched_ollama.assert_called_once_with(model_name=model_id, config=mock_global_config)
+            patched_ollama.assert_called_once_with(model=model_id, config=mock_global_config)
             # Set the client to the mock return value for the assertion below
             instance.client = patched_ollama.return_value
     else:
@@ -141,11 +144,11 @@ def test_ask_llm_initialize_client(
         # Assert that the expected client class was instantiated 
         # Check for the specific client type's initialization logic
         if expected_client_mock_key == "openai":
-            # OpenAIClient(model_id)
-            mock_client_class.assert_called_once_with(model_id)
+            # OpenAIClient(model_id, config=config)
+            mock_client_class.assert_called_once_with(model_id, config=mock_global_config)
         elif expected_client_mock_key == "huggingface":
-            # HuggingFaceClient(model_id=model_id)
-            mock_client_class.assert_called_once_with(model_id=model_id)
+            # HuggingFaceClient(model_id=model_id, config=config)
+            mock_client_class.assert_called_once_with(model_id=model_id, config=mock_global_config)
 
     # Assert that the instance's client attribute is the instance of the correct client
     if expected_client_mock_key != "ollama":
@@ -210,7 +213,7 @@ def test_ask_llm_query_simple(
     # --- Assertions --- #
     assert response == expected_response
     # Verify AskLLM initialized the correct (mocked) client class
-    mock_hf_client_class.assert_called_once_with(model_id="mock-hf")
+    mock_hf_client_class.assert_called_once_with(model_id="mock-hf", config=mock_global_config)
     # Verify the instance created is the one we configured
     assert instance.client == mock_client_instance
 
@@ -273,7 +276,7 @@ def test_ask_llm_query_duplicate_response(
     # --- Assertions --- #
     assert response == final_response
     # Verify AskLLM initialized the correct (mocked) client class
-    mock_hf_client_class.assert_called_once_with(model_id="mock-hf")
+    mock_hf_client_class.assert_called_once_with(model_id="mock-hf", config=mock_global_config)
     # Verify the instance created is the one we configured
     assert instance.client == mock_client_instance
 
@@ -333,7 +336,7 @@ def test_ask_llm_query_keyboard_interrupt(
     # --- Assertions --- #
     assert response == "" # Query should return empty string on interrupt
     # Verify AskLLM initialized the correct (mocked) client class
-    mock_hf_client_class.assert_called_once_with(model_id="mock-hf")
+    mock_hf_client_class.assert_called_once_with(model_id="mock-hf", config=mock_global_config)
     # Verify the instance created is the one we configured
     assert instance.client == mock_client_instance
 

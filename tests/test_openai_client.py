@@ -5,310 +5,223 @@ import json
 
 from src.ask_llm.clients.openai_client import OpenAIClient
 from src.ask_llm.models.message import Message
+from src.ask_llm.utils.config import Config
+from src.ask_llm.clients.base import LLMClient
 
 class TestOpenAIClient:
     """Test suite for OpenAIClient class."""
     
     @pytest.fixture
-    def mock_openai_client(self):
-        """Fixture for a mock OpenAI client with API key patched."""
+    def mock_config_obj(self):
+        """Provides a standard mock Config object for OpenAI tests."""
+        mock_cfg = MagicMock(spec=Config) # Use spec=Config for better mocking
+        mock_cfg.VERBOSE = False
+        mock_cfg.PLAIN_OUTPUT = False
+        mock_cfg.NO_STREAM = False
+        mock_cfg.MAX_TOKENS = 100
+        mock_cfg.TEMPERATURE = 0.7
+        mock_cfg.TOP_P = 0.9
+        mock_cfg.SYSTEM_MESSAGE = "Test System Prompt"
+        return mock_cfg
+
+    @pytest.fixture
+    def mock_openai_api(self):
+        """Mocks the openai.OpenAI client constructor."""
+        with patch('src.ask_llm.clients.openai_client.OpenAI') as mock_openai_constructor:
+            yield mock_openai_constructor
+
+    @pytest.fixture
+    def client(self, mock_config_obj, mock_openai_api):
+        """Provides an initialized OpenAIClient instance with mocked dependencies."""
         with patch.dict(os.environ, {"OPENAI_API_KEY": "test-api-key"}):
-            # Mock the OpenAI client constructor before instantiating our client
-            with patch('openai.OpenAI') as mock_openai_class:
-                # Set up completions mock
-                mock_openai_instance = MagicMock()
-                mock_chat = MagicMock()
-                mock_completions = MagicMock()
-                
-                # Build the object chain
-                mock_openai_instance.chat = mock_chat
-                mock_chat.completions = mock_completions
-                
-                # Return our mock instance when OpenAI() is called
-                mock_openai_class.return_value = mock_openai_instance
-                
-                client = OpenAIClient("gpt-4o")
-                
-                # Override the internal client to use our mock
-                client.client = mock_openai_instance
-                
-                yield client, mock_openai_class
-    
-    def test_init(self):
+            # Pass the mock config to the constructor
+            instance = OpenAIClient(model="gpt-4o", config=mock_config_obj) 
+            instance.client = mock_openai_api.return_value # Ensure instance uses mocked OpenAI client
+            return instance
+
+    def test_init(self, mock_config_obj, mock_openai_api):
         """Test client initialization and API key retrieval."""
         with patch.dict(os.environ, {"OPENAI_API_KEY": "test-api-key"}):
-            with patch('openai.OpenAI'):  # Just mock the constructor to avoid API calls
-                client = OpenAIClient("gpt-4o")
-                assert client.model == "gpt-4o"
-                assert client.api_key == "test-api-key"
-    
-    def test_init_missing_api_key(self):
+            client = OpenAIClient("gpt-4o", config=mock_config_obj)
+            assert client.model == "gpt-4o"
+            assert client.config == mock_config_obj
+            assert client.api_key == "test-api-key"
+            mock_openai_api.assert_called_once_with(api_key="test-api-key")
+
+    def test_init_missing_api_key(self, mock_config_obj):
         """Test exception when API key is missing."""
         with patch.dict(os.environ, {}, clear=True):
-            with pytest.raises(Exception, match="Please set your OPENAI_API_KEY environment variable"):
-                OpenAIClient("gpt-4o")
+            with pytest.raises(ValueError, match="OpenAI API key not found"):
+                OpenAIClient("gpt-4o", config=mock_config_obj)
     
-    def test_prepare_api_messages(self, mock_openai_client):
-        """Test preparation of API messages format."""
-        client, _ = mock_openai_client
+    def test_prepare_api_messages(self, client: OpenAIClient, mock_config_obj):
+        """Test that messages are formatted correctly for the API."""
         messages = [
             Message("user", "Hello"),
             Message("assistant", "Hi there"),
+            Message("user", "How are you?")
         ]
-        prompt = "How are you?"
+        # Set system message on the specific mock config used by the client fixture
+        mock_config_obj.SYSTEM_MESSAGE = "Be helpful."
         
-        # Prepare expected result WITHOUT the prompt explicitly added here
-        expected = [
+        # The client fixture already has the correct config
+        api_messages = client._prepare_api_messages(messages)
+        
+        assert api_messages[0] == {"role": "system", "content": "Be helpful."}
+        assert api_messages[1:] == [
             {"role": "user", "content": "Hello"},
             {"role": "assistant", "content": "Hi there"},
+            {"role": "user", "content": "How are you?"}
         ]
-        
-        # Call the method under test without the prompt argument
-        result = client._prepare_api_messages(messages)
-        assert result == expected
-    
-    def test_query(self, mock_openai_client):
-        """Test the query method with streaming response."""
-        client, _ = mock_openai_client
-        
-        messages = [Message("user", "Hello")]
-        prompt = "Test prompt"
-        
-        with patch.object(client, '_prepare_api_messages') as mock_prepare:
-            with patch.object(client, '_stream_response') as mock_stream:
-                mock_prepare.return_value = [{"role": "user", "content": "Test"}]
-                mock_stream.return_value = "Response from the model"
-                
-                result = client.query(messages, prompt)
-                
-                # Assert _prepare_api_messages was called with messages only
-                mock_prepare.assert_called_once_with(messages)
-                mock_stream.assert_called_once()
-                # The arguments passed to _stream_response would be the result of _prepare_api_messages
-                assert result == "Response from the model"
-    
-    def test_stream_response_success(self, mock_openai_client):
-        """Test successful streaming response from OpenAI."""
-        client, _ = mock_openai_client
-        api_messages = [{"role": "user", "content": "Hello"}]
-        
-        # Setup mock response data
-        mock_chunk1 = MagicMock()
-        mock_chunk1.choices = [MagicMock()]
-        mock_chunk1.choices[0].delta.content = "Hello"
-        
-        mock_chunk2 = MagicMock()
-        mock_chunk2.choices = [MagicMock()]
-        mock_chunk2.choices[0].delta.content = " world"
-        
-        # Configure the mock chat completions create method
-        client.client.chat.completions.create.return_value = [mock_chunk1, mock_chunk2]
-        
-        # Mock _handle_streaming_output
-        with patch.object(client, '_handle_streaming_output') as mock_handle:
-            mock_handle.return_value = "Hello world"
-            
-            # Set config.VERBOSE to False for this test
-            with patch('src.ask_llm.clients.openai_client.config') as mock_config:
-                mock_config.VERBOSE = False
-                
-                result = client._stream_response(api_messages)
-                
-                # Check that create was called with the right arguments
-                client.client.chat.completions.create.assert_called_once_with(
-                    model="gpt-4o", 
-                    messages=api_messages, 
-                    stream=True, 
-                    store=False
-                )
-                
-                # Verify the streaming handler was called
-                mock_handle.assert_called_once()
-                assert not mock_handle.call_args[1]["plaintext_output"]
-                assert mock_handle.call_args[1]["first_para_panel"]
-                
-                assert result == "Hello world"
-    
-    def test_stream_response_verbose(self, mock_openai_client):
-        """Test stream response with verbose mode enabled."""
-        client, _ = mock_openai_client
-        api_messages = [{"role": "user", "content": "Hello"}]
-        
-        # Setup mock response data
-        mock_chunk1 = MagicMock()
-        mock_chunk1.choices = [MagicMock()]
-        mock_chunk1.choices[0].delta.content = "Hello"
-        
-        # Configure the mock chat completions create method
-        client.client.chat.completions.create.return_value = [mock_chunk1]
-        
-        # Mock _handle_streaming_output
-        with patch.object(client, '_handle_streaming_output') as mock_handle:
-            mock_handle.return_value = "Hello"
-            
-            # Set config.VERBOSE to True for this test
-            with patch('src.ask_llm.clients.openai_client.config') as mock_config:
-                mock_config.VERBOSE = True
-                
-                # Mock console.print_json
-                with patch.object(client.console, 'print_json') as mock_print_json:
-                    result = client._stream_response(api_messages)
-                    
-                    # Verify print_json was called with the API messages as JSON
-                    mock_print_json.assert_called_once()
-                    
-                    # Verify the result
-                    assert result == "Hello"
-    
-    def test_stream_response_with_empty_content(self, mock_openai_client):
-        """Test streaming when some chunks have empty content."""
-        client, _ = mock_openai_client
-        api_messages = [{"role": "user", "content": "Hello"}]
-        
-        # Create chunks with None and empty content
-        mock_chunk1 = MagicMock()
-        mock_chunk1.choices = [MagicMock()]
-        mock_chunk1.choices[0].delta.content = None
-        
-        mock_chunk2 = MagicMock()
-        mock_chunk2.choices = [MagicMock()]
-        mock_chunk2.choices[0].delta.content = ""
-        
-        mock_chunk3 = MagicMock()
-        mock_chunk3.choices = [MagicMock()]
-        mock_chunk3.choices[0].delta.content = "Valid content"
-        
-        # Configure the mock chat completions to return our chunks
-        client.client.chat.completions.create.return_value = [mock_chunk1, mock_chunk2, mock_chunk3]
-        
-        # Mock the _handle_streaming_output method
-        with patch.object(client, '_handle_streaming_output') as mock_handle:
-            mock_handle.return_value = "Valid content"
-            
-            with patch('src.ask_llm.clients.openai_client.config') as mock_config:
-                mock_config.VERBOSE = False
-                
-                result = client._stream_response(api_messages)
-                
-                # The iterator passed to handle_streaming_output should only yield the valid content
-                # and skip None/empty content
-                assert result == "Valid content"
-    
-    def test_stream_response_error(self, mock_openai_client):
-        """Test error handling in stream response."""
-        client, _ = mock_openai_client
-        api_messages = [{"role": "user", "content": "Hello"}]
-        
-        # Make the API call raise an exception
-        client.client.chat.completions.create.side_effect = Exception("API error")
-        
-        # Mock the console.print method
-        with patch.object(client.console, 'print') as mock_print:
-            result = client._stream_response(api_messages)
-            
-            # Verify error message was printed
-            mock_print.assert_called_with(
-                "[bold red]Error making OpenAI API request:[/bold red] API error"
-            )
-            
-            # Verify error result
-            assert result == "ERROR: API error"
-    
-    def test_iterate_openai_chunks_exception(self, mock_openai_client):
-        """Test handling of exceptions during streaming."""
-        client, _ = mock_openai_client
-        
-        # Configure the API client to raise an exception when create is called
-        client.client.chat.completions.create.side_effect = Exception("Stream error")
-        
-        # Call the stream_response method
-        with patch.object(client.console, 'print') as mock_print:
-            result = client._stream_response([{"role": "user", "content": "Hello"}])
-            
-            # Verify the error message was printed
-            mock_print.assert_called_with(
-                "[bold red]Error making OpenAI API request:[/bold red] Stream error"
-            )
-            
-            # Verify the error result
-            assert result == "ERROR: Stream error"
-    
-    def test_stream_response_keyboard_interrupt(self, mock_openai_client):
-        """Test handling of KeyboardInterrupt during streaming."""
-        client, _ = mock_openai_client
-        api_messages = [{"role": "user", "content": "Hello"}]
-        
-        # Instead of raising KeyboardInterrupt in _handle_streaming_output,
-        # let's mock the _iterate_openai_chunks generator to yield a value then trigger an exception
-        
-        # First, patch the create method to return our mock stream
-        mock_stream = MagicMock()
-        client.client.chat.completions.create.return_value = mock_stream
-        
-        # We need to patch the internal _handle_streaming_output method
-        # without causing a real KeyboardInterrupt
-        with patch.object(client, '_handle_streaming_output') as mock_handle:
-            # Instead of raising directly, we'll simulate handling a KeyboardInterrupt
-            # by having it return what the method would if it caught the exception
-            mock_handle.return_value = "Interrupted response"
-            
-            # Now, we directly call and test the method behavior
-            result = client._stream_response(api_messages)
-            
-            # Verify that we got some result
-            assert result == "Interrupted response"
-            
-            # Verify that the API was called correctly
-            client.client.chat.completions.create.assert_called_once_with(
-                model="gpt-4o",
-                messages=api_messages,
-                stream=True,
-                store=False
-            )
-    
-    def test_get_verbose_output(self, mock_openai_client):
-        """Test get_verbose_output method."""
-        client, _ = mock_openai_client
-        
-        messages = [Message("user", "Hello")]
-        prompt = "Test prompt"
-        
-        # Expected API messages
-        expected_api_messages = [
-            {"role": "user", "content": "Hello"},
-            # Prompt no longer explicitly added here by this method
+
+    def test_prepare_api_messages_with_existing_system(self, client: OpenAIClient, mock_config_obj):
+        """Test that an existing system message isn't overridden by default."""
+        messages = [
+            Message("system", "Initial system prompt"),
+            Message("user", "Hello")
         ]
+        mock_config_obj.SYSTEM_MESSAGE = "This should not be used"
+
+        api_messages = client._prepare_api_messages(messages)
         
-        # Create a mock result object
-        mock_result = {"choices": [{"message": {"content": "Response"}}]}
+        assert len(api_messages) == 2
+        assert api_messages[0] == {"role": "system", "content": "Initial system prompt"}
+        assert api_messages[1] == {"role": "user", "content": "Hello"}
+
+    def test_prepare_api_messages_no_default_system(self, client: OpenAIClient, mock_config_obj):
+        """Test that no system message is added if default is empty."""
+        messages = [Message("user", "Hello")]
+        mock_config_obj.SYSTEM_MESSAGE = None # Set system message to None/empty
         
-        # Configure the mock completion create method to return our result
-        client.client.chat.completions.create.return_value = mock_result
+        api_messages = client._prepare_api_messages(messages)
         
-        # Call the method we're testing without the prompt argument
-        result = client.get_verbose_output(messages)
+        assert len(api_messages) == 1
+        assert api_messages[0] == {"role": "user", "content": "Hello"}
+
+    @patch('src.ask_llm.clients.openai_client.OpenAIClient._handle_streaming_output')
+    def test_query(self, mock_handle_streaming, client: OpenAIClient, mock_openai_api):
+        """Test the main query method (streaming case)."""
+        messages = [Message("user", "Test prompt")]
+        api_messages = client._prepare_api_messages(messages) # Prepare messages to check payload
+        expected_payload = {
+            "model": client.model,
+            "messages": api_messages,
+            "max_tokens": client.config.MAX_TOKENS,
+            "temperature": client.config.TEMPERATURE,
+            "top_p": client.config.TOP_P,
+            "stream": True
+        }
+        client.query(messages)
         
-        # Verify API call
-        client.client.chat.completions.create.assert_called_once_with(
-            model="gpt-4o",
-            messages=expected_api_messages,
-            store=False
-        )
+        mock_create = client.client.chat.completions.create
+        # Assert create was called with the expected payload
+        mock_create.assert_called_once_with(**expected_payload)
         
-        # Verify JSON result
-        assert result == json.dumps(mock_result, indent=2)
-    
-    def test_print_buffer(self, mock_openai_client):
-        """Test _print_buffer method."""
-        client, _ = mock_openai_client
+        mock_handle_streaming.assert_called_once()
+        stream_arg = mock_handle_streaming.call_args[1]['stream_iterator']
+        assert hasattr(stream_arg, '__next__')
+
+    @patch('src.ask_llm.clients.base.LLMClient._print_assistant_message') # Mock the base print method
+    def test_query_non_streaming(self, mock_print_assistant, client: OpenAIClient, mock_openai_api):
+        """Test the main query method (non-streaming case)."""
+        messages = [Message("user", "Test prompt")]
+        api_messages = client._prepare_api_messages(messages) # Prepare messages for checking payload
+        client.config.NO_STREAM = True 
+        client.config.VERBOSE = True # To check usage print
         
-        buffer = ["Line 1", "Line 2"]
+        mock_completion = MagicMock()
+        mock_completion.choices[0].message.content = "Full response"
+        mock_completion.usage.prompt_tokens = 10
+        mock_completion.usage.completion_tokens = 5
+        mock_completion.usage.total_tokens = 15
         
-        with patch.object(client.console, 'print') as mock_print:
-            client._print_buffer(buffer)
-            
-            assert mock_print.call_count == 2
-            mock_print.assert_has_calls([
-                call("Line 1"),
-                call("Line 2")
-            ]) 
+        client.client.chat.completions.create.return_value = mock_completion
+        
+        # Mock console print used for usage
+        with patch.object(client.console, 'print') as mock_console_print:
+            response = client.query(messages, stream=False)
+        
+        mock_create = client.client.chat.completions.create
+        expected_payload = {
+            "model": client.model,
+            "messages": api_messages,
+            "max_tokens": client.config.MAX_TOKENS,
+            "temperature": client.config.TEMPERATURE,
+            "top_p": client.config.TOP_P,
+            "stream": False
+        }
+        mock_create.assert_called_once_with(**expected_payload)
+        assert response == "Full response"
+        # Check that the base printing method was called correctly (since not plaintext)
+        mock_print_assistant.assert_called_once_with("Full response", second_part=None)
+        # Check that usage info was printed
+        mock_console_print.assert_any_call("[dim]OpenAI Tokens: Prompt=10, Completion=5, Total=15[/dim]")
+
+    def test_stream_response_success(self, client: OpenAIClient):
+        """Test successful streaming response handling."""
+        mock_stream_obj = MagicMock()
+        chunks = [
+            MagicMock(choices=[MagicMock(delta=MagicMock(content="Hello"))]),
+            MagicMock(choices=[MagicMock(delta=MagicMock(content=" world"))]),
+            MagicMock(choices=[MagicMock(delta=MagicMock(content="!"))]),
+            MagicMock(choices=[MagicMock(delta=MagicMock(content=None))]), 
+        ]
+        mock_stream_obj.__iter__.return_value = iter(chunks)
+        # Set the stream object returned by the create call
+        client.client.chat.completions.create.return_value = mock_stream_obj
+        
+        # Payload required by _stream_response
+        payload = {"model": client.model, "messages": [], "stream": True}
+        
+        # Mock the base class streaming handler
+        with patch.object(LLMClient, '_handle_streaming_output', return_value="Hello world!") as mock_base_handler:
+            # Pass the necessary payload
+            response = client._stream_response([], False, payload) 
+            assert response == "Hello world!"
+            # Check that the iterator passed to the base handler yields correct content
+            passed_iterator = mock_base_handler.call_args[1]['stream_iterator']
+            content_list = list(passed_iterator)
+            assert content_list == ["Hello", " world", "!"]
+            # Check the create call was made by _stream_response
+            client.client.chat.completions.create.assert_called_once_with(**payload)
+
+    # Add test for OpenAIError during streaming
+    def test_stream_response_openai_error(self, client: OpenAIClient):
+        """Test OpenAIError handling in stream response."""
+        from openai import OpenAIError # Import specific error
+        client.client.chat.completions.create.side_effect = OpenAIError("API error")
+        payload = {"model": client.model, "messages": [], "stream": True}
+        # No need to mock console print if error is logged
+        response = client._stream_response([], False, payload)
+        assert response == "ERROR: OpenAI API Error - API error"
+
+    # Add test for generic exception during streaming
+    def test_stream_response_generic_error(self, client: OpenAIClient):
+        """Test generic Exception handling in stream response."""
+        client.client.chat.completions.create.side_effect = Exception("Unexpected error")
+        payload = {"model": client.model, "messages": [], "stream": True}
+        response = client._stream_response([], False, payload)
+        assert response == "ERROR: Unexpected error - Unexpected error"
+        
+    # Test for _get_full_response (non-streaming) error handling
+    def test_get_full_response_openai_error(self, client: OpenAIClient):
+        """Test OpenAIError handling in full response."""
+        from openai import OpenAIError
+        client.client.chat.completions.create.side_effect = OpenAIError("Full API error")
+        payload = {"model": client.model, "messages": [], "stream": False}
+        response = client._get_full_response([], False, payload)
+        assert response == "ERROR: OpenAI API Error - Full API error"
+
+    def test_get_full_response_generic_error(self, client: OpenAIClient):
+        """Test generic Exception handling in full response."""
+        client.client.chat.completions.create.side_effect = Exception("Full Unexpected error")
+        payload = {"model": client.model, "messages": [], "stream": False}
+        response = client._get_full_response([], False, payload)
+        assert response == "ERROR: Unexpected error - Full Unexpected error"
+
+    # Test get_styling method
+    def test_get_styling(self, client: OpenAIClient):
+        """Test the get_styling method returns correct values."""
+        title, border_style = client.get_styling()
+        assert border_style == "green"
+        assert title == "[bold green]gpt-4o[/bold green]" 

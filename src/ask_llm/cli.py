@@ -62,6 +62,7 @@ def main():
     if args.list_models:
         list_models(config_obj)
         sys.exit(0)
+        return
     if args.add_gguf:
         success = False
         try:
@@ -76,6 +77,7 @@ def main():
                  traceback.print_exc()
             success = False # Ensure failure on exception
         sys.exit(0 if success else 1)
+        return
     if args.delete_model:
         success = False
         try:
@@ -89,6 +91,7 @@ def main():
                 traceback.print_exc()
             success = False
         sys.exit(0 if success else 1)
+        return
     if args.refresh_models:
         success = False
         try:
@@ -109,10 +112,12 @@ def main():
                 traceback.print_exc()
             success = False
         sys.exit(0 if success else 1)
+        return
     model_manager = ModelManager(config_obj)
     resolved_alias = model_manager.resolve_model_alias(args.model)
     if not resolved_alias:
         sys.exit(1)
+        return
     try:
         run_app(args, config_obj, resolved_alias)
     except Exception as e:
@@ -120,6 +125,8 @@ def main():
         if config_obj.VERBOSE:
              traceback.print_exc()
         sys.exit(1)
+    else:
+        sys.exit(0)
 
 def run_app(args: argparse.Namespace, config_obj: Config, resolved_alias: str):
     try:
