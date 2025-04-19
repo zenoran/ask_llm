@@ -66,6 +66,27 @@ clean-venv:
 all: install
 
 # Combined install target
+install-deps:
+	@echo "Installing additional dependencies for huggingface and llamacpp..."
+	@if [ -f ~/.venv/ask-llm/bin/pip ]; then \
+		echo "Attempting to uninstall existing llama-cpp-python..."; \
+		~/.venv/ask-llm/bin/pip uninstall llama-cpp-python -y || true; \
+		echo "Installing llama-cpp-python with CUDA support..."; \
+		CMAKE_ARGS="-DGGML_CUDA=on" FORCE_CMAKE=1 ~/.venv/ask-llm/bin/pip install llama-cpp-python --no-cache-dir; \
+		echo "Installing huggingface-hub..."; \
+		~/.venv/ask-llm/bin/pip install huggingface-hub; \
+	elif [ -f ~/.venv/ask-llm/bin/python ]; then \
+		echo "Attempting to uninstall existing llama-cpp-python..."; \
+		# ~/.venv/ask-llm/bin/python -m pip uninstall llama-cpp-python -y || true; \
+		echo "Installing llama-cpp-python with CUDA support..."; \
+		CMAKE_ARGS="-DGGML_CUDA=on" FORCE_CMAKE=1 ~/.venv/ask-llm/bin/python -m pip install llama-cpp-python --no-cache-dir; \
+		echo "Installing huggingface-hub..."; \
+		~/.venv/ask-llm/bin/python -m pip install huggingface-hub; \
+	else \
+		echo "ERROR: Virtual environment seems corrupted. Run 'make clean-venv' first."; \
+		exit 1; \
+	fi
+
 install:
 	@echo "Setting up environment in ~/.venv/ask-llm"
 	@mkdir -p ~/.venv
@@ -89,6 +110,7 @@ install:
 	@echo "Setup complete. Activate with: source ~/.venv/ask-llm/bin/activate"
 	# Alternative short install if env already active
 	# uv pip install -e .
+	@make install-deps
 
 develop:
 	uv pip install -e ".[dev]" # Assuming a [dev] extra for dev dependencies

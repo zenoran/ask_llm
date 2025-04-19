@@ -1,136 +1,184 @@
 import os
 import sys
+import yaml
+from pathlib import Path
 from argparse import Namespace
+from typing import List, Dict, Any, Optional
+import time
+import requests
+import logging
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from pydantic import Field, computed_field
-from ask_llm.utils.ollama_utils import init_models
+from pydantic import Field, computed_field, ValidationError, field_validator
+from rich.console import Console
 
+# Import necessary constants and functions
+from ..constants import PROVIDER_OPENAI, PROVIDER_OLLAMA, PROVIDER_GGUF, PROVIDER_HF
 
-def is_huggingface_available():
-    """Check if Hugging Face dependencies are available."""
-    try:
-        # Try importing the essential dependencies
-        import torch
-        import transformers
-        import bitsandbytes
-        
-        # Try importing the optional dependencies, but don't fail if they're not available
-        try:
-            import peft
-        except ImportError:
-            pass
-            
-        try:
-            import accelerate
-        except ImportError:
-            pass
-            
-        try:
-            import xformers
-        except ImportError:
-            pass
-            
-        return True
-    except (ImportError, Exception) as e:
-        # Print debug info if in verbose mode (can be enabled in future)
-        # print(f"HuggingFace dependencies not available: {e}")
-        return False
+logger = logging.getLogger(__name__)
+console = Console()
 
+_hf_available = None
+_llama_cpp_available = None
+
+def is_huggingface_available() -> bool:
+    global _hf_available
+    if _hf_available is None:
+        try:
+            import torch
+            import transformers
+            import bitsandbytes
+            _hf_available = True
+        except ImportError:
+            _hf_available = False
+    return _hf_available
+
+def is_llama_cpp_available() -> bool:
+    global _llama_cpp_available
+    if _llama_cpp_available is None:
+        try:
+            import llama_cpp
+            _llama_cpp_available = True
+        except ImportError:
+            _llama_cpp_available = False
+    return _llama_cpp_available
+
+def get_default_models_yaml_path() -> Path:
+    env_path = os.environ.get("ASK_LLM_MODELS_CONFIG_PATH")
+    if env_path:
+        return Path(env_path).expanduser().resolve()
+
+    xdg_config_home = os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config"))
+    default_config_dir = Path(xdg_config_home) / "ask-llm"
+    default_config_dir.mkdir(parents=True, exist_ok=True)
+    return default_config_dir / "models.yaml"
+
+DEFAULT_MODELS_YAML = get_default_models_yaml_path()
 
 class Config(BaseSettings):
     HISTORY_FILE: str = Field(default=os.path.expanduser("~/.ask-llm-chat-history"))
-    HISTORY_DURATION: int = Field(default=60 * 10)  # retain messages for 60 minutes
+    HISTORY_DURATION: int = Field(default=60 * 10)
     OLLAMA_URL: str = Field(default="http://localhost:11434")
-    OLLAMA_MODELS: list[str] = Field(default_factory=list)  # Will be populated dynamically
-    OLLAMA_FALLBACK_MODELS: list[str] = Field(
-        default=["gemma3"]
-    )
-    OLLAMA_MODELS_CACHE: str = Field(default=os.path.expanduser("~/.ollama-models"))
-    OPENAPI_MODELS: list[str] = Field(
-        default=["gpt-4.1", "gpt-4o", "o4-mini", "o1", "o3-mini", "chatgpt-4o-latest"]
-    )
-    HUGGINGFACE_MODELS: list[str] = Field(
-        default=[
-            "PygmalionAI/pygmalion-3-12b",
-            "soob3123/amoral-gemma3-4B-v1",
-        ]
-    )
-    DEFAULT_MODEL: str = Field(default="chatgpt-4o-latest")
+    MODEL_CACHE_DIR: str = Field(default=os.path.expanduser("~/.cache/ask_llm/models"), description="Directory to cache downloaded GGUF models")
+    MODELS_CONFIG_PATH: str = Field(default=str(DEFAULT_MODELS_YAML), description="Path to the models YAML definition file")
+    DEFAULT_MODEL_ALIAS: Optional[str] = Field(default=None, description="Alias from models.yaml to use if --model is not specified")
+    ALLOW_DUPLICATE_RESPONSE: bool = Field(default=False, description="Allow identical consecutive assistant responses without retry")
+
     MAX_TOKENS: int = Field(default=1024, description="Default maximum tokens to generate")
     TEMPERATURE: float = Field(default=0.8, description="Default generation temperature")
-    DEFAULT_VOICE: str = Field(default="melina", description="Default voice for TTS")
-    BUFFER_LINES: int = Field(default=3)  # Number of lines to collect before printing
-    PRESERVE_CODE_BLOCKS: bool = Field(
-        default=True
-    )  # Wait for complete code blocks before printing
-    TMUX_COLLECT_ALL: bool = Field(
-        default=False
-    )  # In TMUX, collect all output before printing
-    SHOW_CHAR_COUNT: bool = Field(default=True)  # Show character count in spinner
-    VERBOSE: bool = Field(default=False)  # Verbose mode for debugging
-    PLAIN_OUTPUT: bool = Field(default=False)
-    INTERACTIVE_MODE: bool = Field(default=False)  # Interactive mode for command line
-    SYSTEM_MESSAGE: str = Field(
-        """You are a helpful and concise technical assistant. Always respond using simple, easy-to-understand language. 
-Keep explanations short and direct, avoiding unnecessary detail. Use correct and clean Markdown formatting in 
-your responses, including backticks for code, lists or headings when appropriate, and bold text for emphasis 
-when needed. Be fun and engaging, but always prioritize clarity and conciseness.
+    TOP_P: float = Field(default=0.95, description="Default nucleus sampling top-p")
+    CHAT_FORMAT: Optional[str] = Field(default=None, description="Default chat format for Llama.cpp (e.g., llama-2, chatml, mistral) - Can be overridden per model")
 
-Respond using clean and properly formatted Markdown. Use the following formatting tools:
-• Headings (#, ##, ###) for structure
-• Bullet points and numbered lists for organization
-• Bold (**text**) and italic (*text*) text for emphasis
-• Inline code using single backticks (`code`), and code blocks using triple backticks for multi-line code
-• Tables using pipes (|) and dashes (-)
-• Simple emojis for expression 😀
-• Avoid HTML, LaTeX, or unsupported Markdown elements
-• Keep formatting readable and clean for both terminal and markdown viewers"""
-    )
+    # Llama.cpp specific settings
+    LLAMA_CPP_N_CTX: int = Field(default=4096, description="Context size for Llama.cpp models")
+    LLAMA_CPP_N_GPU_LAYERS: int = Field(default=-1, description="Number of layers to offload to GPU (-1 for all possible layers)")
 
-    def __init__(self, **data):
-        super().__init__(**data)
-        refresh_models = "--refresh-models" in sys.argv
-        self.OLLAMA_MODELS = init_models(self.OLLAMA_URL, self.OLLAMA_MODELS_CACHE, refresh_models)
-        if self.OPENAPI_MODELS:
-            self.DEFAULT_MODEL = self.OPENAPI_MODELS[0]
+    VERBOSE: bool = Field(default=False, description="Verbose mode for debugging")
+    PLAIN_OUTPUT: bool = Field(default=False, description="Use plain text output without Rich formatting")
+    NO_STREAM: bool = Field(default=False, description="Disable streaming output")
+    INTERACTIVE_MODE: bool = Field(default=False, description="Whether the app is in interactive mode (set based on args)")
+    SYSTEM_MESSAGE: str = Field(default="""You are a helpful and concise technical assistant. Respond using simple, easy-to-understand language. Keep explanations short and direct. Use correct and clean Markdown formatting: backticks for code, lists/headings for structure, bold for emphasis. Avoid complex elements like HTML or LaTeX. Prioritize clarity and conciseness.""")
+
+    defined_models: Dict[str, Any] = Field(default_factory=dict, exclude=True)
+    available_ollama_models: List[str] = Field(default_factory=list, exclude=True)
+    ollama_checked: bool = Field(default=False, exclude=True)
+
+    model_config = SettingsConfigDict(env_prefix="ASK_LLM_",env_file=".env",env_file_encoding="utf-8",case_sensitive=False,extra='ignore')
+
+    def __init__(self, **values: Any):
+        if 'MODELS_CONFIG_PATH' in values:
+            values['MODELS_CONFIG_PATH'] = str(Path(values['MODELS_CONFIG_PATH']).expanduser().resolve())
+        else:
+            values['MODELS_CONFIG_PATH'] = str(DEFAULT_MODELS_YAML)
+
+        super().__init__(**values)
+        self._load_models_config()
+
+        if self.DEFAULT_MODEL_ALIAS is None:
+            self.DEFAULT_MODEL_ALIAS = self.defined_models.get("default_model_alias")
+
+        has_ollama_models = any(model.get('type') == 'ollama' for model in self.defined_models.get('models', {}).values())
+        if has_ollama_models:
+            self._check_ollama_availability()
+
+    def _load_models_config(self):
+        config_path = Path(self.MODELS_CONFIG_PATH)
+        if not config_path.is_file():
+            console.print(f"[yellow]Warning:[/yellow] Models configuration file not found at {config_path}")
+            console.print("  Define models in a YAML file (see docs). Using empty model definitions.")
+            self.defined_models = {"models": {}}
+            return
+
+        try:
+            with open(config_path, 'r', encoding='utf-8') as f:
+                loaded_data = yaml.safe_load(f)
+                if loaded_data is None:
+                    loaded_data = {"models": {}}
+
+            if "models" not in loaded_data or not isinstance(loaded_data.get("models"), dict):
+                console.print(f"[bold red]Error:[/bold red] Invalid format in {config_path}. Missing or invalid top-level 'models' dictionary.")
+                self.defined_models = {"models": {}}
+            else:
+                self.defined_models = loaded_data
+                global_overrides = {k: v for k, v in loaded_data.items() if k != "models"}
+                for key, value in global_overrides.items():
+                    if hasattr(self, key):
+                        try:
+                            setattr(self, key, value)
+                        except ValidationError as e:
+                            console.print(f"[yellow]Warning:[/yellow] Invalid value for '{key}' in {config_path}: {e}. Using default/environment value.")
+
+        except yaml.YAMLError as e:
+            console.print(f"[bold red]Error parsing YAML file {config_path}:[/bold red] {e}")
+            self.defined_models = {"models": {}}
+        except Exception as e:
+            console.print(f"[bold red]Error loading models config {config_path}:[/bold red] {e}")
+            self.defined_models = {"models": {}}
+
+    def _check_ollama_availability(self, force_check: bool = False) -> None:
+        if not force_check and self.ollama_checked:
+            return
+
+        try:
+            start_time = time.time()
+            response = requests.get(f"{self.OLLAMA_URL}/api/tags", timeout=5)
+            response.raise_for_status()
+            available_models = {model['name'] for model in response.json().get('models', [])}
+            self.available_ollama_models = list(available_models)
+            self.ollama_checked = True
+            logger.debug(f"Ollama API query took {time.time() - start_time:.2f} ms and found {len(available_models)} models")
+        except Exception as e:
+            self.available_ollama_models = []
+            self.ollama_checked = True
+            logger.warning(f"Ollama API check failed: {str(e)}")
+
+    def force_ollama_check(self) -> None:
+        self.ollama_checked = False
+        self._check_ollama_availability(force_check=True)
 
     @computed_field
-    def MODEL_OPTIONS(self) -> list[str]:
-        """Return all available models, excluding HuggingFace models if dependencies are missing."""
-        if is_huggingface_available():
-            return self.OPENAPI_MODELS + self.OLLAMA_MODELS + self.HUGGINGFACE_MODELS
-        else:
-            return self.OPENAPI_MODELS + self.OLLAMA_MODELS
+    @property
+    def MODEL_OPTIONS(self) -> List[str]:
+        available_options = []
+        defined = self.defined_models.get("models", {})
+        for alias, model_info in defined.items():
+            model_type = model_info.get("type")
+            if model_type == PROVIDER_OPENAI:
+                # Assume openai package installed if type is specified
+                available_options.append(alias)
+            elif model_type == PROVIDER_OLLAMA:
+                # Check if model name is in the list fetched from Ollama server
+                model_id = model_info.get("model_id")
+                if model_id and model_id in self.available_ollama_models:
+                    available_options.append(alias)
+            elif model_type == PROVIDER_GGUF:
+                # Check if llama-cpp-python is installed
+                if is_llama_cpp_available():
+                    available_options.append(alias)
+            elif model_type == PROVIDER_HF:
+                # Check if huggingface dependencies are installed
+                if is_huggingface_available():
+                    available_options.append(alias)
+            # Ignore models with unknown or missing type
 
-    def update_from_args(self, args: Namespace) -> "Config":
-        """Update config based on command line arguments"""
-        if args.plain:
-            self.PLAIN_OUTPUT = True
-        if args.verbose:
-            self.VERBOSE = True
-        if args.model:
-            self.DEFAULT_MODEL = args.model
-        if hasattr(args, 'llm') and args.llm and args.llm != args.model:
-            self.DEFAULT_MODEL = args.llm
-        if hasattr(args, 'voice') and args.voice:
-            self.DEFAULT_VOICE = args.voice
-        if not args.question:
-            self.INTERACTIVE_MODE = True
-        return self
-
-    model_config = SettingsConfigDict(
-        env_prefix="ASK_LLM_",
-        env_file=".env",
-        env_file_encoding="utf-8",
-        case_sensitive=True,
-    )
-
-    @classmethod
-    def from_args(cls, args: Namespace) -> "Config":
-        instance = cls()
-        return instance.update_from_args(args)
-
-
-# Create a single global instance
-config: Config = Config()
+        return sorted(list(set(available_options))) # Return sorted list of unique aliases

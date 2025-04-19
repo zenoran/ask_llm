@@ -5,14 +5,13 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "Python Debugger: Start Main",
+            "name": "ask_llm",
             "type": "debugpy",
             "request": "launch",
             "program": "${workspaceFolder}/src/ask_llm/main.py",
             "console": "integratedTerminal",
             "args": [
-                "-m",
-                "sex"
+                "-m", "dans"
             ],
             "env": {
                 "PYTHONPATH": "${workspaceFolder}/src"
