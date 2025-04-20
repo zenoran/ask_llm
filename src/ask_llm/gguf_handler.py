@@ -6,16 +6,12 @@ from rich.prompt import Prompt, Confirm
 from rich.console import Console
 
 from .utils.config import Config
+from .core import HF_HUB_AVAILABLE
 
-try:
+
+if HF_HUB_AVAILABLE:
     from huggingface_hub import hf_hub_download, HfApi
     from huggingface_hub.utils import HfHubHTTPError
-    hf_hub_available = True
-except ImportError:
-    hf_hub_available = False
-    hf_hub_download = lambda **kwargs: (_ for _ in ()).throw(ImportError("huggingface-hub is not installed"))
-    HfApi = type('DummyHfApi', (), {'list_repo_files': lambda **kwargs: (_ for _ in ()).throw(ImportError("huggingface-hub is not installed"))})
-    HfHubHTTPError = type('DummyHfHubHTTPError', (Exception,), {})
 
 console = Console()
 
@@ -39,7 +35,7 @@ def generate_gguf_alias(repo_id: str, filename: str, existing_aliases: List[str]
     return alias
 
 def handle_add_gguf(repo_id: str, config: Config) -> bool:
-    if not hf_hub_available or not HfApi or not HfHubHTTPError or not hf_hub_download:
+    if not HF_HUB_AVAILABLE:
         console.print("[bold red]Error:[/bold red] `huggingface-hub` is required to add GGUF models.")
         console.print("Install with: `pip install huggingface-hub`")
         return False

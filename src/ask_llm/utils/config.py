@@ -1,19 +1,21 @@
-import os
-import sys
-import yaml
-from pathlib import Path
-from argparse import Namespace
-from typing import List, Dict, Any, Optional
-import time
-import requests
+import importlib.util
 import logging
+import os
+import time
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
+import requests
+import yaml
+from pydantic import Field, ValidationError, computed_field
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from pydantic import Field, computed_field, ValidationError, field_validator
 from rich.console import Console
 
-# Import necessary constants and functions
-from ..constants import PROVIDER_OPENAI, PROVIDER_OLLAMA, PROVIDER_GGUF, PROVIDER_HF
+PROVIDER_OPENAI = "openai"
+PROVIDER_OLLAMA = "ollama"
+PROVIDER_GGUF = "gguf"
+PROVIDER_HF = "huggingface"
+PROVIDER_UNKNOWN = "Unknown" 
 
 logger = logging.getLogger(__name__)
 console = Console()
@@ -24,23 +26,16 @@ _llama_cpp_available = None
 def is_huggingface_available() -> bool:
     global _hf_available
     if _hf_available is None:
-        try:
-            import torch
-            import transformers
-            import bitsandbytes
-            _hf_available = True
-        except ImportError:
-            _hf_available = False
+        torch_spec = importlib.util.find_spec("torch")
+        transformers_spec = importlib.util.find_spec("transformers")
+        bitsandbytes_spec = importlib.util.find_spec("bitsandbytes")
+        _hf_available = all([torch_spec, transformers_spec, bitsandbytes_spec])
     return _hf_available
 
 def is_llama_cpp_available() -> bool:
     global _llama_cpp_available
     if _llama_cpp_available is None:
-        try:
-            import llama_cpp
-            _llama_cpp_available = True
-        except ImportError:
-            _llama_cpp_available = False
+        _llama_cpp_available = importlib.util.find_spec("llama_cpp") is not None
     return _llama_cpp_available
 
 def get_default_models_yaml_path() -> Path:
@@ -182,3 +177,6 @@ class Config(BaseSettings):
             # Ignore models with unknown or missing type
 
         return sorted(list(set(available_options))) # Return sorted list of unique aliases
+
+
+global_config = Config()

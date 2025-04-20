@@ -1,13 +1,11 @@
 import time
 import logging
-import sys
 import os
 import contextlib
 import json
 from typing import List, Dict, Any, Iterator
 
 from rich.markdown import Markdown
-from rich.panel import Panel
 from rich.rule import Rule
 from rich.json import JSON
 
@@ -35,7 +33,7 @@ class LlamaCppClient(LLMClient):
             )
         super().__init__(model_path, config) # Pass config to base class
         self.model_path = model_path
-        self.model: Llama | None = None
+        self.model = None
         self._load_model()
 
     def _load_model(self):

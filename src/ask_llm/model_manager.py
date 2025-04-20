@@ -1,21 +1,43 @@
-from collections import defaultdict
-import yaml
+"""
+Manages AI model configurations for the ask-llm tool.
+
+This module provides functionality to list, update, and delete model aliases
+stored in the models configuration file (typically `~/.config/ask-llm/models.yaml`).
+
+External Usage:
+    - Use `list_models(config)` to display available model aliases.
+    - Use `delete_model(alias, config)` to remove a specific model alias.
+    - Use `update_models_interactive(config, provider=None)` to fetch the latest models
+      from providers (OpenAI, Ollama) and interactively add new ones.
+
+The `ModelManager` class can be used directly for more granular control over
+model configurations.
+"""
+
 import re
+import time
+from collections import defaultdict
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
 import pytz
 import requests
-import time
-from pathlib import Path
-from datetime import datetime, timezone
-from typing import Dict, Any, List, Optional, Tuple
-
+import yaml
+from openai import OpenAI
 from rich.console import Console
-from rich.prompt import Prompt, Confirm
+from rich.prompt import Confirm, Prompt
 from rich.rule import Rule
-from openai import OpenAI, AuthenticationError, APIConnectionError, OpenAIError
 
-from .utils.config import Config
+from ask_llm.utils.config import (
+    PROVIDER_GGUF,
+    PROVIDER_HF,
+    PROVIDER_OLLAMA,
+    PROVIDER_OPENAI,
+    PROVIDER_UNKNOWN,
+)
 from .gguf_handler import normalize_for_match
-from .constants import PROVIDER_OPENAI, PROVIDER_OLLAMA, PROVIDER_GGUF, PROVIDER_HF, PROVIDER_UNKNOWN
+from .utils.config import Config
 
 console = Console()
 
@@ -88,9 +110,12 @@ class ModelManager:
             with open(self.config_path, 'w', encoding='utf-8') as f:
                 yaml.dump(self.models_data, f, sort_keys=False, indent=2, default_flow_style=False, allow_unicode=True)
             messages = []
-            if added > 0: messages.append(f"{added} added")
-            if updated > 0: messages.append(f"{updated} updated")
-            if deleted > 0: messages.append(f"{deleted} deleted")
+            if added > 0:
+                messages.append(f"{added} added")
+            if updated > 0:
+                messages.append(f"{updated} updated")
+            if deleted > 0:
+                messages.append(f"{deleted} deleted")
             if messages:
                 console.print(f"[bold green]Successfully processed config: {', '.join(messages)}.[/bold green]")
             else:
@@ -401,7 +426,7 @@ def fetch_ollama_api_models(ollama_url: str) -> Tuple[bool, List[Dict[str, Any]]
                 if mat:
                     try:
                         mod_dt = _parse_iso(mat)
-                    except:
+                    except Exception:
                         console.print(f"[yellow]Warning:[/] Could not parse timestamp {mat}")
                 models_details.append({'id': mid, 'modified_at': mod_dt})
         console.print(f"⏱️ Ollama query took {(time.time()-start)*1000:.0f}ms, found {len(models_details)} models")
@@ -411,7 +436,6 @@ def fetch_ollama_api_models(ollama_url: str) -> Tuple[bool, List[Dict[str, Any]]
         return False, []
 
 def fetch_openai_api_models() -> Tuple[bool, List[Dict[str, Any]]]:
-    from datetime import datetime
     details = []
     start = time.time()
     try:
@@ -461,6 +485,6 @@ def update_models_interactive(config: Config, provider: Optional[str] = None):
 def _parse_iso(ts_str: str) -> Optional[datetime]:
     try:
         return datetime.fromisoformat(ts_str.replace('Z', '+00:00'))
-    except:
+    except Exception:
         return None
 

@@ -41,7 +41,7 @@ def base_config(monkeypatch):
         defined_models={'models': {'alias': {'type': 'huggingface', 'model_id': 'id1'}}},
         available_ollama_models=[],
         OLLAMA_URL='', MODEL_CACHE_DIR='',
-        VERBOSE=False, allow_duplicate_response=False
+        VERBOSE=False, ALLOW_DUPLICATE_RESPONSE=False
     )
     # Dummy HuggingFaceClient for initialization
     class DummyHF:

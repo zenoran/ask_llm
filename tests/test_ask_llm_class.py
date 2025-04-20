@@ -54,7 +54,7 @@ def mock_global_config():
     mock_config.HISTORY_FILE = '/tmp/fake_history.jsonl' # Needed by HistoryManager
     mock_config.HISTORY_DURATION = 600
     mock_config.MAX_TOKENS = 1024
-    mock_config.allow_duplicate_response = False
+    mock_config.ALLOW_DUPLICATE_RESPONSE = False
     mock_config.VERBOSE = False
     mock_config.available_ollama_models = ["mock-ollama"]  # Add available Ollama models
     mock_config.OLLAMA_URL = "http://localhost:11434"  # Add OLLAMA_URL
@@ -242,7 +242,7 @@ def test_ask_llm_query_duplicate_response(
     # --- Setup Mocks ---
     # Ensure AskLLM initializes with a HuggingFace model ID
     mock_global_config.DEFAULT_MODEL_ALIAS = "mock-hf"
-    mock_global_config.allow_duplicate_response = False
+    mock_global_config.ALLOW_DUPLICATE_RESPONSE = False
     # Get the mock HF Client *class* and its *return_value* (the instance)
     mock_hf_client_class = mock_clients["huggingface"]
     mock_client_instance = mock_hf_client_class.return_value

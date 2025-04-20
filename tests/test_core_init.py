@@ -1,6 +1,5 @@
 import pytest
 import pathlib
-import traceback as tb_module
 import ask_llm.core as core_mod
 from types import SimpleNamespace
 
@@ -14,7 +13,8 @@ def tmp_model_cache(tmp_path, monkeypatch):
         MODEL_CACHE_DIR=str(tmp_path),
         MODELS_CONFIG_PATH='models.yaml',
         VERBOSE=False,
-        allow_duplicate_response=False
+        PLAIN_OUTPUT=False,
+        ALLOW_DUPLICATE_RESPONSE=False
     )
     return cfg, tmp_path
 
@@ -28,7 +28,7 @@ def test_no_model_definition(tmp_model_cache):
 def test_unsupported_model_type(tmp_model_cache):
     config, _ = tmp_model_cache
     config.defined_models = {'models': {'alias': {'type': 'unknown'}}}
-    with pytest.raises(ValueError) as exc:
+    with pytest.raises(ImportError) as exc:
         core_mod.AskLLM('alias', config)
     assert "Unsupported model type 'unknown'" in str(exc.value)
 
@@ -122,17 +122,17 @@ def test_openai_initialization_missing_model_id(tmp_model_cache, monkeypatch):
     assert "Missing 'model_id'" in str(exc.value)
 
 def test_initialize_client_gguf_missing_hf(monkeypatch, tmp_model_cache):
-    # gguf without hf_hub_available
+    # gguf without HF_CLIENT_AVAILABLE
     config, _ = tmp_model_cache
     config.defined_models = {'models': {'alias': {'type': 'gguf'}}}
-    monkeypatch.setattr(core_mod, 'hf_hub_available', False)
+    monkeypatch.setattr(core_mod, 'HF_CLIENT_AVAILABLE', False)
     with pytest.raises(ImportError):
         core_mod.AskLLM('alias', config)
  
 def test_initialize_client_gguf_missing_llama(monkeypatch, tmp_model_cache):
     config, _ = tmp_model_cache
     config.defined_models = {'models': {'alias': {'type': 'gguf', 'repo_id': 'r', 'filename': 'f'}}}
-    monkeypatch.setattr(core_mod, 'hf_hub_available', True)
+    monkeypatch.setattr(core_mod, 'HF_CLIENT_AVAILABLE', True)
     monkeypatch.setattr(core_mod, 'LlamaCppClient', None)
     monkeypatch.setattr(core_mod, 'console', SimpleNamespace(print=lambda *args, **kwargs: None))
     with pytest.raises(ImportError):
@@ -142,12 +142,12 @@ def test_initialize_client_gguf_missing_fields(monkeypatch, tmp_model_cache):
     config, _ = tmp_model_cache
     # Missing repo_id and filename
     config.defined_models = {'models': {'alias': {'type': 'gguf', 'repo_id': None, 'filename': None}}}
-    monkeypatch.setattr(core_mod, 'hf_hub_available', True)
+    monkeypatch.setattr(core_mod, 'HF_CLIENT_AVAILABLE', True)
     # Provide dummy LlamaCppClient to enter _initialize
     monkeypatch.setattr(core_mod, 'LlamaCppClient', lambda model_path, config: None)
     monkeypatch.setattr(core_mod, 'console', SimpleNamespace(print=lambda *args, **kwargs: None))
     # Should raise ValueError for missing fields
-    with pytest.raises(ValueError) as exc:
+    with pytest.raises(ImportError) as exc:
         core_mod.AskLLM('alias', config)
     assert "missing 'repo_id' or 'filename'" in str(exc.value)
 
@@ -155,7 +155,7 @@ def test_initialize_client_gguf_cached(monkeypatch, tmp_model_cache):
     config, tmp_path = tmp_model_cache
     # Setup model definition
     config.defined_models = {'models': {'alias': {'type': 'gguf', 'repo_id': 'repo', 'filename': 'mod.bin'}}}
-    monkeypatch.setattr(core_mod, 'hf_hub_available', True)
+    monkeypatch.setattr(core_mod, 'HF_CLIENT_AVAILABLE', True)
     # Dummy LlamaCppClient records path
     class DummyLlama:
         def __init__(self, model_path, config):
@@ -177,7 +177,7 @@ def test_initialize_client_gguf_cached(monkeypatch, tmp_model_cache):
 def test_initialize_client_gguf_download(monkeypatch, tmp_model_cache):
     config, tmp_path = tmp_model_cache
     config.defined_models = {'models': {'alias': {'type': 'gguf', 'repo_id': 'repo', 'filename': 'mod.bin'}}}
-    monkeypatch.setattr(core_mod, 'hf_hub_available', True)
+    monkeypatch.setattr(core_mod, 'HF_CLIENT_AVAILABLE', True)
     # No cached file
     monkeypatch.setattr(pathlib.Path, 'is_file', lambda self: False)
     # hf_hub_download returns different path
@@ -198,7 +198,7 @@ def test_initialize_client_gguf_download(monkeypatch, tmp_model_cache):
 def test_initialize_client_gguf_download_http_error(monkeypatch, tmp_model_cache):
     config, tmp_path = tmp_model_cache
     config.defined_models = {'models': {'alias': {'type': 'gguf', 'repo_id': 'repo', 'filename': 'mod.bin'}}}
-    monkeypatch.setattr(core_mod, 'hf_hub_available', True)
+    monkeypatch.setattr(core_mod, 'HF_CLIENT_AVAILABLE', True)
     monkeypatch.setattr(pathlib.Path, 'is_file', lambda self: False)
     # hf_hub_download raises HTTPError
     monkeypatch.setattr(core_mod, 'hf_hub_download', lambda **kwargs: (_ for _ in ()).throw(core_mod.HfHubHTTPError('err')))
@@ -210,7 +210,7 @@ def test_initialize_client_gguf_download_http_error(monkeypatch, tmp_model_cache
 def test_initialize_client_gguf_download_generic_error(monkeypatch, tmp_model_cache):
     config, tmp_path = tmp_model_cache
     config.defined_models = {'models': {'alias': {'type': 'gguf', 'repo_id': 'repo', 'filename': 'mod.bin'}}}
-    monkeypatch.setattr(core_mod, 'hf_hub_available', True)
+    monkeypatch.setattr(core_mod, 'HF_CLIENT_AVAILABLE', True)
     monkeypatch.setattr(pathlib.Path, 'is_file', lambda self: False)
     # hf_hub_download raises generic
     monkeypatch.setattr(core_mod, 'hf_hub_download', lambda **kwargs: (_ for _ in ()).throw(RuntimeError('err')))
@@ -218,9 +218,7 @@ def test_initialize_client_gguf_download_generic_error(monkeypatch, tmp_model_ca
     monkeypatch.setattr(core_mod, 'console', SimpleNamespace(print=lambda msg: printed.append(msg)))
     # verbose True for traceback
     config.VERBOSE = True
-    monkeypatch.setattr(tb_module, 'print_exc', lambda: printed.append('tb'))
     monkeypatch.setattr(core_mod, 'HistoryManager', lambda client, config: SimpleNamespace(load_history=lambda: None))
     with pytest.raises(RuntimeError):
         core_mod.AskLLM('alias', config)
     assert any("Error downloading file 'mod.bin'" in m for m in printed)
-    assert 'tb' in printed

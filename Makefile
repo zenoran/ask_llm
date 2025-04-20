@@ -68,46 +68,45 @@ all: install
 # Combined install target
 install-deps:
 	@echo "Installing additional dependencies for huggingface and llamacpp..."
-	@if [ -f ~/.venv/ask-llm/bin/pip ]; then \
+	@if [ -f .venv/bin/pip ]; then \
 		echo "Attempting to uninstall existing llama-cpp-python..."; \
-		~/.venv/ask-llm/bin/pip uninstall llama-cpp-python -y || true; \
+		.venv/bin/pip uninstall llama-cpp-python -y || true; \
 		echo "Installing llama-cpp-python with CUDA support..."; \
-		CMAKE_ARGS="-DGGML_CUDA=on" FORCE_CMAKE=1 ~/.venv/ask-llm/bin/pip install llama-cpp-python --no-cache-dir; \
+		CMAKE_ARGS="-DGGML_CUDA=on" FORCE_CMAKE=1 .venv/bin/pip install llama-cpp-python --no-cache-dir; \
 		echo "Installing huggingface-hub..."; \
-		~/.venv/ask-llm/bin/pip install huggingface-hub; \
-	elif [ -f ~/.venv/ask-llm/bin/python ]; then \
+		.venv/bin/pip install huggingface-hub; \
+	elif [ -f .venv/bin/python ]; then \
 		echo "Attempting to uninstall existing llama-cpp-python..."; \
-		# ~/.venv/ask-llm/bin/python -m pip uninstall llama-cpp-python -y || true; \
+		# .venv/bin/python -m pip uninstall llama-cpp-python -y || true; \
 		echo "Installing llama-cpp-python with CUDA support..."; \
-		CMAKE_ARGS="-DGGML_CUDA=on" FORCE_CMAKE=1 ~/.venv/ask-llm/bin/python -m pip install llama-cpp-python --no-cache-dir; \
+		CMAKE_ARGS="-DGGML_CUDA=on" FORCE_CMAKE=1 .venv/bin/python -m pip install llama-cpp-python --no-cache-dir; \
 		echo "Installing huggingface-hub..."; \
-		~/.venv/ask-llm/bin/python -m pip install huggingface-hub; \
+		.venv/bin/python -m pip install huggingface-hub; \
 	else \
 		echo "ERROR: Virtual environment seems corrupted. Run 'make clean-venv' first."; \
 		exit 1; \
 	fi
 
 install:
-	@echo "Setting up environment in ~/.venv/ask-llm"
-	@mkdir -p ~/.venv
-	@if [ ! -d ~/.venv/ask-llm ]; then \
+	@echo "Setting up environment in .venv"
+	@if [ ! -d .venv ]; then \
 		echo "Creating new virtual environment"; \
-		uv venv ~/.venv/ask-llm --python `which python3`; \
+		uv venv .venv --python `which python3`; \
 	else \
 		echo "Virtual environment already exists"; \
 	fi
-	@if [ -f ~/.venv/ask-llm/bin/pip ]; then \
+	@if [ -f .venv/bin/pip ]; then \
 		echo "Installing/updating package in development mode"; \
-		~/.venv/ask-llm/bin/pip install -e .; \
-	elif [ -f ~/.venv/ask-llm/bin/python ]; then \
+		.venv/bin/pip install -e .; \
+	elif [ -f .venv/bin/python ]; then \
 		echo "Pip not found, installing via ensurepip"; \
-		~/.venv/ask-llm/bin/python -m ensurepip; \
-		~/.venv/ask-llm/bin/python -m pip install -e .; \
+		.venv/bin/python -m ensurepip; \
+		.venv/bin/python -m pip install -e .; \
 	else \
 		echo "ERROR: Virtual environment seems corrupted. Run 'make clean-venv' first."; \
 		exit 1; \
 	fi
-	@echo "Setup complete. Activate with: source ~/.venv/ask-llm/bin/activate"
+	@echo "Setup complete. Activate with: source .venv/bin/activate"
 	# Alternative short install if env already active
 	# uv pip install -e .
 	@make install-deps

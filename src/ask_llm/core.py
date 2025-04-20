@@ -1,29 +1,30 @@
-import argparse
+import importlib.util
 import pathlib
-import traceback
 from rich.console import Console
 from .utils.config import Config, is_huggingface_available, is_llama_cpp_available
 from .utils.history import HistoryManager
 from .clients import OpenAIClient, OllamaClient, LLMClient
 import logging
 
-try:
-    from huggingface_hub import hf_hub_download, HfApi
-    from huggingface_hub.utils import HfHubHTTPError
-    hf_hub_available = True
-except ImportError:
-    hf_hub_available = False
-    hf_hub_download = lambda **kwargs: (_ for _ in ()).throw(ImportError("huggingface-hub is not installed"))
-    HfApi = type('DummyHfApi', (), {'list_repo_files': lambda **kwargs: (_ for _ in ()).throw(ImportError("huggingface-hub is not installed"))})
-    HfHubHTTPError = type('DummyHfHubHTTPError', (Exception,), {})
 
-try:
+LLAMA_CPP_AVAILABLE = is_llama_cpp_available()
+HF_CLIENT_AVAILABLE = is_huggingface_available()
+
+if importlib.util.find_spec("huggingface_hub"):
+    from huggingface_hub import hf_hub_download
+    from huggingface_hub.utils import HfHubHTTPError
+    HF_HUB_AVAILABLE = True
+else:
+    HF_HUB_AVAILABLE = False
+
+if HF_CLIENT_AVAILABLE:
     from .clients import HuggingFaceClient
-except ImportError:
+else:
     HuggingFaceClient = None
-try:
+
+if LLAMA_CPP_AVAILABLE:
     from .clients import LlamaCppClient
-except ImportError:
+else:
     LlamaCppClient = None
 
 console = Console()
@@ -50,7 +51,7 @@ class AskLLM:
             logger.debug(f"Initializing client for model: {model_alias} (Type: {model_type})")
 
         if model_type == "gguf":
-            if not hf_hub_available:
+            if not HF_HUB_AVAILABLE:
                  console.print("[bold red]Error:[/bold red] `huggingface-hub` is required for GGUF models.")
                  raise ImportError("huggingface-hub not found for GGUF download.")
             try:
@@ -63,7 +64,7 @@ class AskLLM:
                  raise
             except Exception as e:
                 console.print(f"[bold red]Error initializing Llama.cpp client:[/bold red] {e}")
-                if self.config.VERBOSE: traceback.print_exc()
+                logger.exception(f"Error initializing Llama.cpp client: {e}")
                 raise
 
         elif model_type == "huggingface":
@@ -77,7 +78,7 @@ class AskLLM:
                  return HuggingFaceClient(model_id=model_id, config=config)
              except Exception as e:
                 console.print(f"[bold red]Error initializing HuggingFace client for {model_alias}:[/bold red] {e}")
-                if self.config.VERBOSE: traceback.print_exc()
+                logger.exception(f"Error initializing HuggingFace client for {model_alias}: {e}")
                 raise
 
         elif model_type == "ollama":
@@ -91,7 +92,7 @@ class AskLLM:
                 return OllamaClient(model=model_id, config=config)
             except Exception as e:
                 console.print(f"[bold red]Error initializing Ollama client for {model_alias}:[/bold red] {e}")
-                if self.config.VERBOSE: traceback.print_exc()
+                logger.exception(f"Error initializing Ollama client for {model_alias}: {e}")
                 raise
 
         elif model_type == "openai":
@@ -102,10 +103,10 @@ class AskLLM:
                 return OpenAIClient(model_id, config=config)
              except Exception as e:
                 console.print(f"[bold red]Error initializing OpenAI client for {model_alias}:[/bold red] {e}")
-                if self.config.VERBOSE: traceback.print_exc()
+                logger.exception(f"Error initializing OpenAI client for {model_alias}: {e}")
                 raise
         else:
-            raise ValueError(f"Unsupported model type '{model_type}' defined for alias '{model_alias}' in {self.config.MODELS_CONFIG_PATH}")
+            raise ImportError(f"Unsupported model type '{model_type}' defined for alias '{model_alias}' in {self.config.MODELS_CONFIG_PATH}")
 
     def _initialize_llama_cpp_client(self, model_def: dict, config: Config):
         if LlamaCppClient is None:
@@ -116,7 +117,7 @@ class AskLLM:
         alias = self.resolved_model_alias
 
         if not repo_id or not filename:
-            raise ValueError(f"GGUF model definition for alias '{alias}' is missing 'repo_id' or 'filename' in {config.MODELS_CONFIG_PATH}")
+            raise ImportError(f"GGUF model definition for alias '{alias}' is missing 'repo_id' or 'filename' in {config.MODELS_CONFIG_PATH}")
 
         cache_dir = pathlib.Path(config.MODEL_CACHE_DIR).expanduser()
         model_repo_cache_dir = cache_dir / repo_id
@@ -150,7 +151,7 @@ class AskLLM:
                  raise
             except Exception as e:
                 console.print(f"[bold red]Error downloading file '{filename}':[/bold red] {e}")
-                if config.VERBOSE: traceback.print_exc()
+                logger.exception(f"Error downloading file '{filename}': {e}")
                 raise
 
         try:
@@ -161,7 +162,7 @@ class AskLLM:
              raise
         except Exception as e:
             console.print(f"[bold red]Error initializing LlamaCppClient with {model_path_to_load}:[/bold red] {e}")
-            if self.config.VERBOSE: traceback.print_exc()
+            logger.exception(f"Error initializing LlamaCppClient with {model_path_to_load}: {e}")
             raise
 
     def load_history(self):
@@ -175,8 +176,10 @@ class AskLLM:
             query_kwargs = {"messages": complete_context_messages,"plaintext_output": plaintext_output,}
 
             streaming_clients = []
-            if HuggingFaceClient: streaming_clients.append(HuggingFaceClient)
-            if LlamaCppClient: streaming_clients.append(LlamaCppClient)
+            if HF_CLIENT_AVAILABLE:
+                streaming_clients.append(HuggingFaceClient)
+            if LLAMA_CPP_AVAILABLE:
+                streaming_clients.append(LlamaCppClient)
 
             if streaming_clients and isinstance(self.client, tuple(streaming_clients)):
                 query_kwargs["stream"] = stream
@@ -184,7 +187,7 @@ class AskLLM:
             response = self.client.query(**query_kwargs)
 
             last_response = self.history_manager.get_last_assistant_message()
-            if last_response and response == last_response and not self.config.allow_duplicate_response:
+            if last_response and response == last_response and not self.config.ALLOW_DUPLICATE_RESPONSE:
                 console.print("[yellow]Detected duplicate response. Regenerating with higher temperature...[/yellow]")
                 response = self.client.query(**query_kwargs)
 
@@ -196,7 +199,6 @@ class AskLLM:
             return ""
         except Exception as e:
             console.print(f"[bold red]Error during query:[/bold red] {e}")
-            if self.config.VERBOSE:
-                 traceback.print_exc()
+            logger.exception(f"Error during query: {e}")
             self.history_manager.remove_last_message_if_partial("assistant")
             return "" 
