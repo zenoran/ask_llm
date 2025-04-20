@@ -46,13 +46,12 @@ class LlamaCppClient(LLMClient):
         # TODO: Make these parameters configurable via models.yaml
         n_gpu_layers = self.config.LLAMA_CPP_N_GPU_LAYERS # -1 means load all possible layers to GPU
         n_ctx = self.config.LLAMA_CPP_N_CTX # Context size
-        chat_format = self.config.CHAT_FORMAT or "chatml" # Default to chatml based on model template
 
         model_load_params = {
             "model_path": self.model_path,
             "n_gpu_layers": n_gpu_layers,
             "n_ctx": n_ctx,
-            "chat_format": chat_format,
+            "chat_format": "chatml",
             "verbose": False, # Disable llama-cpp's library-level verbose logging
             # Add other potential params like rope_freq_base, rope_freq_scale etc.
         }

@@ -210,8 +210,8 @@ class ModelManager:
                 selected = new_models
                 added_count = self._prepare_new_model_entries(provider_type, selected)
             else:
-                choices = {str(i+1): m for i, m in enumerate(new_models)}
-                selected = self._prompt_for_new_models(provider_type, new_models, choices)
+                # Pass only new_models and provider_type; choices_map is now internal
+                selected = self._prompt_for_new_models(new_models, provider_type)
                 added_count = self._prepare_new_model_entries(provider_type, selected)
 
         if updated_count or added_count:
@@ -258,15 +258,22 @@ class ModelManager:
     def _prompt_for_new_models(
         self,
         new_models: List[Dict[str, Any]],
-        choices_map: Dict[str, Dict[str, Any]],
         provider_type: str = PROVIDER_OPENAI,
     ) -> List[Dict[str, Any]]:
         tz = pytz.timezone('US/Eastern')
         console.print("New models detected:")
+        # Sort models alphabetically by ID before displaying
+        new_models.sort(key=lambda m: m['id'])
+
+        # Create choices_map AFTER sorting
+        choices_map = {str(idx + 1): model for idx, model in enumerate(new_models)}
+
         for idx, m in enumerate(new_models, start=1):
             # Use class method to format timestamp to support unbound self (e.g., None)
             ts = ModelManager._format_model_timestamp_str(None, provider_type, m, tz)
-            console.print(f"  [cyan]{idx}[/cyan]: {m['id']} ({ts})")
+            # Apply bright_blue color to the model ID
+            model_id_colored = f"[bright_blue]{m['id']}[/bright_blue]"
+            console.print(f"  [cyan]{idx}[/cyan]: {model_id_colored} ({ts})")
         # Choose separator based on provider (openai uses comma, others space)
         sep = ',' if provider_type == PROVIDER_OPENAI else ' '
         prompt = (
@@ -347,20 +354,23 @@ class ModelManager:
                 if processed_desc.lower().startswith(provider_prefix.lower()):
                     processed_desc = processed_desc[len(provider_prefix):].strip()
 
-            # 2. Prepare formatted ID (plain, for test-friendly output)
+            # 2. Prepare formatted ID (plain, for test-friendly output) and add color
             if mid:
-                formatted_id_str = mid
-                raw_id_str = mid
+                # Add color tag around the model ID
+                formatted_id_str = f"[bright_blue]{mid}[/bright_blue]"
+                raw_id_str = mid # Keep raw ID for matching
 
             # 3. Format output parts
             if processed_desc and raw_id_str and raw_id_str in processed_desc:
                 # 3a. Description exists and contains raw ID: replace ID with formatted version
                 escaped_raw_id = re.escape(raw_id_str)
-                final_desc = re.sub(rf'\b{escaped_raw_id}\b', formatted_id_str, processed_desc, count=1)
+                # Use the colored formatted_id_str in the replacement
+                final_desc = re.sub(rf'\\b{escaped_raw_id}\\b', formatted_id_str, processed_desc, count=1)
                 parts = [final_desc]
             else:
                 # 3b. Description doesn't contain ID, or missing desc/ID: build parts separately
                 if mid:
+                    # Use the colored formatted_id_str
                     parts.append(f"ID: {formatted_id_str}")
                 if processed_desc: # Use potentially prefix-removed description
                     parts.append(processed_desc)
@@ -416,7 +426,7 @@ def fetch_openai_api_models() -> Tuple[bool, List[Dict[str, Any]]]:
     start = time.time()
     try:
         client = OpenAI()
-        client.models.list(limit=1)
+        client.models.list()
     except Exception as e:
         console.print(f"[bold red]OpenAI init error:[/bold red] {e}")
         return False, []

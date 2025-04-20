@@ -4,11 +4,13 @@ import traceback
 import sys  # Import sys for exit codes
 from rich.console import Console
 from ask_llm.utils.config import Config
+from ask_llm.utils.config import set_config_value
 from ask_llm.utils.input_handler import MultilineInputHandler
 from ask_llm.core import AskLLM
 from ask_llm.model_manager import list_models, update_models_interactive, delete_model, ModelManager
 from ask_llm.gguf_handler import handle_add_gguf
 import logging
+from pathlib import Path
 
 console = Console()
 
@@ -19,6 +21,8 @@ def parse_arguments(config_obj: Config) -> argparse.Namespace:
     parser.add_argument("--list-models",action="store_true",help="List available model aliases defined in the configuration file and exit.")
     parser.add_argument("--refresh-models",type=str,choices=['ollama', 'openai'],metavar="TYPE",help="Refresh model list from a source: 'ollama' (check server availability), 'openai' (query API and update config)")
     parser.add_argument("--delete-model",type=str,metavar="ALIAS",help="Delete the specified model alias from the configuration file after confirmation.")
+    parser.add_argument("--config-set", nargs=2, metavar=("KEY", "VALUE"), help="Set a configuration value (e.g., DEFAULT_MODEL_ALIAS) in the .env file.")
+    parser.add_argument("--config-list", action="store_true", help="List the current effective configuration settings.")
     parser.add_argument("question", nargs="*", help="Your question for the LLM model")
     parser.add_argument("--verbose", action="store_true", help="Enable verbose output")
     parser.add_argument("-dh", "--delete-history", action="store_true", help="Clear chat history")
@@ -59,7 +63,38 @@ def main():
     logging.getLogger("requests").setLevel(logging.WARNING)
     logging.getLogger("urllib3").setLevel(logging.WARNING)
     logging.getLogger("markdown_it").setLevel(logging.WARNING)
-    if args.list_models:
+
+    # Handle config setting action first
+    if args.config_set:
+        key, value = args.config_set
+        # We'll implement set_config_value later
+        success = set_config_value(key, value, config_obj)
+        if success:
+            console.print(f"[green]Configuration '{key}' set to '{value}' in {config_obj.model_config['env_file']}.[/green]")
+            sys.exit(0)
+        else:
+            console.print(f"[bold red]Failed to set configuration '{key}'.[/bold red]")
+            sys.exit(1)
+
+    # Handle config listing action
+    elif args.config_list:
+        console.print(f"[bold magenta]Current Configuration Settings:[/bold magenta]")
+        console.print(f"(Sources: Defaults, Environment Variables, {config_obj.model_config['env_file']})\n")
+        # Fields to exclude from the listing
+        exclude_fields = {'defined_models', 'available_ollama_models', 'ollama_checked', 'model_config'}
+        for field_name, field_info in sorted(config_obj.model_fields.items()):
+            if field_name not in exclude_fields:
+                current_value = getattr(config_obj, field_name)
+                # Format Path objects nicely
+                if isinstance(current_value, Path):
+                    current_value_str = str(current_value)
+                else:
+                    current_value_str = repr(current_value)
+
+                console.print(f"  [cyan]{field_name}[/cyan]: {current_value_str}")
+        sys.exit(0)
+
+    elif args.list_models:
         list_models(config_obj)
         sys.exit(0)
         return
