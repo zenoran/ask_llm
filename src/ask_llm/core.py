@@ -3,29 +3,8 @@ import pathlib
 from rich.console import Console
 from .utils.config import Config, is_huggingface_available, is_llama_cpp_available
 from .utils.history import HistoryManager
-from .clients import OpenAIClient, OllamaClient, LLMClient
+from .clients import LLMClient
 import logging
-
-
-LLAMA_CPP_AVAILABLE = is_llama_cpp_available()
-HF_CLIENT_AVAILABLE = is_huggingface_available()
-
-if importlib.util.find_spec("huggingface_hub"):
-    from huggingface_hub import hf_hub_download
-    from huggingface_hub.utils import HfHubHTTPError
-    HF_HUB_AVAILABLE = True
-else:
-    HF_HUB_AVAILABLE = False
-
-if HF_CLIENT_AVAILABLE:
-    from .clients import HuggingFaceClient
-else:
-    HuggingFaceClient = None
-
-if LLAMA_CPP_AVAILABLE:
-    from .clients import LlamaCppClient
-else:
-    LlamaCppClient = None
 
 console = Console()
 logger = logging.getLogger(__name__)
@@ -51,12 +30,15 @@ class AskLLM:
             logger.debug(f"Initializing client for model: {model_alias} (Type: {model_type})")
 
         if model_type == "gguf":
-            if not HF_HUB_AVAILABLE:
+            # Check dependencies lazily
+            if importlib.util.find_spec("huggingface_hub") is None:
                  console.print("[bold red]Error:[/bold red] `huggingface-hub` is required for GGUF models.")
                  raise ImportError("huggingface-hub not found for GGUF download.")
+            if not is_llama_cpp_available(): # Check lazily
+                console.print("[bold red]Error:[/bold red] `llama-cpp-python` is required for GGUF models.")
+                raise ImportError("`llama-cpp-python` not installed or failed to import.")
             try:
-                if LlamaCppClient is None:
-                    raise ImportError("`llama-cpp-python` not installed or failed to import.")
+                from .clients.llama_cpp_client import LlamaCppClient
                 return self._initialize_llama_cpp_client(self.model_definition, config)
             except ImportError as e:
                  console.print(f"[bold red]Import Error for GGUF:[/bold red] {e}")
@@ -68,10 +50,12 @@ class AskLLM:
                 raise
 
         elif model_type == "huggingface":
-             if HuggingFaceClient is None:
-                 console.print("[bold red]Error:[/bold red] Hugging Face dependencies are required for model type 'huggingface'.")
-                 raise ImportError("HuggingFaceClient unavailable.")
+             # Check dependencies lazily
+             if not is_huggingface_available(): # Check lazily
+                 console.print("[bold red]Error:[/bold red] Hugging Face dependencies are required for model type 'huggingface'. Ensure `transformers` and `torch` (or `tensorflow`/`jax`) are installed.")
+                 raise ImportError("HuggingFace dependencies unavailable.")
              try:
+                 from .clients.huggingface_client import HuggingFaceClient
                  model_id = self.model_definition.get("model_id")
                  if not model_id:
                      raise ValueError(f"Missing 'model_id' in definition for alias '{model_alias}'")
@@ -83,6 +67,7 @@ class AskLLM:
 
         elif model_type == "ollama":
             try:
+                from .clients.ollama_client import OllamaClient
                 model_id = self.model_definition.get("model_id")
                 if not model_id:
                     raise ValueError(f"Missing 'model_id' in definition for alias '{model_alias}'")
@@ -97,10 +82,11 @@ class AskLLM:
 
         elif model_type == "openai":
              try:
-                model_id = self.model_definition.get("model_id")
-                if not model_id:
-                    raise ValueError(f"Missing 'model_id' in definition for alias '{model_alias}'")
-                return OpenAIClient(model_id, config=config)
+                 from .clients.openai_client import OpenAIClient
+                 model_id = self.model_definition.get("model_id")
+                 if not model_id:
+                     raise ValueError(f"Missing 'model_id' in definition for alias '{model_alias}'")
+                 return OpenAIClient(model_id, config=config)
              except Exception as e:
                 console.print(f"[bold red]Error initializing OpenAI client for {model_alias}:[/bold red] {e}")
                 logger.exception(f"Error initializing OpenAI client for {model_alias}: {e}")
@@ -109,9 +95,16 @@ class AskLLM:
             raise ImportError(f"Unsupported model type '{model_type}' defined for alias '{model_alias}' in {self.config.MODELS_CONFIG_PATH}")
 
     def _initialize_llama_cpp_client(self, model_def: dict, config: Config):
-        if LlamaCppClient is None:
-            raise ImportError("`llama-cpp-python` not installed or failed to import.")
+        # Re-import necessary hf_hub functions if needed, as the check is now local
+        # Though, the check in initialize_client should prevent reaching here if unavailable
+        if importlib.util.find_spec("huggingface_hub"):
+             from huggingface_hub import hf_hub_download
+             from huggingface_hub.utils import HfHubHTTPError
+        else:
+             # This state should ideally not be reached due to the check in initialize_client
+             raise ImportError("huggingface-hub is required but not found for GGUF download within _initialize_llama_cpp_client.")
 
+        from .clients.llama_cpp_client import LlamaCppClient
         repo_id = model_def.get("repo_id")
         filename = model_def.get("filename")
         alias = self.resolved_model_alias
@@ -175,14 +168,10 @@ class AskLLM:
 
             query_kwargs = {"messages": complete_context_messages,"plaintext_output": plaintext_output,}
 
-            streaming_clients = []
-            if HF_CLIENT_AVAILABLE:
-                streaming_clients.append(HuggingFaceClient)
-            if LLAMA_CPP_AVAILABLE:
-                streaming_clients.append(LlamaCppClient)
-
-            if streaming_clients and isinstance(self.client, tuple(streaming_clients)):
-                query_kwargs["stream"] = stream
+            if hasattr(self.client, 'SUPPORTS_STREAMING') and self.client.SUPPORTS_STREAMING and stream:
+                 query_kwargs["stream"] = True
+            elif stream:
+                 logger.debug(f"Streaming requested but client {type(self.client).__name__} does not support it. Disabling streaming.")
 
             response = self.client.query(**query_kwargs)
 

@@ -34,10 +34,22 @@ def parse_arguments(config_obj: Config) -> argparse.Namespace:
 
 def main():
     try:
+        # --- Minimal Pre-parsing for flags affecting config loading/display --- 
+        # We need to parse --verbose, --plain early, but also handle config paths if specified.
+        # Using a separate parser for this minimal set.
+        prelim_parser = argparse.ArgumentParser(add_help=False)
+        prelim_parser.add_argument("--verbose", action="store_true", help="Enable verbose output")
+        prelim_parser.add_argument("--plain", action="store_true", help="Use plain text output")
+        prelim_args, remaining_argv = prelim_parser.parse_known_args()
+
+        # --- Instantiate Config --- 
         config_obj = Config()
-    except FileNotFoundError:
-        console.print(f"[bold yellow]Warning:[/bold yellow] Configuration file not found at default location. Using built-in defaults.")
-        config_obj = Config(load_config_files=False)
+
+    except Exception as e:
+        # Catch potential Pydantic validation errors or file issues during Config init
+        console.print(f"[bold red]Error initializing configuration:[/bold red] {e}")
+        sys.exit(1)
+        
     prelim_parser = argparse.ArgumentParser(add_help=False)
     prelim_parser.add_argument("--verbose", action="store_true", help="Enable verbose output")
     prelim_parser.add_argument("--plain", action="store_true", help="Use plain text output")

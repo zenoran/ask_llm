@@ -21,6 +21,7 @@ from ..clients.base import LLMClient
 from ..utils.config import Config
 from ..models.message import Message
 
+# Check and import bitsandbytes lazily
 try:
     import bitsandbytes
     _bitsandbytes_available = True
@@ -28,6 +29,7 @@ except ImportError:
     bitsandbytes = None
     _bitsandbytes_available = False
 
+# Restore original logging level setting
 logging.getLogger("transformers").setLevel(logging.WARNING)
 
 
@@ -35,8 +37,11 @@ class HuggingFaceClient(LLMClient):
     """Client for running Hugging Face transformer models locally."""
 
     def __init__(self, model_id: str, config: Config):
+        # Check and import bitsandbytes lazily
         if not _bitsandbytes_available:
-             raise ImportError("bitsandbytes library not found, which is required for quantization. Install with: pip install bitsandbytes accelerate")
+            raise ImportError("bitsandbytes library not found, which is required for quantization. Install with: pip install bitsandbytes accelerate")
+        
+        # Import torch lazily here for CUDA check
         if not torch.cuda.is_available():
             raise RuntimeError("CUDA not available. HuggingFaceClient requires a GPU.")
 
@@ -59,6 +64,7 @@ class HuggingFaceClient(LLMClient):
 
     def _load_model(self):
         self.console.print(f"Loading model: [bold cyan]{self.model_id}[/bold cyan]... (This may take a while)")
+        
         torch.cuda.empty_cache()
 
         quantization_config = self._configure_quantization()
@@ -152,7 +158,7 @@ class HuggingFaceClient(LLMClient):
                 payload_str = json.dumps(full_payload_for_logging, indent=2)
                 self.console.print(JSON(payload_str))
             except TypeError as e:
-                logger.error(f"Could not serialize payload for Rich JSON printing: {e}")
+                # Log the error using the base logging module if needed, or just print
                 self.console.print(f"[red]Error printing payload:[/red] {e}")
                 import pprint
                 self.console.print(pprint.pformat(full_payload_for_logging))

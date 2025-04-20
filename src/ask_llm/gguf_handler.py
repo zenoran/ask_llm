@@ -1,17 +1,12 @@
 import re
 import pathlib
 import yaml
+import importlib.util
 from typing import List, Dict, Any
 from rich.prompt import Prompt, Confirm
 from rich.console import Console
 
 from .utils.config import Config
-from .core import HF_HUB_AVAILABLE
-
-
-if HF_HUB_AVAILABLE:
-    from huggingface_hub import hf_hub_download, HfApi
-    from huggingface_hub.utils import HfHubHTTPError
 
 console = Console()
 
@@ -35,7 +30,7 @@ def generate_gguf_alias(repo_id: str, filename: str, existing_aliases: List[str]
     return alias
 
 def handle_add_gguf(repo_id: str, config: Config) -> bool:
-    if not HF_HUB_AVAILABLE:
+    if importlib.util.find_spec("huggingface_hub") is None:
         console.print("[bold red]Error:[/bold red] `huggingface-hub` is required to add GGUF models.")
         console.print("Install with: `pip install huggingface-hub`")
         return False
@@ -43,6 +38,9 @@ def handle_add_gguf(repo_id: str, config: Config) -> bool:
     console.print(f"Attempting to add GGUF from repository: [cyan]{repo_id}[/cyan]")
 
     try:
+        from huggingface_hub import hf_hub_download, HfApi
+        from huggingface_hub.utils import HfHubHTTPError
+
         api = HfApi()
         console.print("Listing files in repository...")
         files_in_repo = api.list_repo_files(repo_id=repo_id)
@@ -93,8 +91,11 @@ def _select_gguf_file(repo_id: str, gguf_files: List[str]) -> str | None:
                 return None
 
 def _download_gguf_file(repo_id: str, filename: str, config: Config) -> bool:
-    if not hf_hub_download:
+    if importlib.util.find_spec("huggingface_hub") is None:
+        console.print("[bold red]Error:[/bold red] `huggingface-hub` required for download but not found.")
         return False
+    from huggingface_hub import hf_hub_download
+
     console.print(f"Verifying/Downloading '[yellow]{filename}[/yellow]' to cache...")
     cache_dir = pathlib.Path(config.MODEL_CACHE_DIR).expanduser()
     model_repo_cache_dir = cache_dir / repo_id

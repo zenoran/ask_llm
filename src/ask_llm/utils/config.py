@@ -5,7 +5,6 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-import requests
 import yaml
 from pydantic import Field, computed_field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -20,23 +19,18 @@ PROVIDER_UNKNOWN = "Unknown"
 logger = logging.getLogger(__name__)
 console = Console()
 
-_hf_available = None
-_llama_cpp_available = None
-
 def is_huggingface_available() -> bool:
-    global _hf_available
-    if _hf_available is None:
-        torch_spec = importlib.util.find_spec("torch")
-        transformers_spec = importlib.util.find_spec("transformers")
-        bitsandbytes_spec = importlib.util.find_spec("bitsandbytes")
-        _hf_available = all([torch_spec, transformers_spec, bitsandbytes_spec])
-    return _hf_available
+    """Checks if Hugging Face dependencies (torch, transformers, bitsandbytes) are available."""
+    torch_spec = importlib.util.find_spec("torch")
+    transformers_spec = importlib.util.find_spec("transformers")
+    # bitsandbytes is often optional but useful for quantization with HF
+    bitsandbytes_spec = importlib.util.find_spec("bitsandbytes") 
+    # Adjust logic if bitsandbytes should be strictly required
+    return all([torch_spec, transformers_spec]) # Or include bitsandbytes_spec if mandatory
 
 def is_llama_cpp_available() -> bool:
-    global _llama_cpp_available
-    if _llama_cpp_available is None:
-        _llama_cpp_available = importlib.util.find_spec("llama_cpp") is not None
-    return _llama_cpp_available
+    # Restore original or remove if too obvious
+    return importlib.util.find_spec("llama_cpp") is not None
 
 def get_default_models_yaml_path() -> Path:
     env_path = os.environ.get("ASK_LLM_MODELS_CONFIG_PATH")
@@ -93,10 +87,6 @@ class Config(BaseSettings):
         super().__init__(**values)
         self._load_models_config()
 
-        has_ollama_models = any(model.get('type') == 'ollama' for model in self.defined_models.get('models', {}).values())
-        if has_ollama_models:
-            self._check_ollama_availability()
-
     def _load_models_config(self):
         config_path = Path(self.MODELS_CONFIG_PATH)
         if not config_path.is_file():
@@ -128,6 +118,7 @@ class Config(BaseSettings):
             return
 
         try:
+            import requests # Import lazily
             start_time = time.time()
             response = requests.get(f"{self.OLLAMA_URL}/api/tags", timeout=5)
             response.raise_for_status()
@@ -144,9 +135,7 @@ class Config(BaseSettings):
         self.ollama_checked = False
         self._check_ollama_availability(force_check=True)
 
-    @computed_field
-    @property
-    def MODEL_OPTIONS(self) -> List[str]:
+    def get_model_options(self) -> List[str]:
         available_options = []
         defined = self.defined_models.get("models", {})
         for alias, model_info in defined.items():
@@ -155,6 +144,9 @@ class Config(BaseSettings):
                 available_options.append(alias)
             elif model_type == PROVIDER_OLLAMA:
                 model_id = model_info.get("model_id")
+                # Check Ollama availability lazily only when evaluating Ollama models
+                if not self.ollama_checked:
+                    self._check_ollama_availability()
                 if model_id and model_id in self.available_ollama_models:
                     available_options.append(alias)
             elif model_type == PROVIDER_GGUF:
@@ -215,6 +207,3 @@ def set_config_value(key: str, value: str, config: Config) -> bool:
     except IOError as e:
         console.print(f"[bold red]Error writing to {dotenv_path}:[/bold red] {e}")
         return False
-
-
-global_config = Config()

@@ -22,13 +22,10 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import pytz
-import requests
 import yaml
-from openai import OpenAI
 from rich.console import Console
 from rich.prompt import Confirm, Prompt
 from rich.rule import Rule
-from openai import OpenAI
 
 from ask_llm.utils.config import (
     PROVIDER_GGUF,
@@ -125,7 +122,7 @@ class ModelManager:
     def list_available_models(self):
         console.print(f"Available model aliases from [cyan]{self.config_path}[/cyan]:")
         defined_models = self.models_data.get("models", {})
-        available_aliases = set(self.config.MODEL_OPTIONS)
+        available_aliases = set(self.config.get_model_options())
         if not defined_models:
             console.print("  [yellow]No models defined in the configuration file.[/yellow]")
             return
@@ -151,12 +148,12 @@ class ModelManager:
             console.print(Rule(style="#777777"))
         console.print("[green]✓[/green] = Dependencies met | [red]✗[/red] = Dependencies missing")
         if self.config.DEFAULT_MODEL_ALIAS:
-            status = "[green]✓[/green]" if self.config.DEFAULT_MODEL_ALIAS in self.config.MODEL_OPTIONS else "[red]✗[/red]"
+            status = "[green]✓[/green]" if self.config.DEFAULT_MODEL_ALIAS in available_aliases else "[red]✗[/red]"
             console.print(f"Default alias: {status} [cyan]{self.config.DEFAULT_MODEL_ALIAS}[/cyan]")
 
     def resolve_model_alias(self, requested_alias: Optional[str]) -> Optional[str]:
         defined = self.models_data.get("models", {})
-        available_set = set(self.config.MODEL_OPTIONS)
+        available_set = set(self.config.get_model_options())
         if not requested_alias:
             default = self.config.DEFAULT_MODEL_ALIAS
             if default and default in available_set:
@@ -170,7 +167,7 @@ class ModelManager:
         if requested_alias in defined:
             console.print(f"[bold red]Error:[/bold red] '{requested_alias}' defined but unavailable.")
             return None
-        matches = [a for a in self.config.MODEL_OPTIONS if norm in normalize_for_match(a)]
+        matches = [a for a in self.config.get_model_options() if norm in normalize_for_match(a)]
         if len(matches) == 1:
             return matches[0]
         if matches:
@@ -395,6 +392,8 @@ class ModelManager:
 
 
 def fetch_ollama_api_models(ollama_url: str) -> Tuple[bool, List[Dict[str, Any]]]:
+    """Fetches model list from Ollama API."""
+    import requests # Import lazily
     models_details = []
     start = time.time()
     endpoint = f"{ollama_url.rstrip('/')}/api/tags"
@@ -420,6 +419,9 @@ def fetch_ollama_api_models(ollama_url: str) -> Tuple[bool, List[Dict[str, Any]]
         return False, []
 
 def fetch_openai_api_models() -> Tuple[bool, List[Dict[str, Any]]]:
+    """Fetches model list from OpenAI API."""
+    from openai import OpenAI # Import lazily
+    from openai import APIConnectionError, AuthenticationError, RateLimitError
     details = []
     start = time.time()
     try:
