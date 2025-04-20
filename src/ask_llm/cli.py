@@ -4,11 +4,13 @@ import traceback
 import sys  # Import sys for exit codes
 from rich.console import Console
 from ask_llm.utils.config import Config
+from ask_llm.utils.config import set_config_value
 from ask_llm.utils.input_handler import MultilineInputHandler
 from ask_llm.core import AskLLM
 from ask_llm.model_manager import list_models, update_models_interactive, delete_model, ModelManager
 from ask_llm.gguf_handler import handle_add_gguf
 import logging
+from pathlib import Path
 
 console = Console()
 
@@ -19,6 +21,8 @@ def parse_arguments(config_obj: Config) -> argparse.Namespace:
     parser.add_argument("--list-models",action="store_true",help="List available model aliases defined in the configuration file and exit.")
     parser.add_argument("--refresh-models",type=str,choices=['ollama', 'openai'],metavar="TYPE",help="Refresh model list from a source: 'ollama' (check server availability), 'openai' (query API and update config)")
     parser.add_argument("--delete-model",type=str,metavar="ALIAS",help="Delete the specified model alias from the configuration file after confirmation.")
+    parser.add_argument("--config-set", nargs=2, metavar=("KEY", "VALUE"), help="Set a configuration value (e.g., DEFAULT_MODEL_ALIAS) in the .env file.")
+    parser.add_argument("--config-list", action="store_true", help="List the current effective configuration settings.")
     parser.add_argument("question", nargs="*", help="Your question for the LLM model")
     parser.add_argument("--verbose", action="store_true", help="Enable verbose output")
     parser.add_argument("-dh", "--delete-history", action="store_true", help="Clear chat history")
@@ -38,28 +42,46 @@ def main():
     prelim_parser.add_argument("--verbose", action="store_true", help="Enable verbose output")
     prelim_parser.add_argument("--plain", action="store_true", help="Use plain text output")
     prelim_args, _ = prelim_parser.parse_known_args()
-
-    # Full parse using the potentially modified config
     args = parse_arguments(config_obj)
-
-    # NOW set config flags based on the *final* parsed args
     config_obj.VERBOSE = args.verbose
     config_obj.PLAIN_OUTPUT = args.plain
     config_obj.NO_STREAM = args.no_stream
     config_obj.INTERACTIVE_MODE = not args.question and not args.command # Set interactive mode flag
-
-    # Ensure logger level respects the final VERBOSE setting
-    # (Add logging configuration here if not done elsewhere reliably)
     logging.basicConfig(level=logging.DEBUG if config_obj.VERBOSE else logging.INFO,
                         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-    # Suppress overly verbose logs from libraries if needed
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
     logging.getLogger("openai").setLevel(logging.WARNING)
     logging.getLogger("requests").setLevel(logging.WARNING)
     logging.getLogger("urllib3").setLevel(logging.WARNING)
     logging.getLogger("markdown_it").setLevel(logging.WARNING)
-    if args.list_models:
+    # Handle setting config values, guard missing attribute in stubbed args
+    if getattr(args, 'config_set', None):
+        key, value = args.config_set
+        success = set_config_value(key, value, config_obj)
+        if success:
+            console.print(f"[green]Configuration '{key}' set to '{value}' in {config_obj.model_config['env_file']}.[/green]")
+            sys.exit(0)
+        else:
+            console.print(f"[bold red]Failed to set configuration '{key}'.[/bold red]")
+            sys.exit(1)
+    # Handle listing config values
+    elif getattr(args, 'config_list', False):
+        console.print(f"[bold magenta]Current Configuration Settings:[/bold magenta]")
+        console.print(f"(Sources: Defaults, Environment Variables, {config_obj.model_config['env_file']})\n")
+        exclude_fields = {'defined_models', 'available_ollama_models', 'ollama_checked', 'model_config'}
+        for field_name, field_info in sorted(config_obj.model_fields.items()):
+            if field_name not in exclude_fields:
+                current_value = getattr(config_obj, field_name)
+                if isinstance(current_value, Path):
+                    current_value_str = str(current_value)
+                else:
+                    current_value_str = repr(current_value)
+
+                console.print(f"  [cyan]{field_name}[/cyan]: {current_value_str}")
+        sys.exit(0)
+
+    elif args.list_models:
         list_models(config_obj)
         sys.exit(0)
         return
@@ -84,7 +106,6 @@ def main():
             success = delete_model(args.delete_model, config_obj)
             if success:
                 console.print(f"[green]Model alias '{args.delete_model}' deleted successfully.[/green]")
-            # No explicit else needed, delete_model prints error on failure
         except Exception as e:
             console.print(f"[bold red]Error during delete model operation:[/bold red] {e}")
             if config_obj.VERBOSE:
@@ -169,8 +190,6 @@ def run_app(args: argparse.Namespace, config_obj: Config, resolved_alias: str):
             console.print(f"[bold red]{error_msg}[/bold red]", highlight=False)
             command_output_str += f"{error_msg}\n\n---\n"
         console.print()
-
-    # Use config object for flags
     stream_flag = not config_obj.NO_STREAM
     plaintext_flag = config_obj.PLAIN_OUTPUT
 
@@ -182,7 +201,6 @@ def run_app(args: argparse.Namespace, config_obj: Config, resolved_alias: str):
             console.print("Command output captured, querying LLM with it...", highlight=False)
         ask_llm.query(command_output_str.strip(), plaintext_output=plaintext_flag, stream=stream_flag)
     else:
-        # Interactive mode
         console.print("[bold green]Entering interactive mode. Type 'exit' or 'quit' to leave.[/bold green]", highlight=False)
         console.print("[bold green]Type '>' at the beginning of a line for multiline input mode (end with Ctrl+D or Ctrl+Z).[/bold green]", highlight=False)
         handler_console = ask_llm.client.console if hasattr(ask_llm.client, 'console') and ask_llm.client.console else console

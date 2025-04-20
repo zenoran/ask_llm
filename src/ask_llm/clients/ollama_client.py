@@ -9,13 +9,11 @@ from ask_llm.clients.base import LLMClient
 from ask_llm.utils.config import Config # Keep for type hinting
 from ask_llm.models.message import Message
 
-# Get logger instance
 logger = logging.getLogger(__name__)
 
 class OllamaClient(LLMClient):
     def __init__(self, model: str, config: Config):
         super().__init__(model, config) # Pass config to base class
-        # self.config = config # Stored in base class
 
     def query(self, messages: List[Message], plaintext_output: bool = False, stream: bool = True, **kwargs) -> str:
         """Query Ollama API with full message history, supporting streaming.
@@ -30,7 +28,6 @@ class OllamaClient(LLMClient):
             The model's response as a string.
         """
         api_messages = self._prepare_api_messages(messages)
-        # Use self.config for stream check
         should_stream = stream and not self.config.NO_STREAM
         if should_stream:
             response = self._stream_response(api_messages, plaintext_output)
@@ -41,7 +38,6 @@ class OllamaClient(LLMClient):
     def _prepare_api_messages(self, messages: List[Message]) -> List[dict]:
         api_messages = []
         has_system_message = False
-        # Use self.config for SYSTEM_MESSAGE
         system_message = self.config.SYSTEM_MESSAGE
         for msg in messages:
             formatted_msg = msg.to_api_format()
@@ -49,14 +45,11 @@ class OllamaClient(LLMClient):
                 if not has_system_message:
                     api_messages.insert(0, formatted_msg)
                     has_system_message = True
-                # Skip subsequent system messages
             else:
                 api_messages.append(formatted_msg)
 
         if not has_system_message and system_message:
             api_messages.insert(0, {"role": "system", "content": system_message})
-
-        # Clean up consecutive roles and filter error messages
         cleaned_messages = []
         if api_messages:
             cleaned_messages.append(api_messages[0])
@@ -81,8 +74,6 @@ class OllamaClient(LLMClient):
                 "top_p": self.config.TOP_P
             }
         }
-
-        # Use self.config.VERBOSE for direct console output
         if self.config.VERBOSE:
             self.console.print(Rule("Querying Ollama API (Streaming)", style="purple"))
             options = payload.get('options', {})
@@ -98,11 +89,9 @@ class OllamaClient(LLMClient):
                 self.console.print(pprint.pformat(payload))
             self.console.print(Rule(style="purple"))
         elif logger.isEnabledFor(logging.DEBUG):
-            # Fallback to logger if not verbose but debug is enabled
             logger.debug(f"Ollama Request Payload: {json.dumps(payload)}")
 
         try:
-            # Use self.config for URL and generation params
             response = requests.post(
                 f"{self.config.OLLAMA_URL}/api/chat",
                 json=payload, # Use the constructed payload
@@ -117,8 +106,6 @@ class OllamaClient(LLMClient):
         except Exception as e:
             self.console.print(f"[bold red]Initial Ollama Request Error:[/bold red] {str(e)}")
             return f"ERROR: {str(e)}"
-
-        # Pass the iterator to the base handler
         result = self._handle_streaming_output(
             stream_iterator=self._iterate_ollama_chunks(response, plaintext_output),
             plaintext_output=plaintext_output,
@@ -140,8 +127,6 @@ class OllamaClient(LLMClient):
                 "top_p": self.config.TOP_P
             }
         }
-
-        # Use self.config.VERBOSE for direct console output
         if self.config.VERBOSE:
             self.console.print(Rule("Querying Ollama API (Non-Streaming)", style="purple"))
             options = payload.get('options', {})
@@ -157,11 +142,9 @@ class OllamaClient(LLMClient):
                 self.console.print(pprint.pformat(payload))
             self.console.print(Rule(style="purple"))
         elif logger.isEnabledFor(logging.DEBUG):
-            # Fallback to logger if not verbose but debug is enabled
             logger.debug(f"Ollama Request Payload (non-streaming): {json.dumps(payload)}")
 
         try:
-            # Use self.config for URL and generation params
             response = requests.post(
                 f"{self.config.OLLAMA_URL}/api/chat",
                 json=payload, # Use the constructed payload
@@ -171,11 +154,9 @@ class OllamaClient(LLMClient):
             data = response.json()
             response_text = data.get('message', {}).get('content', '')
             if not plaintext_output:
-                 # Split response at the first \n\n
                  parts = response_text.split("\n\n", 1)
                  first_part = parts[0]
                  second_part = parts[1] if len(parts) > 1 else None
-                 # Use appropriate style
                  self._print_assistant_message(first_part, second_part=second_part, panel_border_style="purple")
             return response_text.strip()
 
@@ -246,11 +227,7 @@ class OllamaClient(LLMClient):
                                     thought_buffer += parts[0].replace("\n", " ")
                                     current_content_part = parts[2]
                                     total_thought += thought_buffer.strip()
-                                    # Replace config.VERBOSE check with logger level check
-                                    # if config.VERBOSE and not error_reported:
                                     if logger.isEnabledFor(logging.DEBUG) and not error_reported:
-                                        # Replace console.print with logger.debug
-                                        # self.console.print(f"[#555555 i]Thought: {total_thought}[/#555555 i]       ") # Clear thinking message
                                         logger.debug(f"Thought: {total_thought}")
                                         self.console.print(" "*20, end='\r') # Still clear the 'Thinking...' message
                                     total_thought = ""
@@ -273,7 +250,5 @@ class OllamaClient(LLMClient):
     def get_styling(self) -> tuple[str | None, str]:
         """Return Ollama specific styling."""
         panel_border_style = "purple"
-        # Use the same title format as in _stream_response / _get_full_response if needed
-        # Example: panel_title = f"[bold {panel_border_style}]{self.model}[/bold {panel_border_style}]"
         panel_title = None # Default title format uses model name and border style
         return panel_title, panel_border_style

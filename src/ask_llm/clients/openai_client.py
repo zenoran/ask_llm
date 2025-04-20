@@ -9,7 +9,6 @@ from ..utils.config import Config # Keep for type hinting
 from ..models.message import Message
 import logging # Import logging
 
-# Get logger instance
 logger = logging.getLogger(__name__)
 
 class OpenAIClient(LLMClient):
@@ -38,8 +37,6 @@ class OpenAIClient(LLMClient):
             The model's response as a string.
         """
         api_messages = self._prepare_api_messages(messages)
-
-        # Determine payload based on streaming
         should_stream = stream and not self.config.NO_STREAM
         payload = {
             "model": self.model,
@@ -49,8 +46,6 @@ class OpenAIClient(LLMClient):
             "top_p": self.config.TOP_P,
             "stream": should_stream,
         }
-
-        # Use self.config.VERBOSE instead of logger level check for direct console output
         if self.config.VERBOSE:
             self.console.print(Rule("Querying OpenAI API", style="green"))
             self.console.print(f"[dim]Params:[/dim] [italic]max_tokens={payload['max_tokens']}, temp={payload['temperature']}, top_p={payload['top_p']}, stream={payload['stream']}[/italic]")
@@ -65,7 +60,6 @@ class OpenAIClient(LLMClient):
                 self.console.print(pprint.pformat(payload))
             self.console.print(Rule(style="green"))
         elif logger.isEnabledFor(logging.DEBUG):
-            # Fallback to logger if not verbose but debug is enabled
             logger.debug(f"OpenAI Request Payload: {json.dumps(payload)}")
 
         if should_stream:
@@ -99,7 +93,6 @@ class OpenAIClient(LLMClient):
     def _stream_response(self, api_messages: List[dict], plaintext_output: bool, payload: dict) -> str:
         """Stream the response using the base class handler."""
         try:
-            # Pass the already constructed payload
             stream = self.client.chat.completions.create(**payload)
             return self._handle_streaming_output(
                 stream_iterator=self._iterate_openai_chunks(stream),
@@ -129,12 +122,9 @@ class OpenAIClient(LLMClient):
     def _get_full_response(self, api_messages: List[dict], plaintext_output: bool, payload: dict) -> str:
         """Gets the full response without streaming."""
         try:
-            # Pass the already constructed payload (ensuring stream is False)
             payload['stream'] = False
             completion = self.client.chat.completions.create(**payload)
             response_text = completion.choices[0].message.content or ""
-
-            # Use self.config.VERBOSE instead of logger for token usage output
             if self.config.VERBOSE:
                 usage = completion.usage
                 if usage:
@@ -145,7 +135,6 @@ class OpenAIClient(LLMClient):
                     logger.debug(f"OpenAI Tokens: Prompt={usage.prompt_tokens}, Completion={usage.completion_tokens}, Total={usage.total_tokens}")
 
             if not plaintext_output:
-                # Split response at the first \n\n
                 parts = response_text.split("\n\n", 1)
                 first_part = parts[0]
                 second_part = parts[1] if len(parts) > 1 else None
@@ -162,7 +151,6 @@ class OpenAIClient(LLMClient):
 
     def get_styling(self) -> tuple[str | None, str]:
         """Return OpenAI specific styling."""
-        # Use the default styling from the base class print method
         panel_border_style = "green"
         panel_title = f"[bold {panel_border_style}]{self.model}[/bold {panel_border_style}]"
         return panel_title, panel_border_style

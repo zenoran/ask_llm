@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Optional
 
 import requests
 import yaml
-from pydantic import Field, ValidationError, computed_field
+from pydantic import Field, computed_field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from rich.console import Console
 
@@ -49,6 +49,7 @@ def get_default_models_yaml_path() -> Path:
     return default_config_dir / "models.yaml"
 
 DEFAULT_MODELS_YAML = get_default_models_yaml_path()
+DOTENV_PATH = DEFAULT_MODELS_YAML.parent / ".env"
 
 class Config(BaseSettings):
     HISTORY_FILE: str = Field(default=os.path.expanduser("~/.ask-llm-chat-history"))
@@ -56,15 +57,12 @@ class Config(BaseSettings):
     OLLAMA_URL: str = Field(default="http://localhost:11434")
     MODEL_CACHE_DIR: str = Field(default=os.path.expanduser("~/.cache/ask_llm/models"), description="Directory to cache downloaded GGUF models")
     MODELS_CONFIG_PATH: str = Field(default=str(DEFAULT_MODELS_YAML), description="Path to the models YAML definition file")
-    DEFAULT_MODEL_ALIAS: Optional[str] = Field(default=None, description="Alias from models.yaml to use if --model is not specified")
+    DEFAULT_MODEL_ALIAS: Optional[str] = Field(default=None, description="Alias from models.yaml to use if --model is not specified (Set via ASK_LLM_DEFAULT_MODEL_ALIAS in env or .env file)")
     ALLOW_DUPLICATE_RESPONSE: bool = Field(default=False, description="Allow identical consecutive assistant responses without retry")
 
     MAX_TOKENS: int = Field(default=1024, description="Default maximum tokens to generate")
     TEMPERATURE: float = Field(default=0.8, description="Default generation temperature")
     TOP_P: float = Field(default=0.95, description="Default nucleus sampling top-p")
-    CHAT_FORMAT: Optional[str] = Field(default=None, description="Default chat format for Llama.cpp (e.g., llama-2, chatml, mistral) - Can be overridden per model")
-
-    # Llama.cpp specific settings
     LLAMA_CPP_N_CTX: int = Field(default=4096, description="Context size for Llama.cpp models")
     LLAMA_CPP_N_GPU_LAYERS: int = Field(default=-1, description="Number of layers to offload to GPU (-1 for all possible layers)")
 
@@ -78,7 +76,13 @@ class Config(BaseSettings):
     available_ollama_models: List[str] = Field(default_factory=list, exclude=True)
     ollama_checked: bool = Field(default=False, exclude=True)
 
-    model_config = SettingsConfigDict(env_prefix="ASK_LLM_",env_file=".env",env_file_encoding="utf-8",case_sensitive=False,extra='ignore')
+    model_config = SettingsConfigDict(
+        env_prefix="ASK_LLM_",
+        env_file=DOTENV_PATH,
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+        extra='ignore'
+    )
 
     def __init__(self, **values: Any):
         if 'MODELS_CONFIG_PATH' in values:
@@ -88,9 +92,6 @@ class Config(BaseSettings):
 
         super().__init__(**values)
         self._load_models_config()
-
-        if self.DEFAULT_MODEL_ALIAS is None:
-            self.DEFAULT_MODEL_ALIAS = self.defined_models.get("default_model_alias")
 
         has_ollama_models = any(model.get('type') == 'ollama' for model in self.defined_models.get('models', {}).values())
         if has_ollama_models:
@@ -108,20 +109,12 @@ class Config(BaseSettings):
             with open(config_path, 'r', encoding='utf-8') as f:
                 loaded_data = yaml.safe_load(f)
                 if loaded_data is None:
-                    loaded_data = {"models": {}}
-
+                    loaded_data = {} # Start with empty dict
             if "models" not in loaded_data or not isinstance(loaded_data.get("models"), dict):
-                console.print(f"[bold red]Error:[/bold red] Invalid format in {config_path}. Missing or invalid top-level 'models' dictionary.")
+                console.print(f"[bold red]Warning:[/bold red] Invalid format in {config_path}. Missing or invalid top-level 'models' dictionary. Treating as empty.")
                 self.defined_models = {"models": {}}
             else:
-                self.defined_models = loaded_data
-                global_overrides = {k: v for k, v in loaded_data.items() if k != "models"}
-                for key, value in global_overrides.items():
-                    if hasattr(self, key):
-                        try:
-                            setattr(self, key, value)
-                        except ValidationError as e:
-                            console.print(f"[yellow]Warning:[/yellow] Invalid value for '{key}' in {config_path}: {e}. Using default/environment value.")
+                self.defined_models = {"models": loaded_data["models"]}
 
         except yaml.YAMLError as e:
             console.print(f"[bold red]Error parsing YAML file {config_path}:[/bold red] {e}")
@@ -159,24 +152,69 @@ class Config(BaseSettings):
         for alias, model_info in defined.items():
             model_type = model_info.get("type")
             if model_type == PROVIDER_OPENAI:
-                # Assume openai package installed if type is specified
                 available_options.append(alias)
             elif model_type == PROVIDER_OLLAMA:
-                # Check if model name is in the list fetched from Ollama server
                 model_id = model_info.get("model_id")
                 if model_id and model_id in self.available_ollama_models:
                     available_options.append(alias)
             elif model_type == PROVIDER_GGUF:
-                # Check if llama-cpp-python is installed
                 if is_llama_cpp_available():
                     available_options.append(alias)
             elif model_type == PROVIDER_HF:
-                # Check if huggingface dependencies are installed
                 if is_huggingface_available():
                     available_options.append(alias)
-            # Ignore models with unknown or missing type
 
         return sorted(list(set(available_options))) # Return sorted list of unique aliases
+
+
+def set_config_value(key: str, value: str, config: Config) -> bool:
+    """Sets a configuration value in the .env file.
+
+    Args:
+        key: The configuration key (e.g., 'DEFAULT_MODEL_ALIAS').
+        value: The value to set.
+        config: The loaded Config object to get the .env path and validate keys.
+
+    Returns:
+        True if successful, False otherwise.
+    """
+    dotenv_path = Path(config.model_config['env_file'])
+    key_upper = key.upper()
+    env_var_name = f"{config.model_config['env_prefix']}{key_upper}"
+    valid_keys = {k.upper() for k in Config.model_fields.keys()}
+    if key_upper not in valid_keys:
+        console.print(f"[bold red]Error:[/bold red] Invalid configuration key '{key}'. Valid keys are: {', '.join(sorted(Config.model_fields.keys()))}")
+        return False
+
+    lines = []
+    found = False
+    try:
+        if dotenv_path.is_file():
+            with open(dotenv_path, 'r', encoding='utf-8') as f:
+                lines = f.readlines()
+    except IOError as e:
+        console.print(f"[bold red]Error reading {dotenv_path}:[/bold red] {e}")
+        return False
+    new_line = f"{env_var_name}={value}\n"
+    updated_lines = []
+    for line in lines:
+        stripped_line = line.strip()
+        if stripped_line.startswith(f"{env_var_name}="):
+            updated_lines.append(new_line)
+            found = True
+        else:
+            updated_lines.append(line) # Keep existing line
+
+    if not found:
+        updated_lines.append(new_line)
+    try:
+        dotenv_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(dotenv_path, 'w', encoding='utf-8') as f:
+            f.writelines(updated_lines)
+        return True
+    except IOError as e:
+        console.print(f"[bold red]Error writing to {dotenv_path}:[/bold red] {e}")
+        return False
 
 
 global_config = Config()
