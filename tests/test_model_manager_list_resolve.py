@@ -37,32 +37,26 @@ def test_list_available_models_with_models(manager, patch_console):
         'b': {'type':'ollama','model_id':'id2'},
         'd': {'type':'huggingface','model_id':'id3'}
     }}
-    # available only a and d
     manager.config.MODEL_OPTIONS = ['a','d']
     manager.config.DEFAULT_MODEL_ALIAS = 'a'
     manager.list_available_models()
     out = ''.join(patch_console)
-    # Should list sections for huggingface, openai, ollama
     assert 'OPENAI Models' in out
     assert 'OLLAMA Models' in out
     assert 'HUGGINGFACE Models' in out
-    # a and d marked ✓, b marked ✗
     assert '✓' in out
     assert '✗' in out
-    # Default alias shown
     assert 'Default alias' in out
 
 @pytest.mark.parametrize('default_in_options', [True, False])
 def test_resolve_model_alias_none(manager, config, patch_console, default_in_options):
     config.DEFAULT_MODEL_ALIAS = 'b'
     config.MODEL_OPTIONS = ['b'] if default_in_options else []
-    # requested_alias None
     res = manager.resolve_model_alias(None)
     if default_in_options:
         assert res == 'b'
     else:
         assert res is None
-        # Error printed
         assert any('No model specified' in msg for msg in patch_console)
 
 def test_resolve_model_alias_exact(manager, config):
@@ -80,13 +74,11 @@ def test_resolve_model_alias_defined_but_unavailable(manager, config, patch_cons
 def test_resolve_model_alias_partial_single(manager, config):
     config.MODEL_OPTIONS = ['alpha','beta']
     manager.models_data = {'models': {}}
-    # normalize_for_match uses lowercase; 'alp' matches 'alpha'
     assert manager.resolve_model_alias('alp') == 'alpha'
 
 def test_resolve_model_alias_partial_multiple(manager, config, patch_console, monkeypatch):
     config.MODEL_OPTIONS = ['apple','apricot','banana']
     manager.models_data = {'models': {}}
-    # patch Prompt.ask to choose second option
     monkeypatch.setattr(mm.Prompt, 'ask', lambda prompt, **kw: '2')
     res = manager.resolve_model_alias('ap')
     assert res == 'apricot'

@@ -11,7 +11,6 @@ def test_list_models_wrapper(monkeypatch):
     assert called.get('list')
 
 def test_delete_model_wrapper(monkeypatch):
-    # delete_model_alias returns True
     called = {}
     fake_manager = SimpleNamespace(delete_model_alias=lambda alias: True)
     monkeypatch.setattr(mm, 'ModelManager', lambda config: fake_manager)
@@ -27,8 +26,6 @@ def test_update_models_interactive_wrapper(monkeypatch):
     config = SimpleNamespace()
     res = mm.update_models_interactive(config, provider='openai')
     assert res == 'openai'
-    # default None provider
     called.clear()
     res2 = mm.update_models_interactive(config)
-    # calls with provider None
     assert res2 is None

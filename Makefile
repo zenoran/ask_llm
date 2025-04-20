@@ -1,6 +1,5 @@
 .PHONY: clean clean-pyc clean-build clean-test install develop all test lint format check coverage report
 
-# Variables
 PYTHON := python
 SRC_DIR := src
 TEST_DIR := tests
@@ -22,7 +21,7 @@ help:
 	@echo "  format         Run Ruff formatter."
 	@echo "  check          Run all checks (lint, format --check, type check)."
 
-clean: clean-pyc clean-build clean-test
+clean: clean-pyc clean-build clean-test clean-bs
 
 clean-pyc:
 	find . -name '*.pyc' -exec rm -f {} +
@@ -57,6 +56,8 @@ clean-test:
 	rm -rf .dmypy.json
 	rm -rf dmypy.json
 
+clean-bs:
+	find . -name '._*' -exec rm -f {} +
 clean-venv:
 	rm -rf venv/
 	rm -rf .venv/
@@ -65,7 +66,6 @@ clean-venv:
 
 all: install
 
-# Combined install target
 install-deps:
 	@echo "Installing additional dependencies for huggingface and llamacpp..."
 	@if [ -f ~/.venv/ask-llm/bin/pip ]; then \
@@ -77,7 +77,6 @@ install-deps:
 		~/.venv/ask-llm/bin/pip install huggingface-hub; \
 	elif [ -f ~/.venv/ask-llm/bin/python ]; then \
 		echo "Attempting to uninstall existing llama-cpp-python..."; \
-		# ~/.venv/ask-llm/bin/python -m pip uninstall llama-cpp-python -y || true; \
 		echo "Installing llama-cpp-python with CUDA support..."; \
 		CMAKE_ARGS="-DGGML_CUDA=on" FORCE_CMAKE=1 ~/.venv/ask-llm/bin/python -m pip install llama-cpp-python --no-cache-dir; \
 		echo "Installing huggingface-hub..."; \
@@ -108,16 +107,11 @@ install:
 		exit 1; \
 	fi
 	@echo "Setup complete. Activate with: source ~/.venv/ask-llm/bin/activate"
-	# Alternative short install if env already active
-	# uv pip install -e .
 	@make install-deps
 
 develop:
 	uv pip install -e ".[dev]" # Assuming a [dev] extra for dev dependencies
-	# If no [dev] extra, list dev deps explicitly:
-	# uv pip install -e . pytest pytest-cov ruff mypy
 
-# Testing and Coverage
 test:
 	@echo "Running tests with coverage..."
 	pytest --cov=$(COV_TARGET) --cov-report=term-missing $(TEST_DIR)
@@ -129,7 +123,6 @@ report:
 	pytest --cov=$(COV_TARGET) --cov-report=html $(TEST_DIR)
 	@echo "HTML report generated in htmlcov/ directory."
 
-# Linting and Formatting
 lint:
 	@echo "Running Ruff linter..."
 	ruff check $(SRC_DIR) $(TEST_DIR)

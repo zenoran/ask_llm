@@ -1,12 +1,12 @@
 import pytest
-from unittest.mock import patch, MagicMock, call
+from unittest.mock import patch, MagicMock
 import os
-import json
 
-from src.ask_llm.clients.openai_client import OpenAIClient
-from src.ask_llm.models.message import Message
-from src.ask_llm.utils.config import Config
-from src.ask_llm.clients.base import LLMClient
+from ask_llm.clients.openai_client import OpenAIClient
+from ask_llm.models.message import Message
+from ask_llm.utils.config import Config
+from ask_llm.clients.base import LLMClient
+from openai import OpenAIError
 
 class TestOpenAIClient:
     """Test suite for OpenAIClient class."""
@@ -27,14 +27,13 @@ class TestOpenAIClient:
     @pytest.fixture
     def mock_openai_api(self):
         """Mocks the openai.OpenAI client constructor."""
-        with patch('src.ask_llm.clients.openai_client.OpenAI') as mock_openai_constructor:
+        with patch('ask_llm.clients.openai_client.OpenAI') as mock_openai_constructor:
             yield mock_openai_constructor
 
     @pytest.fixture
     def client(self, mock_config_obj, mock_openai_api):
         """Provides an initialized OpenAIClient instance with mocked dependencies."""
         with patch.dict(os.environ, {"OPENAI_API_KEY": "test-api-key"}):
-            # Pass the mock config to the constructor
             instance = OpenAIClient(model="gpt-4o", config=mock_config_obj) 
             instance.client = mock_openai_api.return_value # Ensure instance uses mocked OpenAI client
             return instance
@@ -61,10 +60,7 @@ class TestOpenAIClient:
             Message("assistant", "Hi there"),
             Message("user", "How are you?")
         ]
-        # Set system message on the specific mock config used by the client fixture
         mock_config_obj.SYSTEM_MESSAGE = "Be helpful."
-        
-        # The client fixture already has the correct config
         api_messages = client._prepare_api_messages(messages)
         
         assert api_messages[0] == {"role": "system", "content": "Be helpful."}
@@ -98,7 +94,7 @@ class TestOpenAIClient:
         assert len(api_messages) == 1
         assert api_messages[0] == {"role": "user", "content": "Hello"}
 
-    @patch('src.ask_llm.clients.openai_client.OpenAIClient._handle_streaming_output')
+    @patch('ask_llm.clients.openai_client.OpenAIClient._handle_streaming_output')
     def test_query(self, mock_handle_streaming, client: OpenAIClient, mock_openai_api):
         """Test the main query method (streaming case)."""
         messages = [Message("user", "Test prompt")]
@@ -114,14 +110,13 @@ class TestOpenAIClient:
         client.query(messages)
         
         mock_create = client.client.chat.completions.create
-        # Assert create was called with the expected payload
         mock_create.assert_called_once_with(**expected_payload)
         
         mock_handle_streaming.assert_called_once()
         stream_arg = mock_handle_streaming.call_args[1]['stream_iterator']
         assert hasattr(stream_arg, '__next__')
 
-    @patch('src.ask_llm.clients.base.LLMClient._print_assistant_message') # Mock the base print method
+    @patch('ask_llm.clients.base.LLMClient._print_assistant_message') # Mock the base print method
     def test_query_non_streaming(self, mock_print_assistant, client: OpenAIClient, mock_openai_api):
         """Test the main query method (non-streaming case)."""
         messages = [Message("user", "Test prompt")]
@@ -136,8 +131,6 @@ class TestOpenAIClient:
         mock_completion.usage.total_tokens = 15
         
         client.client.chat.completions.create.return_value = mock_completion
-        
-        # Mock console print used for usage
         with patch.object(client.console, 'print') as mock_console_print:
             response = client.query(messages, stream=False)
         
@@ -152,9 +145,7 @@ class TestOpenAIClient:
         }
         mock_create.assert_called_once_with(**expected_payload)
         assert response == "Full response"
-        # Check that the base printing method was called correctly (since not plaintext)
         mock_print_assistant.assert_called_once_with("Full response", second_part=None)
-        # Check that usage info was printed
         mock_console_print.assert_any_call("[dim]OpenAI Tokens: Prompt=10, Completion=5, Total=15[/dim]")
 
     def test_stream_response_success(self, client: OpenAIClient):
@@ -167,46 +158,29 @@ class TestOpenAIClient:
             MagicMock(choices=[MagicMock(delta=MagicMock(content=None))]), 
         ]
         mock_stream_obj.__iter__.return_value = iter(chunks)
-        # Set the stream object returned by the create call
         client.client.chat.completions.create.return_value = mock_stream_obj
-        
-        # Payload required by _stream_response
         payload = {"model": client.model, "messages": [], "stream": True}
-        
-        # Mock the base class streaming handler
         with patch.object(LLMClient, '_handle_streaming_output', return_value="Hello world!") as mock_base_handler:
-            # Pass the necessary payload
             response = client._stream_response([], False, payload) 
             assert response == "Hello world!"
-            # Check that the iterator passed to the base handler yields correct content
             passed_iterator = mock_base_handler.call_args[1]['stream_iterator']
             content_list = list(passed_iterator)
             assert content_list == ["Hello", " world", "!"]
-            # Check the create call was made by _stream_response
             client.client.chat.completions.create.assert_called_once_with(**payload)
-
-    # Add test for OpenAIError during streaming
     def test_stream_response_openai_error(self, client: OpenAIClient):
         """Test OpenAIError handling in stream response."""
-        from openai import OpenAIError # Import specific error
         client.client.chat.completions.create.side_effect = OpenAIError("API error")
         payload = {"model": client.model, "messages": [], "stream": True}
-        # No need to mock console print if error is logged
         response = client._stream_response([], False, payload)
         assert response == "ERROR: OpenAI API Error - API error"
-
-    # Add test for generic exception during streaming
     def test_stream_response_generic_error(self, client: OpenAIClient):
         """Test generic Exception handling in stream response."""
         client.client.chat.completions.create.side_effect = Exception("Unexpected error")
         payload = {"model": client.model, "messages": [], "stream": True}
         response = client._stream_response([], False, payload)
         assert response == "ERROR: Unexpected error - Unexpected error"
-        
-    # Test for _get_full_response (non-streaming) error handling
     def test_get_full_response_openai_error(self, client: OpenAIClient):
         """Test OpenAIError handling in full response."""
-        from openai import OpenAIError
         client.client.chat.completions.create.side_effect = OpenAIError("Full API error")
         payload = {"model": client.model, "messages": [], "stream": False}
         response = client._get_full_response([], False, payload)
@@ -218,8 +192,6 @@ class TestOpenAIClient:
         payload = {"model": client.model, "messages": [], "stream": False}
         response = client._get_full_response([], False, payload)
         assert response == "ERROR: Unexpected error - Full Unexpected error"
-
-    # Test get_styling method
     def test_get_styling(self, client: OpenAIClient):
         """Test the get_styling method returns correct values."""
         title, border_style = client.get_styling()

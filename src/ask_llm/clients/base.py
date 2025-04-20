@@ -16,7 +16,6 @@ class LLMClient(ABC):
     def __init__(self, model: str, config: Config): # Accept config
         self.model = model
         self.config = config # Store config
-        # Force terminal color support unless plain output is requested
         force_term = not self.config.PLAIN_OUTPUT
         self.console = Console(force_terminal=force_term)
 
@@ -39,7 +38,6 @@ class LLMClient(ABC):
         if role == "user":
             self._print_user_message(content)
         elif role == "assistant":
-            # Default assistant message printing (can be overridden by subclasses)
             self._print_assistant_message(content)
 
     def _print_user_message(self, content: str):
@@ -56,19 +54,10 @@ class LLMClient(ABC):
             border_style=panel_border_style,
             padding=(1, 2),
         )
-        # Print the panel aligned left
         self.console.print(Align(assistant_panel, align="left"))
-
-        # If there's a second part, print it directly below using Markdown
         if second_part:
-            # Add an extra newline for separation
             self.console.print()
-            # Add the double newline that separated the parts back for rendering
-            # We align it manually to roughly match the panel's content alignment
-            # Padding(top, right, bottom, left)
             self.console.print(Align(Markdown(second_part.strip()), align="left", pad=False))
-
-        # Add a final newline for spacing unless only a panel was printed
         if second_part:
             self.console.print()
 
@@ -94,7 +83,6 @@ class LLMClient(ABC):
         rest_after_marker = "" # Store content immediately after \n\n
 
         if plaintext_output:
-            # Original plaintext logic remains the same
             print("", end='')
             sys.stdout.flush()
             try:
@@ -112,7 +100,6 @@ class LLMClient(ABC):
                 self.console.print(f"\n[bold red]Error during plaintext streaming:[/bold red] {e}")
                 total_response += f"\nERROR: {e}"
         else:
-            # Rich streaming with Live update for second part
             iterator = iter(stream_iterator)
             live_display = None
             live_buffer = ""
@@ -121,7 +108,6 @@ class LLMClient(ABC):
             min_refresh_interval = 0.05 # 20fps max
 
             try:
-                # --- Stage 1: Buffer until \n\n or end of stream ---
                 while not first_part_printed:
                     try:
                         content = next(iterator)
@@ -134,30 +120,22 @@ class LLMClient(ABC):
                                 parts = first_part_buffer.split(split_marker, 1)
                                 first_part = parts[0]
                                 rest_after_marker = parts[1] # Store for Live seeding
-
-                                # Print first part in panel (only first part)
                                 self._print_assistant_message(first_part, panel_title=panel_title, panel_border_style=panel_border_style)
                                 first_part_printed = True
                                 first_part_buffer = "" # Clear buffer
                                 break # Exit buffering loop
 
                     except StopIteration:
-                        # Stream ended before finding \n\n
                         if first_part_buffer:
-                             # Print whatever we buffered in the panel (entire message)
                             self._print_assistant_message(first_part_buffer, panel_title=panel_title, panel_border_style=panel_border_style)
                         first_part_printed = True
                         stream_ended_during_buffering = True
                         break
                     except (KeyboardInterrupt, Exception) as e:
-                         # Ensure panel is printed if interrupted during buffering with content
                          if first_part_buffer and not first_part_printed:
                              self._print_assistant_message(first_part_buffer, panel_title=panel_title, panel_border_style=panel_border_style)
                          raise e # Re-raise
-
-                # --- Stage 2: Live display for remaining stream (if \n\n was found) ---
                 if first_part_printed and not stream_ended_during_buffering:
-                    # Initialize live display seeded with content after marker
                     live_buffer = rest_after_marker
                     live_display = Live(
                         Align(Markdown(live_buffer.strip() + "▌"), align="left", pad=False), # Initial content + cursor
@@ -168,21 +146,15 @@ class LLMClient(ABC):
                     )
                     live_display.start(refresh=True)
                     last_refresh_time = time.time()
-
-                    # Process remaining items from iterator
                     for content in iterator:
                         if content:
                             total_response += content
                             token_count += len(content.split())
                             live_buffer += content
-
-                            # Refresh Live display periodically
                             current_time = time.time()
                             if current_time - last_refresh_time > min_refresh_interval:
                                 live_display.update(Align(Markdown(live_buffer.strip() + "▌"), align="left", pad=False), refresh=True)
                                 last_refresh_time = current_time
-
-                    # Final update without cursor
                     live_display.update(Align(Markdown(live_buffer.strip()), align="left", pad=False), refresh=True)
 
             except KeyboardInterrupt:
@@ -192,14 +164,10 @@ class LLMClient(ABC):
                 total_response += f"\nERROR: {e}"
             finally:
                 if live_display and live_display.is_started:
-                    # Ensure final content is shown even if loop exited early
                     live_display.update(Align(Markdown(live_buffer.strip()), align="left", pad=False), refresh=True)
                     live_display.stop()
-                # Add a final newline ONLY if Live display was used
                 if live_display:
                     self.console.print()
-
-        # Token counting and speed calculation
         end_time = time.time()
         elapsed_time = end_time - start_time
         if self.config.VERBOSE and elapsed_time > 0 and token_count > 0:

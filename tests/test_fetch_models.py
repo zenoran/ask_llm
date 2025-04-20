@@ -14,7 +14,6 @@ class DummyResponse:
         return self._json
 
 def test_fetch_ollama_api_models_success(monkeypatch):
-    # Provide one model with ISO timestamp
     iso = '2020-01-01T12:00:00Z'
     monkeypatch.setattr(mm.requests, 'get', lambda url, timeout: DummyResponse(200, {'models':[{'name':'x','modified_at':iso}]}))
     ok, models = mm.fetch_ollama_api_models('http://url')
@@ -29,7 +28,6 @@ def test_fetch_ollama_api_models_http_error(monkeypatch):
     assert models == []
 
 def test_fetch_openai_api_models_init_error(monkeypatch):
-    # patch OpenAI init to throw
     monkeypatch.setattr(mm, 'OpenAI', lambda *args, **kwargs: (_ for _ in ()).throw(Exception('init fail')))
     ok, models = mm.fetch_openai_api_models()
     assert not ok and models == []
@@ -44,23 +42,18 @@ class DummyClient:
     def __init__(self):
         self.models = self
     def list(self, *args, **kwargs):
-        # first call limit, return something
         if 'limit' in kwargs or (args and args[0] == 1):
             return None
-        # return object with data attribute
         return SimpleNamespace(data=[DummyModel('gpt-x','other',1600000000), DummyModel('other','openai',1600000000)])
 
 def test_fetch_openai_api_models_success(monkeypatch):
-    # patch OpenAI to return DummyClient
     monkeypatch.setattr(mm, 'OpenAI', lambda *args, **kwargs: DummyClient())
     ok, models = mm.fetch_openai_api_models()
     assert ok
-    # Should include only models with 'gpt' in id or owned_by openai/system
     ids = [m['id'] for m in models]
     assert 'gpt-x' in ids and 'other' in ids
 
 def test_fetch_openai_api_models_fetch_error(monkeypatch):
-    # patch list to succeed then fail
     class ClientErr:
         def __init__(self): self.models = self
         def list(self, *args, **kwargs):

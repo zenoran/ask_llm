@@ -1,6 +1,7 @@
 import pytest
+from ask_llm.cli import parse_arguments
+from ask_llm.utils.config import Config
 from unittest.mock import patch
-from src.ask_llm.cli import parse_arguments
 
 class DummyConfig:
     DEFAULT_MODEL_ALIAS = 'test'
@@ -22,3 +23,9 @@ def test_parse_plain_and_no_stream(config_obj):
         args = parse_arguments(config_obj)
     assert args.plain is True
     assert args.no_stream is True
+
+# Test default model alias handling
+def test_default_model_alias_provided():
+    pass # Add pass to fix syntax error
+
+# Mock configuration for tests

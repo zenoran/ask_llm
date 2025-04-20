@@ -21,8 +21,6 @@ class Message:
         """Extract content from the data dictionary"""
         content = data.get("content", "")
         if isinstance(content, list):
-            # Handle potential complex content structures (e.g., from multimodal models)
-            # This example extracts text parts, adjust if other types are needed
             return " ".join(item.get("text", "") for item in content if item.get("type") == "text")
         return str(content) # Ensure content is always a string
 

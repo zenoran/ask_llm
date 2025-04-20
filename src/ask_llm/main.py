@@ -1,4 +1,3 @@
-#!/usr/bin/env python
 import sys
 from rich.console import Console
 from ask_llm.cli import main as cli_main # Import the main function from cli

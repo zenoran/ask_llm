@@ -11,7 +11,7 @@ from typing import Dict, Any, List, Optional, Tuple
 from rich.console import Console
 from rich.prompt import Prompt, Confirm
 from rich.rule import Rule
-from openai import OpenAI, AuthenticationError, APIConnectionError, OpenAIError
+from openai import OpenAI
 
 from .utils.config import Config
 from .gguf_handler import normalize_for_match
@@ -19,7 +19,6 @@ from .constants import PROVIDER_OPENAI, PROVIDER_OLLAMA, PROVIDER_GGUF, PROVIDER
 
 console = Console()
 
-# Wrapper for pathlib.Path to allow monkeypatching of instance methods (e.g., mkdir)
 class _PathWrapper:
     """Wraps a pathlib.Path to delegate file operations while allowing dynamic attributes."""
     __slots__ = ('_path', '__dict__')
@@ -43,7 +42,6 @@ class ModelManager:
 
     def __init__(self, config: Config):
         self.config = config
-        # Wrap the configured path to support monkeypatching methods on the parent
         raw_path = Path(self.config.MODELS_CONFIG_PATH)
         self.config_path = _PathWrapper(raw_path)
         self.models_data: Dict[str, Any] = {}
@@ -57,14 +55,11 @@ class ModelManager:
         try:
             with open(self.config_path, 'r', encoding='utf-8') as f:
                 loaded_data = yaml.safe_load(f) or {}
-            # Detect invalid YAML structures: expect a mapping with optional 'models' key
-            # If root is not a dict or contains unexpected keys (non-identifier keys), treat as error
             if not isinstance(loaded_data, dict) or any(
                 not isinstance(k, str) or not k.isidentifier()
                 for k in loaded_data.keys() if k != 'models'
             ):
                 raise Exception(f"Invalid format in {self.config_path}")
-            # Ensure 'models' key exists and is a dict
             if 'models' not in loaded_data or not isinstance(loaded_data.get('models'), dict):
                 console.print(f"[yellow]Warning:[/yellow] Invalid format in {self.config_path}. Resetting 'models' dictionary.")
                 loaded_data['models'] = {}
@@ -112,8 +107,6 @@ class ModelManager:
         for alias, info in defined_models.items():
             models_by_type[info.get("type", PROVIDER_UNKNOWN)].append(alias)
         for mtype in sorted(models_by_type):
-            # Print section header: use console.rule if available for proper rendering,
-            # otherwise fall back to printing the Rule object
             title = f"[bold magenta]{mtype.upper()} Models[/bold magenta]"
             if hasattr(console, 'rule'):
                 console.rule(title)
@@ -126,7 +119,6 @@ class ModelManager:
                 note = self._get_dependency_note(mtype) if alias not in available_aliases else ""
                 console.print(f"  {marker} [bold][bright_blue]{alias}[/bright_blue][/bold]: {details}{note}")
             console.print()
-        # Print separator rule: use console.rule if available
         if hasattr(console, 'rule'):
             console.rule(style="#777777")
         else:
@@ -138,7 +130,6 @@ class ModelManager:
 
     def resolve_model_alias(self, requested_alias: Optional[str]) -> Optional[str]:
         defined = self.models_data.get("models", {})
-        # Preserve original order for partial matches, but use set for membership tests
         available_set = set(self.config.MODEL_OPTIONS)
         if not requested_alias:
             default = self.config.DEFAULT_MODEL_ALIAS
@@ -163,7 +154,6 @@ class ModelManager:
         return None
 
     def delete_model_alias(self, alias: str) -> bool:
-        # Print deletion header as plain string to allow console monkeypatches to capture it
         console.print(str(Rule(f"[bold yellow]Deleting Model Alias: {alias}[/bold yellow]")))
         models = self.models_data.get('models', {})
         if alias not in models:
@@ -181,7 +171,6 @@ class ModelManager:
         targets = [provider_type] if provider_type else [PROVIDER_OPENAI, PROVIDER_OLLAMA]
         success = True # Track overall success
         for prov in targets:
-            # Print update header as plain string for test console capture
             console.print(str(Rule(f"Updating models for provider: {prov}")))
             try:
                 prov_success = self._update_provider_models(prov)
@@ -210,7 +199,6 @@ class ModelManager:
                 selected = new_models
                 added_count = self._prepare_new_model_entries(provider_type, selected)
             else:
-                # Pass only new_models and provider_type; choices_map is now internal
                 selected = self._prompt_for_new_models(new_models, provider_type)
                 added_count = self._prepare_new_model_entries(provider_type, selected)
 
@@ -262,19 +250,13 @@ class ModelManager:
     ) -> List[Dict[str, Any]]:
         tz = pytz.timezone('US/Eastern')
         console.print("New models detected:")
-        # Sort models alphabetically by ID before displaying
         new_models.sort(key=lambda m: m['id'])
-
-        # Create choices_map AFTER sorting
         choices_map = {str(idx + 1): model for idx, model in enumerate(new_models)}
 
         for idx, m in enumerate(new_models, start=1):
-            # Use class method to format timestamp to support unbound self (e.g., None)
             ts = ModelManager._format_model_timestamp_str(None, provider_type, m, tz)
-            # Apply bright_blue color to the model ID
             model_id_colored = f"[bright_blue]{m['id']}[/bright_blue]"
             console.print(f"  [cyan]{idx}[/cyan]: {model_id_colored} ({ts})")
-        # Choose separator based on provider (openai uses comma, others space)
         sep = ',' if provider_type == PROVIDER_OPENAI else ' '
         prompt = (
             f"Enter numbers to add ({'comma' if sep == ',' else 'space'}-separated), or press Enter to skip"
@@ -332,13 +314,15 @@ class ModelManager:
         mid = None
 
         if model_type == PROVIDER_GGUF:
-            # GGUF models: include repository ID, format, and any description
             repo = model_info.get('repo_id')
-            if repo:
+            desc = model_info.get('description')
+            chat_format = model_info.get('chat_format')
+            # Avoid duplicating repo info if already in description
+            if repo and (not desc or repo not in desc):
                 parts.append(f"Repo: {repo}")
-            if chat := model_info.get('chat_format'):
-                parts.append(f"Format: {chat}")
-            if desc := model_info.get('description'):
+            if chat_format:
+                parts.append(f"Format: {chat_format}")
+            if desc:
                 parts.append(desc)
 
         elif model_type in (PROVIDER_HF, PROVIDER_OLLAMA, PROVIDER_OPENAI):
@@ -347,30 +331,19 @@ class ModelManager:
             formatted_id_str = ""
             raw_id_str = ""
             processed_desc = desc  # Work with a modifiable copy
-
-            # 1. Remove provider prefix if present
             if processed_desc:
                 provider_prefix = f"{model_type.capitalize()} "
                 if processed_desc.lower().startswith(provider_prefix.lower()):
                     processed_desc = processed_desc[len(provider_prefix):].strip()
-
-            # 2. Prepare formatted ID (plain, for test-friendly output) and add color
             if mid:
-                # Add color tag around the model ID
                 formatted_id_str = f"[bright_blue]{mid}[/bright_blue]"
                 raw_id_str = mid # Keep raw ID for matching
-
-            # 3. Format output parts
             if processed_desc and raw_id_str and raw_id_str in processed_desc:
-                # 3a. Description exists and contains raw ID: replace ID with formatted version
                 escaped_raw_id = re.escape(raw_id_str)
-                # Use the colored formatted_id_str in the replacement
                 final_desc = re.sub(rf'\\b{escaped_raw_id}\\b', formatted_id_str, processed_desc, count=1)
                 parts = [final_desc]
             else:
-                # 3b. Description doesn't contain ID, or missing desc/ID: build parts separately
                 if mid:
-                    # Use the colored formatted_id_str
                     parts.append(f"ID: {formatted_id_str}")
                 if processed_desc: # Use potentially prefix-removed description
                     parts.append(processed_desc)
@@ -443,14 +416,12 @@ def fetch_openai_api_models() -> Tuple[bool, List[Dict[str, Any]]]:
         console.print(f"[bold red]OpenAI fetch error:[/bold red] {e}")
         return False, []
 
-# Public CLI wrappers
 
 def list_models(config: Config):
     """CLI wrapper: list models using ModelManager, with fallback for tests."""
     try:
         manager = ModelManager(config)
     except Exception:
-        # Allow tests to patch list_available_models without full init
         manager = ModelManager.__new__(ModelManager)
         manager.config = config
     manager.list_available_models()
@@ -466,7 +437,6 @@ def delete_model(alias: str, config: Config) -> bool:
 def update_models_interactive(config: Config, provider: Optional[str] = None):
     return ModelManager(config).update_models(provider)
 
-# Utility for parsing ISO timestamps
 
 def _parse_iso(ts_str: str) -> Optional[datetime]:
     try:

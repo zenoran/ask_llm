@@ -12,7 +12,6 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import Field, computed_field, ValidationError, field_validator
 from rich.console import Console
 
-# Import necessary constants and functions
 from ..constants import PROVIDER_OPENAI, PROVIDER_OLLAMA, PROVIDER_GGUF, PROVIDER_HF
 
 logger = logging.getLogger(__name__)
@@ -54,7 +53,6 @@ def get_default_models_yaml_path() -> Path:
     return default_config_dir / "models.yaml"
 
 DEFAULT_MODELS_YAML = get_default_models_yaml_path()
-# Define the path for the .env file based on the models.yaml location
 DOTENV_PATH = DEFAULT_MODELS_YAML.parent / ".env"
 
 class Config(BaseSettings):
@@ -69,8 +67,6 @@ class Config(BaseSettings):
     MAX_TOKENS: int = Field(default=1024, description="Default maximum tokens to generate")
     TEMPERATURE: float = Field(default=0.8, description="Default generation temperature")
     TOP_P: float = Field(default=0.95, description="Default nucleus sampling top-p")
-
-    # Llama.cpp specific settings
     LLAMA_CPP_N_CTX: int = Field(default=4096, description="Context size for Llama.cpp models")
     LLAMA_CPP_N_GPU_LAYERS: int = Field(default=-1, description="Number of layers to offload to GPU (-1 for all possible layers)")
 
@@ -86,7 +82,6 @@ class Config(BaseSettings):
 
     model_config = SettingsConfigDict(
         env_prefix="ASK_LLM_",
-        # Use the calculated DOTENV_PATH
         env_file=DOTENV_PATH,
         env_file_encoding="utf-8",
         case_sensitive=False,
@@ -94,19 +89,13 @@ class Config(BaseSettings):
     )
 
     def __init__(self, **values: Any):
-        # Ensure MODELS_CONFIG_PATH is resolved correctly if passed in
         if 'MODELS_CONFIG_PATH' in values:
             values['MODELS_CONFIG_PATH'] = str(Path(values['MODELS_CONFIG_PATH']).expanduser().resolve())
         else:
-            # Ensure default path is used if not provided
             values['MODELS_CONFIG_PATH'] = str(DEFAULT_MODELS_YAML)
 
         super().__init__(**values)
         self._load_models_config()
-
-        # Remove fallback logic: DEFAULT_MODEL_ALIAS now relies purely on env/.env
-        # if self.DEFAULT_MODEL_ALIAS is None:
-        #     self.DEFAULT_MODEL_ALIAS = self.defined_models.get("default_model_alias")
 
         has_ollama_models = any(model.get('type') == 'ollama' for model in self.defined_models.get('models', {}).values())
         if has_ollama_models:
@@ -125,22 +114,11 @@ class Config(BaseSettings):
                 loaded_data = yaml.safe_load(f)
                 if loaded_data is None:
                     loaded_data = {} # Start with empty dict
-
-            # Expect only the 'models' key at the top level now
             if "models" not in loaded_data or not isinstance(loaded_data.get("models"), dict):
                 console.print(f"[bold red]Warning:[/bold red] Invalid format in {config_path}. Missing or invalid top-level 'models' dictionary. Treating as empty.")
                 self.defined_models = {"models": {}}
             else:
-                # Only store the 'models' dictionary
                 self.defined_models = {"models": loaded_data["models"]}
-                # Remove logic for loading other top-level keys as settings
-                # global_overrides = {k: v for k, v in loaded_data.items() if k != "models"}
-                # for key, value in global_overrides.items():
-                #     if hasattr(self, key):
-                #         try:
-                #             setattr(self, key, value)
-                #         except ValidationError as e:
-                #             console.print(f"[yellow]Warning:[/yellow] Invalid value for '{key}' in {config_path}: {e}. Using default/environment value.")
 
         except yaml.YAMLError as e:
             console.print(f"[bold red]Error parsing YAML file {config_path}:[/bold red] {e}")
@@ -178,26 +156,20 @@ class Config(BaseSettings):
         for alias, model_info in defined.items():
             model_type = model_info.get("type")
             if model_type == PROVIDER_OPENAI:
-                # Assume openai package installed if type is specified
                 available_options.append(alias)
             elif model_type == PROVIDER_OLLAMA:
-                # Check if model name is in the list fetched from Ollama server
                 model_id = model_info.get("model_id")
                 if model_id and model_id in self.available_ollama_models:
                     available_options.append(alias)
             elif model_type == PROVIDER_GGUF:
-                # Check if llama-cpp-python is installed
                 if is_llama_cpp_available():
                     available_options.append(alias)
             elif model_type == PROVIDER_HF:
-                # Check if huggingface dependencies are installed
                 if is_huggingface_available():
                     available_options.append(alias)
-            # Ignore models with unknown or missing type
 
         return sorted(list(set(available_options))) # Return sorted list of unique aliases
 
-# --- New Function to set config values in .env ---
 
 def set_config_value(key: str, value: str, config: Config) -> bool:
     """Sets a configuration value in the .env file.
@@ -213,8 +185,6 @@ def set_config_value(key: str, value: str, config: Config) -> bool:
     dotenv_path = Path(config.model_config['env_file'])
     key_upper = key.upper()
     env_var_name = f"{config.model_config['env_prefix']}{key_upper}"
-
-    # 1. Validate the key against Config model fields
     valid_keys = {k.upper() for k in Config.model_fields.keys()}
     if key_upper not in valid_keys:
         console.print(f"[bold red]Error:[/bold red] Invalid configuration key '{key}'. Valid keys are: {', '.join(sorted(Config.model_fields.keys()))}")
@@ -222,8 +192,6 @@ def set_config_value(key: str, value: str, config: Config) -> bool:
 
     lines = []
     found = False
-
-    # 2. Read existing .env file (if it exists)
     try:
         if dotenv_path.is_file():
             with open(dotenv_path, 'r', encoding='utf-8') as f:
@@ -231,12 +199,9 @@ def set_config_value(key: str, value: str, config: Config) -> bool:
     except IOError as e:
         console.print(f"[bold red]Error reading {dotenv_path}:[/bold red] {e}")
         return False
-
-    # 3. Update or prepare to add the line
     new_line = f"{env_var_name}={value}\n"
     updated_lines = []
     for line in lines:
-        # Check if line starts with the key (allowing for comments or whitespace)
         stripped_line = line.strip()
         if stripped_line.startswith(f"{env_var_name}="):
             updated_lines.append(new_line)
@@ -246,10 +211,7 @@ def set_config_value(key: str, value: str, config: Config) -> bool:
 
     if not found:
         updated_lines.append(new_line)
-
-    # 4. Write the updated lines back to the .env file
     try:
-        # Ensure parent directory exists
         dotenv_path.parent.mkdir(parents=True, exist_ok=True)
         with open(dotenv_path, 'w', encoding='utf-8') as f:
             f.writelines(updated_lines)
