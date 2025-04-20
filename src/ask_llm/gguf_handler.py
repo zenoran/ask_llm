@@ -82,8 +82,15 @@ def _select_gguf_file(repo_id: str, gguf_files: List[str]) -> str | None:
             console.print(f"  [cyan]{i+1}[/cyan]: {fname}")
         while True:
             try:
-                choice_str = Prompt.ask("Enter the number of the file", choices=list(choices_map.keys()), default="1")
-                return choices_map[choice_str]
+                choice_str = Prompt.ask("Enter the number of the file", default="1")
+                if not choice_str.isdigit():
+                    console.print("[yellow]Invalid input. Please enter a number.[/yellow]")
+                    continue
+                choice_int = int(choice_str)
+                if 1 <= choice_int <= len(gguf_files):
+                    return choices_map[choice_str]
+                else:
+                    console.print(f"[yellow]Invalid selection. Please enter a number between 1 and {len(gguf_files)}.[/yellow]")
             except (ValueError, KeyError):
                 console.print("[yellow]Invalid selection.[/yellow]")
             except (EOFError, KeyboardInterrupt):

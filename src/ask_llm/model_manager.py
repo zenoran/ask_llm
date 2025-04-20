@@ -177,7 +177,7 @@ class ModelManager:
         return None
 
     def delete_model_alias(self, alias: str) -> bool:
-        console.print(str(Rule(f"[bold yellow]Deleting Model Alias: {alias}[/bold yellow]")))
+        console.print(Rule(f"[bold yellow]Deleting Model Alias: {alias}[/bold yellow]"))
         models = self.models_data.get('models', {})
         if alias not in models:
             console.print(f"[bold red]Error:[/bold red] Alias '{alias}' not found.")
@@ -194,7 +194,7 @@ class ModelManager:
         targets = [provider_type] if provider_type else [PROVIDER_OPENAI, PROVIDER_OLLAMA]
         success = True # Track overall success
         for prov in targets:
-            console.print(str(Rule(f"Updating models for provider: {prov}")))
+            console.print(Rule(f"Updating models for provider: {prov}"))
             try:
                 prov_success = self._update_provider_models(prov)
                 if not prov_success:
