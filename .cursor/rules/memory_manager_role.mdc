@@ -1,0 +1,13 @@
+---
+description:
+globs:
+alwaysApply: false
+---
+# MemoryManager Class Role
+
+The [src/ask_llm/memory.py](mdc:src/ask_llm/memory.py) file defines the `MemoryManager` class. Its responsibilities include:
+
+*   Initializing the vector database (`ChromaDB`) client (potentially persistent).
+*   Loading the `sentence-transformers` embedding model.
+*   Providing methods to add messages (`add_memory`) and search for relevant past messages (`search_relevant_memories`).
+*   Handling lazy loading of dependencies to improve startup time when memory is disabled.

@@ -30,6 +30,8 @@ def parse_arguments(config_obj: Config) -> argparse.Namespace:
     parser.add_argument("-c", "--command", help="Execute command and add output to question")
     parser.add_argument("--plain", action="store_true", help="Use plain text output")
     parser.add_argument("--no-stream", action="store_true", default=False, help="Disable streaming output")
+    parser.add_argument("--memory", action="store_true", help="Enable long-term vector memory (requires chromadb and sentence-transformers)")
+    parser.add_argument("--debug", action="store_true", help="Enable debug logging output.")
     return parser.parse_args()
 
 def main():
@@ -59,14 +61,20 @@ def main():
     config_obj.PLAIN_OUTPUT = args.plain
     config_obj.NO_STREAM = args.no_stream
     config_obj.INTERACTIVE_MODE = not args.question and not args.command # Set interactive mode flag
-    logging.basicConfig(level=logging.DEBUG if config_obj.VERBOSE else logging.INFO,
-                        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-    logging.getLogger("httpx").setLevel(logging.WARNING)
-    logging.getLogger("httpcore").setLevel(logging.WARNING)
-    logging.getLogger("openai").setLevel(logging.WARNING)
-    logging.getLogger("requests").setLevel(logging.WARNING)
-    logging.getLogger("urllib3").setLevel(logging.WARNING)
-    logging.getLogger("markdown_it").setLevel(logging.WARNING)
+
+    # Configure logging ONLY if debug is enabled
+    if args.debug: # Check the new debug flag
+        logging.basicConfig(level=logging.DEBUG,
+                            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        # Set higher levels for noisy libraries only when debugging
+        logging.getLogger("httpx").setLevel(logging.WARNING)
+        logging.getLogger("httpcore").setLevel(logging.WARNING)
+        logging.getLogger("openai").setLevel(logging.WARNING)
+        logging.getLogger("requests").setLevel(logging.WARNING)
+        logging.getLogger("urllib3").setLevel(logging.WARNING)
+        logging.getLogger("markdown_it").setLevel(logging.WARNING)
+    # else: Logging remains unconfigured
+
     # Handle setting config values, guard missing attribute in stubbed args
     if getattr(args, 'config_set', None):
         key, value = args.config_set
@@ -163,7 +171,11 @@ def main():
 
 def run_app(args: argparse.Namespace, config_obj: Config, resolved_alias: str):
     try:
-        ask_llm = AskLLM(resolved_model_alias=resolved_alias, config=config_obj)
+        ask_llm = AskLLM(
+            resolved_model_alias=resolved_alias,
+            config=config_obj,
+            memory_enabled=args.memory
+        )
     except (ImportError, FileNotFoundError, ValueError, Exception) as e:
          console.print(f"[bold red]Failed to initialize LLM client for '{resolved_alias}':[/bold red] {e}")
          if config_obj.VERBOSE:

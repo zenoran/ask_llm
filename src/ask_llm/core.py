@@ -1,5 +1,7 @@
 import importlib.util
 import pathlib
+import time
+import uuid
 from rich.console import Console
 from .utils.config import Config, is_huggingface_available, is_llama_cpp_available
 from .utils.history import HistoryManager, Message
@@ -7,21 +9,66 @@ from .clients import LLMClient
 import logging
 from .utils.prompts import SYSTEM_REFINE_PROMPT
 
+try:
+    import tiktoken
+    _tiktoken_present = True
+except ImportError:
+    _tiktoken_present = False
+    tiktoken = None # Placeholder
+
+try:
+    from .memory import MemoryManager
+    _memory_module_present = True
+except ImportError:
+    _memory_module_present = False
+    MemoryManager = None # Placeholder if memory.py doesn't exist or fails import
+
 
 console = Console()
 logger = logging.getLogger(__name__)
 
 class AskLLM:
-    def __init__(self, resolved_model_alias: str, config: Config):
+    def __init__(self, resolved_model_alias: str, config: Config, memory_enabled: bool = False):
         self.resolved_model_alias = resolved_model_alias
         self.config = config
         self.model_definition = self.config.defined_models.get("models", {}).get(resolved_model_alias)
+        self.memory_enabled = memory_enabled
+        self.memory_manager: MemoryManager | None = None # type: ignore
 
         if not self.model_definition:
              raise ValueError(f"Could not find model definition for resolved alias: '{resolved_model_alias}'")
 
         self.client: LLMClient = self.initialize_client(config)
         self.history_manager = HistoryManager(client=self.client, config=self.config)
+
+        # Conditionally initialize MemoryManager
+        if self.memory_enabled:
+            if _memory_module_present and MemoryManager:
+                try:
+                    logger.debug("Memory flag enabled, attempting to initialize MemoryManager...")
+                    # Pass the config object to MemoryManager
+                    self.memory_manager = MemoryManager(config=self.config)
+                except ImportError as e:
+                    logger.debug(f"Failed to initialize MemoryManager due to missing dependencies: {e}")
+                    if self.config.VERBOSE:
+                        console.print(f"[bold yellow]Warning:[/bold yellow] Memory enabled but failed to initialize: {e}")
+                        console.print("  Memory features will be disabled. Ensure 'chromadb' and 'sentence-transformers' are installed.")
+                    self.memory_manager = None # Ensure it's None on failure
+                except Exception as e:
+                    logger.exception(f"An unexpected error occurred during MemoryManager initialization: {e}")
+                    if self.config.VERBOSE:
+                        console.print(f"[bold red]Error:[/bold red] Failed to initialize MemoryManager: {e}")
+                        console.print("  Memory features will be disabled.")
+                    self.memory_manager = None # Ensure it's None on failure
+            else:
+                 logger.debug("Memory flag enabled, but MemoryManager module or class could not be imported.")
+                 if self.config.VERBOSE:
+                      console.print("[bold yellow]Warning:[/bold yellow] Memory enabled, but memory module failed to load. Memory features disabled.")
+                 self.memory_manager = None
+        else:
+            logger.debug("Memory flag is disabled.")
+
+
         self.load_history()
 
     def initialize_client(self, config: Config) -> LLMClient:
@@ -169,9 +216,172 @@ class AskLLM:
     def query(self, prompt, plaintext_output: bool = False, stream: bool = True):
         try:
             self.history_manager.add_message("user", prompt)
-            complete_context_messages = self.history_manager.get_context_messages()
 
-            query_kwargs = {"messages": complete_context_messages,"plaintext_output": plaintext_output,}
+            # Memory Retrieval (Logging Only) ---
+            retrieved_memories = None
+            if self.memory_manager:
+                try:
+                    logger.debug(f"Attempting to retrieve relevant memories for prompt: '{prompt[:50]}...'")
+                    # Use configured number of results
+                    n_results = self.config.MEMORY_N_RESULTS 
+                    retrieved_memories = self.memory_manager.search_relevant_memories(prompt, n_results=n_results)
+                    if retrieved_memories:
+                        logger.debug(f"Retrieved {len(retrieved_memories)} memories (max {n_results}):")
+                        for i, mem in enumerate(retrieved_memories):
+                            # Log essential details - avoid logging full document content unless needed
+                            logger.debug(f"  Mem {i+1}: ID={mem.get('id')}, Role={mem.get('metadata',{}).get('role')}, Dist={mem.get('distance'):.4f}, Content='{mem.get('document', '')[:60]}...'")
+                    else:
+                        logger.debug("No relevant memories found or search failed.")
+                except Exception as e:
+                    logger.exception(f"Error during memory retrieval: {e}")
+
+            complete_context_messages = self.history_manager.get_context_messages()
+            
+            # Explicitly handle the primary system prompt ---
+            system_prompt_message: Message | None = None
+            processing_messages = list(complete_context_messages)
+            if processing_messages and processing_messages[0].role == "system":
+                system_prompt_message = processing_messages.pop(0)
+                logger.debug(f"Extracted system prompt: '{system_prompt_message.content[:60]}...'")
+            else:
+                logger.warning("Could not find leading system prompt in history messages. A default might be added later if needed.")
+            # Now processing_messages contains only the history turns (user/assistant)
+            
+            final_combined_turns = list(processing_messages) # Start with history turns
+            memory_delimiter_added = False # Flag to track if delimiter was added
+
+            # Memory Injection & Combination ---
+            if retrieved_memories:
+                # Convert retrieved dicts back to Message objects, sorted by relevance (most relevant first)
+                sorted_memories = sorted(retrieved_memories, key=lambda x: x.get('distance', 0.0))
+                memory_messages = [
+                    Message(role=mem.get('metadata', {}).get('role', 'assistant'), content=mem.get('document', ''))
+                    for mem in sorted_memories
+                    if mem.get('document')
+                ]
+                
+                # Stage 4: Deduplication - Remove memories matching history TURNS
+                history_content_set = {msg.content for msg in processing_messages} # Use history turns only
+                unique_memory_messages = [
+                    mem_msg for mem_msg in memory_messages
+                    if mem_msg.content not in history_content_set
+                ]
+
+                if unique_memory_messages:
+                    logger.debug(f"Adding {len(unique_memory_messages)} unique memories (out of {len(memory_messages)} retrieved) to context.")
+                    memory_delimiter = Message(role="system", content="--- Relevant Past Conversation Snippets (older history or related topics) ---")
+                    # Combine: Memories + Delimiter + History Turns
+                    final_combined_turns = unique_memory_messages + [memory_delimiter] + final_combined_turns
+                    memory_delimiter_added = True
+                else:
+                    logger.debug("No unique memories found after deduplication.")
+                    
+            #  Token Counting & Truncation (Operating on combined turns) ---
+            messages_to_truncate = final_combined_turns # The list to potentially shorten
+            if _tiktoken_present and tiktoken:
+                try:
+                    encoding = tiktoken.get_encoding("cl100k_base")
+                    tokens_per_message = 4 # Approximation
+                    
+                    # We need to account for the system prompt's tokens separately
+                    system_prompt_tokens = 0
+                    if system_prompt_message:
+                         system_prompt_tokens = tokens_per_message + len(encoding.encode(system_prompt_message.content)) + 3 # +3 for assistant prime?
+
+                    def count_tokens_for_turns(messages: list[Message]) -> int:
+                        num_tokens = 0
+                        for message in messages:
+                             num_tokens += tokens_per_message
+                             if message.content: # Ensure content is not None
+                                 num_tokens += len(encoding.encode(message.content))
+                        return num_tokens
+
+                    # Calculate max tokens available for the TURNS (memory + history)
+                    max_tokens_for_turns = self.config.MAX_TOKENS - system_prompt_tokens
+                    if max_tokens_for_turns < 0: max_tokens_for_turns = 0 # Avoid negative limit
+
+                    initial_token_count_turns = count_tokens_for_turns(messages_to_truncate)
+                    logger.debug(f"Combined memory/history turns: {len(messages_to_truncate)} messages, ~{initial_token_count_turns} tokens. System prompt: ~{system_prompt_tokens} tokens.")
+                    logger.debug(f"Max tokens for turns: {max_tokens_for_turns} (Total limit: {self.config.MAX_TOKENS})")
+
+                    if initial_token_count_turns > max_tokens_for_turns:
+                        logger.warning(f"Combined turns context ({initial_token_count_turns} tokens) exceeds limit for turns ({max_tokens_for_turns}). Truncating...")
+                        
+                        # Simplified Truncation: Operates ONLY on messages_to_truncate
+                        # Structure is [mem1, mem2, ..., delimiter?, hist1, hist2, ...]
+                        
+                        # Find delimiter index within messages_to_truncate if it exists
+                        delimiter_index = -1
+                        if memory_delimiter_added:
+                             memory_delimiter_content = "--- Relevant Past Conversation Snippets (older history or related topics) ---"
+                             for i, msg in enumerate(messages_to_truncate):
+                                 if msg.role == "system" and msg.content == memory_delimiter_content:
+                                     delimiter_index = i
+                                     break
+                        
+                        num_memory_messages = delimiter_index if delimiter_index != -1 else 0
+                        history_start_index = delimiter_index + 1 if delimiter_index != -1 else 0
+                        
+                        truncated_turns = list(messages_to_truncate) # Work on a copy
+                        current_token_count_turns = initial_token_count_turns
+                        
+                        while current_token_count_turns > max_tokens_for_turns and len(truncated_turns) > 0:
+                            message_removed = False
+                            # 1. Try removing least relevant memories (start of list)
+                            if num_memory_messages > 0:
+                                removed_msg = truncated_turns.pop(0)
+                                num_memory_messages -= 1
+                                if delimiter_index != -1: delimiter_index -= 1
+                                history_start_index -= 1
+                                message_removed = True
+                                logger.debug(f"Truncate Turns: Removed memory message (Role: {removed_msg.role}, Content: '{removed_msg.content[:50]}...')")
+                            
+                            # 2. Try removing delimiter if no memories left
+                            elif delimiter_index != -1:
+                                removed_msg = truncated_turns.pop(delimiter_index)
+                                history_start_index -= 1
+                                delimiter_index = -1
+                                message_removed = True
+                                logger.debug(f"Truncate Turns: Removed memory delimiter message.")
+                                
+                            # 3. Try removing oldest history (start of history section)
+                            elif history_start_index < len(truncated_turns):
+                                msg_to_remove = truncated_turns[history_start_index]
+                                logger.debug(f"Truncate Turns: Attempting to remove history msg at index {history_start_index} (Role: {msg_to_remove.role}, Content: '{msg_to_remove.content[:50]}...')")
+                                removed_msg = truncated_turns.pop(history_start_index) # Remove from start of history part
+                                message_removed = True
+                                
+                            else:
+                                logger.warning("Truncation of turns stopped: No more messages to remove?")
+                                break
+                                
+                            if message_removed:
+                                current_token_count_turns = count_tokens_for_turns(truncated_turns)
+                            else:
+                                logger.warning("Truncation of turns stopped: Could not remove message.")
+                                break
+                        
+                        messages_to_truncate = truncated_turns # Update the list with the truncated version
+                        logger.warning(f"Turns context truncated to {len(messages_to_truncate)} messages, ~{current_token_count_turns} tokens.")
+                    else:
+                        logger.debug(f"Turns context is within token limits ({initial_token_count_turns} <= {max_tokens_for_turns}). No truncation needed.")
+
+                except Exception as e:
+                    logger.error(f"Token counting/truncation failed: {e}. Proceeding without truncation.", exc_info=self.config.VERBOSE)
+                    messages_to_truncate = final_combined_turns # Reset to pre-truncation state on error
+            elif self.memory_manager:
+                 logger.warning("`tiktoken` library not found. Skipping context token counting and truncation. Install with `pip install tiktoken`")
+                 messages_to_truncate = final_combined_turns # Ensure we use the combined list if no tiktoken
+            # --- End Stage 4 Truncation ---
+            
+            # --- Final Assembly --- 
+            final_messages_to_send = []
+            if system_prompt_message:
+                final_messages_to_send.append(system_prompt_message)
+            final_messages_to_send.extend(messages_to_truncate) # Add the (potentially truncated) turns
+            logger.debug(f"Final context assembly: {len(final_messages_to_send)} total messages prepared.")
+            
+            query_kwargs = {"messages": final_messages_to_send, "plaintext_output": plaintext_output,}
 
             if hasattr(self.client, 'SUPPORTS_STREAMING') and self.client.SUPPORTS_STREAMING and stream:
                  query_kwargs["stream"] = True
@@ -186,6 +396,33 @@ class AskLLM:
                 response = self.client.query(**query_kwargs)
 
             self.history_manager.add_message("assistant", response)
+
+            # Add user prompt and successful assistant response to memory if enabled
+            if self.memory_manager:
+                try:
+                    user_msg_id = str(uuid.uuid4())
+                    assistant_msg_id = str(uuid.uuid4())
+                    current_time = time.time()
+
+                    # Add user prompt
+                    self.memory_manager.add_memory(
+                        message_id=user_msg_id,
+                        role="user",
+                        content=prompt,
+                        timestamp=current_time # Or maybe history message timestamp if available?
+                    )
+                    # Add assistant response
+                    self.memory_manager.add_memory(
+                        message_id=assistant_msg_id,
+                        role="assistant",
+                        content=response,
+                        timestamp=current_time + 0.001
+                    )
+
+                except Exception as e:
+                    logger.exception(f"Failed to add messages to memory: {e}")
+                    # Don't crash the main query process if memory addition fails
+
             return response
         except KeyboardInterrupt:
             console.print("[bold red]Query interrupted.[/bold red]")

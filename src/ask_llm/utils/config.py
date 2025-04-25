@@ -51,16 +51,25 @@ class Config(BaseSettings):
     HISTORY_DURATION: int = Field(default=60 * 10)
     OLLAMA_URL: str = Field(default="http://localhost:11434")
     MODEL_CACHE_DIR: str = Field(default=os.path.expanduser("~/.cache/ask_llm/models"), description="Directory to cache downloaded GGUF models")
+    CHROMA_DB_CACHE_DIR: str = Field(default=os.path.expanduser("~/.cache/ask_llm/chroma_db"), description="Directory for persistent ChromaDB storage when memory is enabled (Set via ASK_LLM_CHROMA_DB_CACHE_DIR)")
     MODELS_CONFIG_PATH: str = Field(default=str(DEFAULT_MODELS_YAML), description="Path to the models YAML definition file")
     DEFAULT_MODEL_ALIAS: Optional[str] = Field(default=None, description="Alias from models.yaml to use if --model is not specified (Set via ASK_LLM_DEFAULT_MODEL_ALIAS in env or .env file)")
     ALLOW_DUPLICATE_RESPONSE: bool = Field(default=False, description="Allow identical consecutive assistant responses without retry")
 
+    # --- Memory Settings --- #
+    MEMORY_ENABLED_DEFAULT: bool = Field(default=False, description="Whether to enable memory by default if --memory flag is not specified (Set via ASK_LLM_MEMORY_ENABLED_DEFAULT)") # Note: CLI flag currently overrides this
+    MEMORY_N_RESULTS: int = Field(default=5, description="Number of relevant memories to retrieve during search (Set via ASK_LLM_MEMORY_N_RESULTS)")
+    CHROMA_COLLECTION_NAME: str = Field(default="chat_memory", description="Name of the ChromaDB collection for memory storage (Set via ASK_LLM_CHROMA_COLLECTION_NAME)")
+    EMBEDDING_MODEL_NAME: str = Field(default="all-MiniLM-L6-v2", description="Sentence Transformer model name for memory embeddings (Set via ASK_LLM_EMBEDDING_MODEL_NAME)")
+
+    # --- LLM Generation Settings --- #
     MAX_TOKENS: int = Field(default=1024, description="Default maximum tokens to generate")
     TEMPERATURE: float = Field(default=0.8, description="Default generation temperature")
     TOP_P: float = Field(default=0.95, description="Default nucleus sampling top-p")
     LLAMA_CPP_N_CTX: int = Field(default=4096, description="Context size for Llama.cpp models")
     LLAMA_CPP_N_GPU_LAYERS: int = Field(default=-1, description="Number of layers to offload to GPU (-1 for all possible layers)")
 
+    # --- UI/Interaction Settings --- #
     VERBOSE: bool = Field(default=False, description="Verbose mode for debugging")
     PLAIN_OUTPUT: bool = Field(default=False, description="Use plain text output without Rich formatting")
     NO_STREAM: bool = Field(default=False, description="Disable streaming output")

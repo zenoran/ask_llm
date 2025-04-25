@@ -1,0 +1,15 @@
+---
+description:
+globs:
+alwaysApply: false
+---
+# Vector Memory Implementation Overview
+
+This project involves adding optional long-term vector memory to `ask-llm`.
+This uses `ChromaDB` and `sentence-transformers` for storage and retrieval of past conversation snippets.
+
+The feature is controlled by the `--memory` flag handled in [src/ask_llm/cli.py](mdc:src/ask_llm/cli.py) and enabled within the main application logic in [src/ask_llm/core.py](mdc:src/ask_llm/core.py).
+
+The core memory management happens in [src/ask_llm/memory.py](mdc:src/ask_llm/memory.py).
+
+Configuration options related to memory (persistence path, embedding model) are defined in [src/ask_llm/utils/config.py](mdc:src/ask_llm/utils/config.py).

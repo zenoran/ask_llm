@@ -68,20 +68,20 @@ all: install
 
 install-deps:
 	@echo "Installing additional dependencies for huggingface and llamacpp..."
-	@if [ -f .venv/bin/pip ]; then \
+	@if [ -f .venv/bin/pip3 ]; then \
 		echo "Attempting to uninstall existing llama-cpp-python..."; \
-		.venv/bin/pip uninstall llama-cpp-python -y || true; \
+		.venv/bin/pip3 uninstall llama-cpp-python -y || true; \
 		echo "Installing llama-cpp-python with CUDA support..."; \
-		CMAKE_ARGS="-DGGML_CUDA=on" FORCE_CMAKE=1 .venv/bin/pip install llama-cpp-python --no-cache-dir; \
+		CMAKE_ARGS="-DGGML_CUDA=on" FORCE_CMAKE=1 .venv/bin/pip3 install llama-cpp-python --no-cache-dir; \
 		echo "Installing huggingface-hub..."; \
-		.venv/bin/pip install huggingface-hub; \
+		.venv/bin/pip3 install huggingface-hub; \
 	elif [ -f .venv/bin/python ]; then \
 		echo "Attempting to uninstall existing llama-cpp-python..."; \
-		# .venv/bin/python -m pip uninstall llama-cpp-python -y || true; \
+		# .venv/bin/python -m pip3 uninstall llama-cpp-python -y || true; \
 		echo "Installing llama-cpp-python with CUDA support..."; \
-		CMAKE_ARGS="-DGGML_CUDA=on" FORCE_CMAKE=1 .venv/bin/python -m pip install llama-cpp-python --no-cache-dir; \
+		CMAKE_ARGS="-DGGML_CUDA=on" FORCE_CMAKE=1 .venv/bin/python -m pip3 install llama-cpp-python --no-cache-dir; \
 		echo "Installing huggingface-hub..."; \
-		.venv/bin/python -m pip install huggingface-hub; \
+		.venv/bin/python -m pip3 install huggingface-hub; \
 	else \
 		echo "ERROR: Virtual environment seems corrupted. Run 'make clean-venv' first."; \
 		exit 1; \
@@ -95,24 +95,24 @@ install:
 	else \
 		echo "Virtual environment already exists"; \
 	fi
-	@if [ -f .venv/bin/pip ]; then \
+	@if [ -f .venv/bin/pip3 ]; then \
 		echo "Installing/updating package in development mode"; \
-		.venv/bin/pip install -e .; \
+		.venv/bin/pip3 install -e .; \
 	elif [ -f .venv/bin/python ]; then \
-		echo "Pip not found, installing via ensurepip"; \
-		.venv/bin/python -m ensurepip; \
-		.venv/bin/python -m pip install -e .; \
+		echo "Pip3 not found, installing via ensurepip3"; \
+		.venv/bin/python -m ensurepip3; \
+		.venv/bin/python -m pip3 install -e .; \
 	else \
 		echo "ERROR: Virtual environment seems corrupted. Run 'make clean-venv' first."; \
 		exit 1; \
 	fi
 	@echo "Setup complete. Activate with: source .venv/bin/activate"
 	# Alternative short install if env already active
-	# uv pip install -e .
+	# uv pip3 install -e .
 	@make install-deps
 
 develop:
-	uv pip install -e ".[dev]" # Assuming a [dev] extra for dev dependencies
+	uv pip3 install -e ".[dev]" # Assuming a [dev] extra for dev dependencies
 
 test:
 	@echo "Running tests with coverage..."
