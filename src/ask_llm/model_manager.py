@@ -455,10 +455,35 @@ def list_models(config: Config):
 
 def delete_model(alias: str, config: Config) -> bool:
     manager = ModelManager(config)
+    # Get model info before deletion from config
+    model_info = manager.models_data.get('models', {}).get(alias)
+    
     delete_ok = manager.delete_model_alias(alias)
     if delete_ok:
         config._load_models_config()
         config.force_ollama_check()
+        
+        # If the model is a GGUF model, check if we should delete the model files as well
+        if model_info and model_info.get('type') == PROVIDER_GGUF:
+            repo_id = model_info.get('repo_id')
+            if repo_id:
+                from pathlib import Path
+                import shutil
+                
+                # Get the entire repo directory path
+                repo_dir = Path(config.MODEL_CACHE_DIR) / repo_id
+                
+                if repo_dir.exists():
+                    console.print(f"\nFound model directory at: [cyan]{repo_dir}[/cyan]")
+                    confirm = Confirm.ask("Do you want to delete the entire model directory?", default=False)
+                    if confirm:
+                        try:
+                            # Delete the entire directory tree
+                            shutil.rmtree(repo_dir)
+                            console.print(f"[green]Successfully deleted model directory: {repo_dir}[/green]")
+                        except Exception as e:
+                            console.print(f"[bold red]Error deleting model directory:[/bold red] {e}")
+    
     return delete_ok
 
 def update_models_interactive(config: Config, provider: Optional[str] = None):

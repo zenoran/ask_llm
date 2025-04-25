@@ -6,9 +6,10 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import yaml
-from pydantic import Field, computed_field
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from rich.console import Console
+from ask_llm.utils import prompts
 
 PROVIDER_OPENAI = "openai"
 PROVIDER_OLLAMA = "ollama"
@@ -24,7 +25,7 @@ def is_huggingface_available() -> bool:
     torch_spec = importlib.util.find_spec("torch")
     transformers_spec = importlib.util.find_spec("transformers")
     # bitsandbytes is often optional but useful for quantization with HF
-    bitsandbytes_spec = importlib.util.find_spec("bitsandbytes") 
+    _ = importlib.util.find_spec("bitsandbytes") 
     # Adjust logic if bitsandbytes should be strictly required
     return all([torch_spec, transformers_spec]) # Or include bitsandbytes_spec if mandatory
 
@@ -46,7 +47,7 @@ DEFAULT_MODELS_YAML = get_default_models_yaml_path()
 DOTENV_PATH = DEFAULT_MODELS_YAML.parent / ".env"
 
 class Config(BaseSettings):
-    HISTORY_FILE: str = Field(default=os.path.expanduser("~/.ask-llm-chat-history"))
+    HISTORY_FILE: str = Field(default=os.path.expanduser("~/.cache/ask_llm/chat-history"))
     HISTORY_DURATION: int = Field(default=60 * 10)
     OLLAMA_URL: str = Field(default="http://localhost:11434")
     MODEL_CACHE_DIR: str = Field(default=os.path.expanduser("~/.cache/ask_llm/models"), description="Directory to cache downloaded GGUF models")
@@ -64,7 +65,11 @@ class Config(BaseSettings):
     PLAIN_OUTPUT: bool = Field(default=False, description="Use plain text output without Rich formatting")
     NO_STREAM: bool = Field(default=False, description="Disable streaming output")
     INTERACTIVE_MODE: bool = Field(default=False, description="Whether the app is in interactive mode (set based on args)")
-    SYSTEM_MESSAGE: str = Field(default="""You are a helpful and concise technical assistant. Respond using simple, easy-to-understand language. Keep explanations short and direct. Use correct and clean Markdown formatting: backticks for code, lists/headings for structure, bold for emphasis. Avoid complex elements like HTML or LaTeX. Prioritize clarity and conciseness.""")
+
+    # SYSTEM_MESSAGE is primary but other env variables can be used to override it
+    SYSTEM_MESSAGE: str = Field(default=prompts.SYSTEM_MESSAGE)
+    SYSTEM_MESSAGE_CHAT: str = Field(default=prompts.SYSTEM_MESSAGE_CHAT)
+    SYSTEM_MESSAGE_STORY: str = Field(default=prompts.SYSTEM_MESSAGE_STORY)
 
     defined_models: Dict[str, Any] = Field(default_factory=dict, exclude=True)
     available_ollama_models: List[str] = Field(default_factory=list, exclude=True)
@@ -207,3 +212,5 @@ def set_config_value(key: str, value: str, config: Config) -> bool:
     except IOError as e:
         console.print(f"[bold red]Error writing to {dotenv_path}:[/bold red] {e}")
         return False
+
+config = Config()

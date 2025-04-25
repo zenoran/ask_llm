@@ -19,7 +19,7 @@ def parse_arguments(config_obj: Config) -> argparse.Namespace:
     parser.add_argument("-m","--model",type=str,default=config_obj.DEFAULT_MODEL_ALIAS,help=f"Model alias defined in {config_obj.MODELS_CONFIG_PATH}. Supports partial matching. (Default: {config_obj.DEFAULT_MODEL_ALIAS or 'None'})")
     parser.add_argument("--add-gguf",type=str,metavar="REPO_ID",help="Interactively select, download, and add a GGUF model from a Hugging Face repo ID to models.yaml.")
     parser.add_argument("--list-models",action="store_true",help="List available model aliases defined in the configuration file and exit.")
-    parser.add_argument("--refresh-models",type=str,choices=['ollama', 'openai'],metavar="TYPE",help="Refresh model list from a source: 'ollama' (check server availability), 'openai' (query API and update config)")
+    parser.add_argument("--add-model",type=str,choices=['ollama', 'openai'],metavar="TYPE",help="Refresh model list from a source: 'ollama' (check server availability), 'openai' (query API and update config)")
     parser.add_argument("--delete-model",type=str,metavar="ALIAS",help="Delete the specified model alias from the configuration file after confirmation.")
     parser.add_argument("--config-set", nargs=2, metavar=("KEY", "VALUE"), help="Set a configuration value (e.g., DEFAULT_MODEL_ALIAS) in the .env file.")
     parser.add_argument("--config-list", action="store_true", help="List the current effective configuration settings.")
@@ -125,17 +125,17 @@ def main():
             success = False
         sys.exit(0 if success else 1)
         return
-    if args.refresh_models:
+    if args.add_model:
         success = False
         try:
-            if args.refresh_models == 'openai':
+            if args.add_model == 'openai':
                 success = update_models_interactive(config_obj, provider='openai')
-            elif args.refresh_models == 'ollama':
+            elif args.add_model == 'ollama':
                 success = update_models_interactive(config_obj, provider='ollama')
             if success:
-                console.print(f"[green]Model list refresh for '{args.refresh_models}' completed.[/green]")
+                console.print(f"[green]Model list refresh for '{args.add_model}' completed.[/green]")
             else:
-                console.print(f"[red]Model list refresh for '{args.refresh_models}' failed or was cancelled.[/red]")
+                console.print(f"[red]Model list refresh for '{args.add_model}' failed or was cancelled.[/red]")
         except KeyboardInterrupt:
             console.print("[bold red]Model list refresh cancelled.[/bold red]")
             success = False # Ensure failure on interrupt

@@ -1,12 +1,14 @@
 import os
 import json
 import time
+import logging
 from ..clients.base import LLMClient
 from ..models.message import Message
 from rich.rule import Rule
 from .config import Config
 
 
+logger = logging.getLogger(__name__)
 class HistoryManager:
     messages: list[Message] = []
     client: LLMClient
@@ -18,19 +20,27 @@ class HistoryManager:
         self.history_file = config.HISTORY_FILE
         self.messages = []
 
-    def load_history(self):
-        """Load all persisted history."""
-        if self.history_file and os.path.exists(self.history_file):
-            try:
-                with open(self.history_file, "r", encoding="utf-8") as f:
-                    message_dicts = json.load(f)
-                    self.messages = [Message.from_dict(msg) for msg in message_dicts]
-            except UnicodeDecodeError as e:
-                self.client.console.print(f"[bold red]Error loading history:[/bold red] Unable to decode file. Ensure it is saved in UTF-8 format. ({e})")
-            except json.JSONDecodeError as e:
-                self.client.console.print(f"[bold red]Error loading history:[/bold red] Invalid JSON format in {self.history_file}. ({e})")
-            except Exception as e:
-                self.client.console.print(f"[bold red]Error loading history:[/bold red] {e}")
+    def load_history(self, since_minutes: int | None = None):
+        self.messages = []
+        if not self.history_file or not os.path.exists(self.history_file):
+            print("No history file found. Skipping history load.")
+            logger.debug("No history file found. Skipping history load.")
+            return
+        try:
+            with open(self.history_file, "r", encoding="utf-8") as f:
+                message_dicts = json.load(f)
+                self.messages = [Message.from_dict(msg) for msg in message_dicts]
+                logger.debug(f"Loaded {len(self.messages)} messages from history file.")
+        except UnicodeDecodeError as e:
+            self.client.console.print(f"[bold red]Error loading history:[/bold red] Unable to decode file. Ensure it is saved in UTF-8 format. ({e})")
+        except json.JSONDecodeError as e:
+            self.client.console.print(f"[bold red]Error loading history:[/bold red] Invalid JSON format in {self.history_file}. ({e})")
+        except Exception as e:
+            self.client.console.print(f"[bold red]Error loading history:[/bold red] {e}")
+        if since_minutes is not None and self.messages:
+            logger.debug(f"Loading history from {since_minutes} minutes ago ({len(self.messages)} messages)")
+            cutoff = time.time() - since_minutes * 60
+            self.messages = [msg for msg in self.messages if msg.timestamp >= cutoff]
 
     def save_history(self):
         """Persist message history to the history file."""

@@ -2,9 +2,11 @@ import importlib.util
 import pathlib
 from rich.console import Console
 from .utils.config import Config, is_huggingface_available, is_llama_cpp_available
-from .utils.history import HistoryManager
+from .utils.history import HistoryManager, Message
 from .clients import LLMClient
 import logging
+from .utils.prompts import SYSTEM_REFINE_PROMPT
+
 
 console = Console()
 logger = logging.getLogger(__name__)
@@ -158,8 +160,11 @@ class AskLLM:
             logger.exception(f"Error initializing LlamaCppClient with {model_path_to_load}: {e}")
             raise
 
-    def load_history(self):
-        self.history_manager.load_history()
+    def load_history(self, since_minutes: int | None= None) -> list[dict]:
+        if since_minutes is None:
+            since_minutes = self.config.HISTORY_DURATION
+        self.history_manager.load_history(since_minutes=since_minutes)
+        return [msg.to_dict() for msg in self.history_manager.messages]
 
     def query(self, prompt, plaintext_output: bool = False, stream: bool = True):
         try:
@@ -190,4 +195,57 @@ class AskLLM:
             console.print(f"[bold red]Error during query:[/bold red] {e}")
             logger.exception(f"Error during query: {e}")
             self.history_manager.remove_last_message_if_partial("assistant")
-            return "" 
+            return ""
+
+            
+    def refine_prompt(self, prompt, history=None):
+        """
+        Refine the user's prompt using context and history to determine intent.
+        
+        Args:
+            prompt: The user's original prompt
+            history: Optional list of previous message objects or dictionaries
+            
+        Returns:
+            A refined prompt that can be fed back to the LLM
+        """
+        try:
+            messages = []
+            messages.append(Message(role="system", content=SYSTEM_REFINE_PROMPT))
+            
+            # Add history context if provided
+            if history:
+                history_text = []
+                for msg in history:
+                    # Handle both Message objects and dictionaries
+                    if hasattr(msg, 'role') and hasattr(msg, 'content'):
+                        # Message object
+                        history_text.append(f"{msg.role}: {msg.content}")
+                    elif isinstance(msg, dict) and 'role' in msg and 'content' in msg:
+                        # Dictionary with role and content keys
+                        history_text.append(f"{msg['role']}: {msg['content']}")
+                    else:
+                        logger.warning(f"Skipping invalid message format in history: {msg}")
+                        
+                if history_text:
+                    context_message = f"Previous conversation history:\n{'\n'.join(history_text)}\n\nUser's raw prompt: {prompt}"
+                    messages.append(Message(role="user", content=context_message))
+                else:
+                    messages.append(Message(role="user", content=f"User's raw prompt: {prompt}"))
+            else:
+                messages.append(Message(role="user", content=f"User's raw prompt: {prompt}"))
+            
+            # Make the query with plaintext output and no streaming for prompt refinement
+            query_kwargs = {"messages": messages, "plaintext_output": True, "stream": False}
+            refined_prompt = self.client.query(**query_kwargs)
+            
+            if logger.isEnabledFor(logging.DEBUG):
+                console.print(f"[bold green]Messages:[/bold green] {messages}")
+                logger.info(f"Refined prompt: {refined_prompt}")
+                
+            return refined_prompt
+        except Exception as e:
+            console.print(f"[bold yellow]Error during prompt refinement:[/bold yellow] {e}")
+            logger.warning(f"Error during prompt refinement: {e}")
+            # Return original prompt on error
+            return prompt 
