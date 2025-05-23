@@ -12,6 +12,7 @@ from ..utils.config import Config # Import Config for type hinting
 
 class LLMClient(ABC):
     """Abstract base class for LLM clients."""
+    SUPPORTS_STREAMING = False
 
     def __init__(self, model: str, config: Config): # Accept config
         self.model = model

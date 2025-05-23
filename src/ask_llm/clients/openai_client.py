@@ -13,6 +13,7 @@ logger = logging.getLogger(__name__)
 
 class OpenAIClient(LLMClient):
     """Client for OpenAI API"""
+    SUPPORTS_STREAMING = True
 
     def __init__(self, model: str, config: Config):
         super().__init__(model, config) # Pass config to base class
