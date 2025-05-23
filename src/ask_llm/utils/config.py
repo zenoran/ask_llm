@@ -63,7 +63,7 @@ class Config(BaseSettings):
     EMBEDDING_MODEL_NAME: str = Field(default="all-MiniLM-L6-v2", description="Sentence Transformer model name for memory embeddings (Set via ASK_LLM_EMBEDDING_MODEL_NAME)")
 
     # --- LLM Generation Settings --- #
-    MAX_TOKENS: int = Field(default=1024, description="Default maximum tokens to generate")
+    MAX_TOKENS: int = Field(default=1024*4, description="Default maximum tokens to generate")
     TEMPERATURE: float = Field(default=0.8, description="Default generation temperature")
     TOP_P: float = Field(default=0.95, description="Default nucleus sampling top-p")
     LLAMA_CPP_N_CTX: int = Field(default=4096, description="Context size for Llama.cpp models")
