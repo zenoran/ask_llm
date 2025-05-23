@@ -1,93 +1,156 @@
 import json
 import os
-import sys
-from openai import OpenAI
-from rich.markdown import Markdown
-from rich.panel import Panel
+from openai import OpenAI, OpenAIError
+from typing import List, Iterator
+from rich.json import JSON
 from rich.rule import Rule
-from rich.align import Align
-from rich.live import Live
-from ask_llm.clients.base import LLMClient
-from ask_llm.utils.config import config
+from ..clients.base import LLMClient
+from ..utils.config import Config # Keep for type hinting
+from ..models.message import Message
+import logging # Import logging
+
+logger = logging.getLogger(__name__)
 
 class OpenAIClient(LLMClient):
     """Client for OpenAI API"""
 
-    def __init__(self, model):
-        super().__init__(model)
+    def __init__(self, model: str, config: Config):
+        super().__init__(model, config) # Pass config to base class
         self.api_key = self._get_api_key()
+        if not self.api_key:
+            raise ValueError("OpenAI API key not found. Set OPENAI_API_KEY environment variable.")
         self.client = OpenAI(api_key=self.api_key)
 
-    def _get_api_key(self):
-        api_key = os.getenv("OPENAI_API_KEY")
-        if not api_key:
-            raise Exception("Please set your OPENAI_API_KEY environment variable.")
-        return api_key
+    def _get_api_key(self) -> str | None:
+        return os.getenv("OPENAI_API_KEY")
 
-    def query(self, messages, plaintext_output: bool = False):
+    def query(self, messages: List[Message], plaintext_output: bool = False, stream: bool = True, **kwargs) -> str:
         """Query OpenAI API with full message history, using streaming by default.
 
         Args:
-            messages: List of message dictionaries (including the latest user prompt).
-            plaintext_output: If True, return raw text. Otherwise, format output.
+            messages: List of Message objects.
+            plaintext_output: If True, return raw text.
+            stream: Whether to stream the response.
+            **kwargs: Additional arguments (ignored by this client).
+
+        Returns:
+            The model's response as a string.
         """
-        # Messages are now passed directly, assuming the prompt is the last one
         api_messages = self._prepare_api_messages(messages)
-        response = self._stream_response(api_messages, plaintext_output)
+        should_stream = stream and not self.config.NO_STREAM
+        payload = {
+            "model": self.model,
+            "messages": api_messages,
+            "max_tokens": self.config.MAX_TOKENS,
+            "temperature": self.config.TEMPERATURE,
+            "top_p": self.config.TOP_P,
+            "stream": should_stream,
+        }
+        if self.config.VERBOSE:
+            self.console.print(Rule("Querying OpenAI API", style="green"))
+            self.console.print(f"[dim]Params:[/dim] [italic]max_tokens={payload['max_tokens']}, temp={payload['temperature']}, top_p={payload['top_p']}, stream={payload['stream']}[/italic]")
+            self.console.print(Rule("Request Payload", style="dim blue"))
+            try:
+                payload_str = json.dumps(payload, indent=2)
+                self.console.print(JSON(payload_str))
+            except TypeError as e:
+                logger.error(f"Could not serialize payload for Rich JSON printing: {e}")
+                self.console.print(f"[red]Error printing payload:[/red] {e}")
+                import pprint
+                self.console.print(pprint.pformat(payload))
+            self.console.print(Rule(style="green"))
+        elif logger.isEnabledFor(logging.DEBUG):
+            logger.debug(f"OpenAI Request Payload: {json.dumps(payload)}")
+
+        if should_stream:
+            response = self._stream_response(api_messages, plaintext_output, payload)
+        else:
+            response = self._get_full_response(api_messages, plaintext_output, payload)
+
+        if self.config.VERBOSE:
+             self.console.print(Rule(style="green"))
+
         return response
 
-    def _prepare_api_messages(self, messages):
-        # Convert all messages in the list to API format
-        api_messages = [msg.to_api_format() if hasattr(msg, 'to_api_format') else msg for msg in messages]
-        # api_messages.append({"role": "user", "content": prompt}) # REMOVED
-        return api_messages
+    def _prepare_api_messages(self, messages: List[Message]) -> list[dict]:
+        prepared = []
+        has_system = False
+        system_message = self.config.SYSTEM_MESSAGE
+        for msg in messages:
+            api_msg = msg.to_api_format()
+            if api_msg['role'] == 'system':
+                if not has_system:
+                    prepared.insert(0, api_msg)
+                    has_system = True
+            else:
+                prepared.append(api_msg)
 
-    def _stream_response(self, api_messages, plaintext_output: bool = False):
+        if not has_system and system_message:
+            prepared.insert(0, {"role": "system", "content": system_message})
+
+        return prepared
+
+    def _stream_response(self, api_messages: List[dict], plaintext_output: bool, payload: dict) -> str:
         """Stream the response using the base class handler."""
-        if config.VERBOSE:
-            self.console.print("[bold blue]Verbose Output:[/bold blue]")
-            self.console.print_json(json.dumps(api_messages))
-
         try:
-            api_request = self.client.chat.completions.create(
-                model=self.model, messages=api_messages, stream=True, store=False
+            stream = self.client.chat.completions.create(**payload)
+            return self._handle_streaming_output(
+                stream_iterator=self._iterate_openai_chunks(stream),
+                plaintext_output=plaintext_output,
             )
+        except OpenAIError as e:
+            logger.error(f"Error during OpenAI API request: {e}")
+            return f"ERROR: OpenAI API Error - {e}"
         except Exception as e:
-            self.console.print(f"[bold red]Error making OpenAI API request:[/bold red] {e}")
-            return f"ERROR: {e}"
+            logger.error(f"Unexpected error during OpenAI streaming: {e}")
+            return f"ERROR: Unexpected error - {e}"
 
-        def _iterate_openai_chunks(stream):
-            try:
-                for chunk in stream:
-                    content = chunk.choices[0].delta.content
-                    if content:
-                        yield content
-            except Exception as e:
-                 # This might catch API errors or connection issues during streaming
-                 self.console.print(f"\n[bold red]Error during OpenAI stream processing:[/bold red] {e}")
-                 yield f"\nERROR: {e}"
-                 # We might want to raise an exception here depending on desired handling
+    def _iterate_openai_chunks(self, stream: Iterator) -> Iterator[str]:
+        """Iterates through OpenAI stream chunks and yields content."""
+        try:
+            for chunk in stream:
+                content = chunk.choices[0].delta.content
+                if content:
+                    yield content
+        except OpenAIError as e:
+            logger.error(f"\nError during OpenAI stream processing: {e}")
+            yield f"\nERROR: OpenAI API Error - {e}"
+        except Exception as e:
+            logger.error(f"\nUnexpected error during OpenAI stream iteration: {e}")
+            yield f"\nERROR: Unexpected error - {e}"
 
-        # Pass the iterator to the base handler
-        return self._handle_streaming_output(
-            stream_iterator=_iterate_openai_chunks(api_request),
-            plaintext_output=plaintext_output,
-            # Keep OpenAI default panel style (green)
-            first_para_panel=True
-        )
+    def _get_full_response(self, api_messages: List[dict], plaintext_output: bool, payload: dict) -> str:
+        """Gets the full response without streaming."""
+        try:
+            payload['stream'] = False
+            completion = self.client.chat.completions.create(**payload)
+            response_text = completion.choices[0].message.content or ""
+            if self.config.VERBOSE:
+                usage = completion.usage
+                if usage:
+                    self.console.print(f"[dim]OpenAI Tokens: Prompt={usage.prompt_tokens}, Completion={usage.completion_tokens}, Total={usage.total_tokens}[/dim]")
+            elif logger.isEnabledFor(logging.DEBUG):
+                usage = completion.usage
+                if usage:
+                    logger.debug(f"OpenAI Tokens: Prompt={usage.prompt_tokens}, Completion={usage.completion_tokens}, Total={usage.total_tokens}")
 
-    def get_verbose_output(self, messages):
-        """Get full API response for verbose output"""
-        # Convert all messages in the list to API format
-        api_messages = [msg.to_api_format() if hasattr(msg, 'to_api_format') else msg for msg in messages]
-        # api_messages.append({"role": "user", "content": prompt}) # REMOVED
+            if not plaintext_output:
+                parts = response_text.split("\n\n", 1)
+                first_part = parts[0]
+                second_part = parts[1] if len(parts) > 1 else None
+                self._print_assistant_message(first_part, second_part=second_part)
 
-        result = self.client.chat.completions.create(
-            model=self.model, messages=api_messages, store=False
-        )
-        return json.dumps(result, indent=2)
+            return response_text.strip()
 
-    def _print_buffer(self, buffer):
-        """Print buffered lines to the console."""
-        for line in buffer:
-            self.console.print(line)
+        except OpenAIError as e:
+            logger.error(f"Error making OpenAI API request: {e}")
+            return f"ERROR: OpenAI API Error - {e}"
+        except Exception as e:
+            logger.error(f"Unexpected error during OpenAI request: {e}")
+            return f"ERROR: Unexpected error - {e}"
+
+    def get_styling(self) -> tuple[str | None, str]:
+        """Return OpenAI specific styling."""
+        panel_border_style = "green"
+        panel_title = f"[bold {panel_border_style}]{self.model}[/bold {panel_border_style}]"
+        return panel_title, panel_border_style

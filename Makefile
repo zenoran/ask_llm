@@ -1,6 +1,5 @@
 .PHONY: clean clean-pyc clean-build clean-test install develop all test lint format check coverage report
 
-# Variables
 PYTHON := python
 SRC_DIR := src
 TEST_DIR := tests
@@ -22,7 +21,7 @@ help:
 	@echo "  format         Run Ruff formatter."
 	@echo "  check          Run all checks (lint, format --check, type check)."
 
-clean: clean-pyc clean-build clean-test
+clean: clean-pyc clean-build clean-test clean-bs
 
 clean-pyc:
 	find . -name '*.pyc' -exec rm -f {} +
@@ -57,6 +56,8 @@ clean-test:
 	rm -rf .dmypy.json
 	rm -rf dmypy.json
 
+clean-bs:
+	find . -name '._*' -exec rm -f {} +
 clean-venv:
 	rm -rf venv/
 	rm -rf .venv/
@@ -65,37 +66,54 @@ clean-venv:
 
 all: install
 
-# Combined install target
-install:
-	@echo "Setting up environment in ~/.venv/ask-llm"
-	@mkdir -p ~/.venv
-	@if [ ! -d ~/.venv/ask-llm ]; then \
-		echo "Creating new virtual environment"; \
-		uv venv ~/.venv/ask-llm --python `which python3`; \
-	else \
-		echo "Virtual environment already exists"; \
-	fi
-	@if [ -f ~/.venv/ask-llm/bin/pip ]; then \
-		echo "Installing/updating package in development mode"; \
-		~/.venv/ask-llm/bin/pip install -e .; \
-	elif [ -f ~/.venv/ask-llm/bin/python ]; then \
-		echo "Pip not found, installing via ensurepip"; \
-		~/.venv/ask-llm/bin/python -m ensurepip; \
-		~/.venv/ask-llm/bin/python -m pip install -e .; \
+install-deps:
+	@echo "Installing additional dependencies for huggingface and llamacpp..."
+	@if [ -f .venv/bin/pip3 ]; then \
+		echo "Attempting to uninstall existing llama-cpp-python..."; \
+		.venv/bin/pip3 uninstall llama-cpp-python -y || true; \
+		echo "Installing llama-cpp-python with CUDA support..."; \
+		CMAKE_ARGS="-DGGML_CUDA=on" FORCE_CMAKE=1 .venv/bin/pip3 install llama-cpp-python --no-cache-dir; \
+		echo "Installing huggingface-hub..."; \
+		.venv/bin/pip3 install huggingface-hub; \
+	elif [ -f .venv/bin/python ]; then \
+		echo "Attempting to uninstall existing llama-cpp-python..."; \
+		# .venv/bin/python -m pip3 uninstall llama-cpp-python -y || true; \
+		echo "Installing llama-cpp-python with CUDA support..."; \
+		CMAKE_ARGS="-DGGML_CUDA=on" FORCE_CMAKE=1 .venv/bin/python -m pip3 install llama-cpp-python --no-cache-dir; \
+		echo "Installing huggingface-hub..."; \
+		.venv/bin/python -m pip3 install huggingface-hub; \
 	else \
 		echo "ERROR: Virtual environment seems corrupted. Run 'make clean-venv' first."; \
 		exit 1; \
 	fi
-	@echo "Setup complete. Activate with: source ~/.venv/ask-llm/bin/activate"
+
+install:
+	@echo "Setting up environment in .venv"
+	@if [ ! -d .venv ]; then \
+		echo "Creating new virtual environment"; \
+		uv venv .venv --python `which python3`; \
+	else \
+		echo "Virtual environment already exists"; \
+	fi
+	@if [ -f .venv/bin/pip3 ]; then \
+		echo "Installing/updating package in development mode"; \
+		.venv/bin/pip3 install -e .; \
+	elif [ -f .venv/bin/python ]; then \
+		echo "Pip3 not found, installing via ensurepip3"; \
+		.venv/bin/python -m ensurepip3; \
+		.venv/bin/python -m pip3 install -e .; \
+	else \
+		echo "ERROR: Virtual environment seems corrupted. Run 'make clean-venv' first."; \
+		exit 1; \
+	fi
+	@echo "Setup complete. Activate with: source .venv/bin/activate"
 	# Alternative short install if env already active
-	# uv pip install -e .
+	# uv pip3 install -e .
+	@make install-deps
 
 develop:
-	uv pip install -e ".[dev]" # Assuming a [dev] extra for dev dependencies
-	# If no [dev] extra, list dev deps explicitly:
-	# uv pip install -e . pytest pytest-cov ruff mypy
+	uv pip3 install -e ".[dev]" # Assuming a [dev] extra for dev dependencies
 
-# Testing and Coverage
 test:
 	@echo "Running tests with coverage..."
 	pytest --cov=$(COV_TARGET) --cov-report=term-missing $(TEST_DIR)
@@ -107,7 +125,6 @@ report:
 	pytest --cov=$(COV_TARGET) --cov-report=html $(TEST_DIR)
 	@echo "HTML report generated in htmlcov/ directory."
 
-# Linting and Formatting
 lint:
 	@echo "Running Ruff linter..."
 	ruff check $(SRC_DIR) $(TEST_DIR)
