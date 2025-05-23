@@ -80,7 +80,7 @@ def main():
         key, value = args.config_set
         success = set_config_value(key, value, config_obj)
         if success:
-            console.print(f"[green]Configuration '{key}' set to '{value}' in {config_obj.model_config['env_file']}.[/green]")
+            console.print(f"[green]Configuration '{key}' set to '{value}' in {config_obj.model_config.get('env_file', 'unknown')}.[/green]")
             sys.exit(0)
         else:
             console.print(f"[bold red]Failed to set configuration '{key}'.[/bold red]")
@@ -88,7 +88,7 @@ def main():
     # Handle listing config values
     elif getattr(args, 'config_list', False):
         console.print(f"[bold magenta]Current Configuration Settings:[/bold magenta]")
-        console.print(f"(Sources: Defaults, Environment Variables, {config_obj.model_config['env_file']})\n")
+        console.print(f"(Sources: Defaults, Environment Variables, {config_obj.model_config.get('env_file', 'unknown')})\n")
         exclude_fields = {'defined_models', 'available_ollama_models', 'ollama_checked', 'model_config'}
         for field_name, field_info in sorted(config_obj.model_fields.items()):
             if field_name not in exclude_fields:

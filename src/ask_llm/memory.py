@@ -1,3 +1,4 @@
+import os
 import importlib.util
 import logging
 import time
@@ -9,13 +10,6 @@ from ask_llm.utils.config import Config
 # Check for presence without importing the full libraries yet
 _chromadb_present = importlib.util.find_spec("chromadb") is not None
 _sentence_transformers_present = importlib.util.find_spec("sentence_transformers") is not None
-
-# Define dummy types globally for type hinting and class definition
-if _chromadb_present:
-    # We still need the type for the class definition, even if full import is deferred
-    from chromadb.api.types import EmbeddingFunction as ActualEmbeddingFunction
-else:
-    ActualEmbeddingFunction = object # type: ignore
 
 if _sentence_transformers_present:
     # Dummy SentenceTransformer for type hinting if needed
@@ -64,6 +58,7 @@ class MemoryManager:
             logger.debug("Importing chromadb...")
             import chromadb
             from chromadb.api.types import EmbeddingFunction
+            from chromadb.config import Settings
 
             logger.debug("Importing sentence_transformers...")
             from sentence_transformers import SentenceTransformer
@@ -77,7 +72,7 @@ class MemoryManager:
             chroma_persistent_path.mkdir(parents=True, exist_ok=True)
             logger.debug(f"Initializing ChromaDB client (Persistent in: {chroma_persistent_path})...")
             # Ensure PersistentClient is used with the configured path
-            self.client = chromadb.PersistentClient(path=str(chroma_persistent_path))
+            self.client = chromadb.PersistentClient(path=str(chroma_persistent_path), settings=Settings(anonymized_telemetry=False))
 
             logger.debug(f"Loading embedding model: {self.embedding_model_name}")
             self.embedding_model = SentenceTransformer(self.embedding_model_name)
@@ -170,9 +165,12 @@ class MemoryManager:
             # Reformat results into a more usable list of dicts
             formatted_results = []
             ids = results.get('ids', [[]])[0]
-            distances = results.get('distances', [[]])[0]
-            metadatas = results.get('metadatas', [[]])[0]
-            documents = results.get('documents', [[]])[0]
+            distances = results.get('distances', [[]])
+            distances = distances[0] if distances else []
+            metadatas = results.get('metadatas', [[]]) or [[]]
+            metadatas = metadatas[0] if metadatas else []
+            documents = results.get('documents', [[]])
+            documents = documents[0] if documents else []
 
             for i, doc_id in enumerate(ids):
                 formatted_results.append({
