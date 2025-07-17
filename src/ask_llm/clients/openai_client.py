@@ -25,6 +25,19 @@ class OpenAIClient(LLMClient):
     def _get_api_key(self) -> str | None:
         return os.getenv("OPENAI_API_KEY")
 
+    def _model_supports_temperature_top_p(self) -> bool:
+        """Check if the model supports temperature and top_p parameters.
+        
+        Some specialized models like gpt-4o-search-preview don't support these parameters.
+        """
+        # Models that don't support temperature/top_p
+        unsupported_models = [
+            "gpt-4o-search-preview",
+            "gpt-4o-audio-preview",
+            # Add other models here as needed
+        ]
+        return self.model not in unsupported_models
+
     def query(self, messages: List[Message], plaintext_output: bool = False, stream: bool = True, **kwargs) -> str:
         """Query OpenAI API with full message history, using streaming by default.
 
@@ -43,13 +56,18 @@ class OpenAIClient(LLMClient):
             "model": self.model,
             "messages": api_messages,
             "max_tokens": self.config.MAX_TOKENS,
-            "temperature": self.config.TEMPERATURE,
-            "top_p": self.config.TOP_P,
             "stream": should_stream,
         }
+        
+        # Only add temperature and top_p for models that support them
+        if self._model_supports_temperature_top_p():
+            payload["temperature"] = self.config.TEMPERATURE
+            payload["top_p"] = self.config.TOP_P
         if self.config.VERBOSE:
             self.console.print(Rule("Querying OpenAI API", style="green"))
-            self.console.print(f"[dim]Params:[/dim] [italic]max_tokens={payload['max_tokens']}, temp={payload['temperature']}, top_p={payload['top_p']}, stream={payload['stream']}[/italic]")
+            temp_info = f"temp={payload.get('temperature', 'N/A')}" if 'temperature' in payload else "temp=N/A"
+            top_p_info = f"top_p={payload.get('top_p', 'N/A')}" if 'top_p' in payload else "top_p=N/A"
+            self.console.print(f"[dim]Params:[/dim] [italic]max_tokens={payload['max_tokens']}, {temp_info}, {top_p_info}, stream={payload['stream']}[/italic]")
             self.console.print(Rule("Request Payload", style="dim blue"))
             try:
                 payload_str = json.dumps(payload, indent=2)
