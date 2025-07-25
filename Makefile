@@ -1,4 +1,4 @@
-.PHONY: clean clean-pyc clean-build clean-test install develop all test lint format check coverage report
+.PHONY: clean clean-pyc clean-build clean-test install develop sync lock all test lint format check coverage report
 
 PYTHON := python
 SRC_DIR := src
@@ -7,8 +7,10 @@ COV_TARGET := src/ask_llm
 
 help:
 	@echo "Available targets:"
-	@echo "  install        Install the package in editable mode."
+	@echo "  install        Install the package in editable mode with uv."
 	@echo "  develop        Install the package with development dependencies."
+	@echo "  sync           Sync dependencies using uv (if uv.lock exists)."
+	@echo "  lock           Generate uv.lock file."
 	@echo "  clean          Remove temporary files and build artifacts."
 	@echo "  clean-pyc      Remove Python file artifacts."
 	@echo "  clean-build    Remove build artifacts."
@@ -68,74 +70,70 @@ all: install
 
 install-deps:
 	@echo "Installing additional dependencies for huggingface and llamacpp..."
-	@if [ -f .venv/bin/pip3 ]; then \
-		echo "Attempting to uninstall existing llama-cpp-python..."; \
-		.venv/bin/pip3 uninstall llama-cpp-python -y || true; \
-		echo "Installing llama-cpp-python with CUDA support..."; \
-		CMAKE_ARGS="-DGGML_CUDA=on" FORCE_CMAKE=1 .venv/bin/pip3 install llama-cpp-python --no-cache-dir; \
-		echo "Installing huggingface-hub..."; \
-		.venv/bin/pip3 install huggingface-hub; \
-	elif [ -f .venv/bin/python ]; then \
-		echo "Attempting to uninstall existing llama-cpp-python..."; \
-		# .venv/bin/python -m pip3 uninstall llama-cpp-python -y || true; \
-		echo "Installing llama-cpp-python with CUDA support..."; \
-		CMAKE_ARGS="-DGGML_CUDA=on" FORCE_CMAKE=1 .venv/bin/python -m pip3 install llama-cpp-python --no-cache-dir; \
-		echo "Installing huggingface-hub..."; \
-		.venv/bin/python -m pip3 install huggingface-hub; \
+	@echo "Attempting to uninstall existing llama-cpp-python..."
+	@uv pip uninstall llama-cpp-python || true
+	@echo "Installing llama-cpp-python with CUDA support..."
+	@if command -v nvcc >/dev/null 2>&1; then \
+		echo "CUDA compiler found, installing with CUDA support..."; \
+		CMAKE_ARGS="-DGGML_CUDA=on" FORCE_CMAKE=1 CUDACXX=/usr/local/cuda/bin/nvcc uv pip install llama-cpp-python --no-cache-dir; \
 	else \
-		echo "ERROR: Virtual environment seems corrupted. Run 'make clean-venv' first."; \
-		exit 1; \
+		echo "CUDA compiler not found, installing CPU-only version..."; \
+		uv pip install llama-cpp-python --no-cache-dir; \
 	fi
+	@echo "Installing huggingface-hub..."
+	@uv pip install huggingface-hub
 
 install:
 	@echo "Setting up environment in .venv"
 	@if [ ! -d .venv ]; then \
-		echo "Creating new virtual environment"; \
-		uv venv .venv --python `which python3`; \
+		echo "Creating new virtual environment with uv"; \
+		uv venv .venv --python 3.12.11; \
 	else \
 		echo "Virtual environment already exists"; \
 	fi
-	@if [ -f .venv/bin/pip3 ]; then \
-		echo "Installing/updating package in development mode"; \
-		.venv/bin/pip3 install -e .; \
-	elif [ -f .venv/bin/python ]; then \
-		echo "Pip3 not found, installing via ensurepip3"; \
-		.venv/bin/python -m ensurepip3; \
-		.venv/bin/python -m pip3 install -e .; \
-	else \
-		echo "ERROR: Virtual environment seems corrupted. Run 'make clean-venv' first."; \
-		exit 1; \
-	fi
+	@echo "Installing/updating package in development mode with uv"
+	@uv pip install -e .
 	@echo "Setup complete. Activate with: source .venv/bin/activate"
-	# Alternative short install if env already active
-	# uv pip3 install -e .
 	@make install-deps
 
 develop:
-	uv pip3 install -e ".[dev]" # Assuming a [dev] extra for dev dependencies
+	@echo "Installing package with development dependencies using uv"
+	@uv pip install -e ".[dev]" # Assuming a [dev] extra for dev dependencies
+
+sync:
+	@echo "Syncing dependencies with uv..."
+	@if [ -f uv.lock ]; then \
+		uv sync; \
+	else \
+		echo "No uv.lock file found. Run 'make lock' first or use 'make install'."; \
+	fi
+
+lock:
+	@echo "Generating uv.lock file..."
+	@uv lock
 
 test:
 	@echo "Running tests with coverage..."
-	pytest --cov=$(COV_TARGET) --cov-report=term-missing $(TEST_DIR)
+	uv run pytest --cov=$(COV_TARGET) --cov-report=term-missing $(TEST_DIR)
 
 coverage: test # Alias for running tests with coverage
 
 report:
 	@echo "Generating HTML coverage report..."
-	pytest --cov=$(COV_TARGET) --cov-report=html $(TEST_DIR)
+	uv run pytest --cov=$(COV_TARGET) --cov-report=html $(TEST_DIR)
 	@echo "HTML report generated in htmlcov/ directory."
 
 lint:
 	@echo "Running Ruff linter..."
-	ruff check $(SRC_DIR) $(TEST_DIR)
+	uv run ruff check $(SRC_DIR) $(TEST_DIR)
 
 format:
 	@echo "Running Ruff formatter..."
-	ruff format $(SRC_DIR) $(TEST_DIR)
+	uv run ruff format $(SRC_DIR) $(TEST_DIR)
 
 check:
 	@echo "Running Ruff check and format..."
-	ruff check $(SRC_DIR) $(TEST_DIR)
-	ruff format $(SRC_DIR) $(TEST_DIR) --check
+	uv run ruff check $(SRC_DIR) $(TEST_DIR)
+	uv run ruff format $(SRC_DIR) $(TEST_DIR) --check
 	@echo "Running MyPy type checker..."
-	mypy $(SRC_DIR) 
+	uv run mypy $(SRC_DIR) 
