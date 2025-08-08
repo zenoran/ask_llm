@@ -38,6 +38,94 @@ class OpenAIClient(LLMClient):
         ]
         return self.model not in unsupported_models
 
+    # ---- Token parameter handling helpers ----
+    _TOKEN_PARAM_CANDIDATES = ("max_tokens", "max_completion_tokens", "max_output_tokens")
+
+    def _likely_new_api_model(self) -> bool:
+        """Heuristic: some newer models use 'max_completion_tokens' (or 'max_output_tokens')."""
+        m = self.model.lower()
+        return (
+            m.startswith("o3") or m.startswith("o4") or
+            m in {"gpt-4o-search-preview", "gpt-4o-audio-preview"}
+        )
+
+    def _initial_token_param_key(self) -> str:
+        # Prefer legacy 'max_tokens' unless the model looks like a newer family
+        return "max_completion_tokens" if self._likely_new_api_model() else "max_tokens"
+
+    def _set_token_param(self, payload: dict, key: str, value: int) -> dict:
+        # Remove any existing token keys and set the desired one
+        for k in self._TOKEN_PARAM_CANDIDATES:
+            payload.pop(k, None)
+        payload[key] = value
+        return payload
+
+    def _print_verbose_params(self, payload: dict) -> None:
+        token_key = next((k for k in self._TOKEN_PARAM_CANDIDATES if k in payload), None)
+        token_info = f"{token_key}={payload[token_key]}" if token_key else "max_tokens=N/A"
+        temp_info = f"temp={payload.get('temperature', 'N/A')}" if 'temperature' in payload else "temp=N/A"
+        top_p_info = f"top_p={payload.get('top_p', 'N/A')}" if 'top_p' in payload else "top_p=N/A"
+        self.console.print(f"[dim]Params:[/dim] [italic]{token_info}, {temp_info}, {top_p_info}, stream={payload['stream']}[/italic]")
+
+    def _chat_create_with_fallback(self, payload: dict):
+        """Call chat.completions.create with fallback across token param names.
+
+        Tries the current token key in payload first, then falls back to the other
+        known keys if OpenAI returns an unsupported parameter error.
+        """
+        # Build ordered list of keys to try, preferring what's already in payload
+        current_key = next((k for k in self._TOKEN_PARAM_CANDIDATES if k in payload), self._initial_token_param_key())
+        keys_to_try = [current_key] + [k for k in self._TOKEN_PARAM_CANDIDATES if k != current_key]
+
+        last_err: Exception | None = None
+        for key in keys_to_try:
+            try_payload = dict(payload)
+            self._set_token_param(try_payload, key, self.config.MAX_TOKENS)
+            attempted_without_temp_top_p = False
+            try:
+                return self.client.chat.completions.create(**try_payload)
+            except OpenAIError as e:
+                msg = str(e).lower()
+                # If error suggests wrong token key, continue; else re-raise
+                if ("unsupported parameter" in msg and any(k in msg for k in ("max_tokens", "max_completion_tokens", "max_output_tokens"))) or (
+                    "invalid_request_error" in msg and "token" in msg
+                ):
+                    last_err = e
+                    continue
+                # Temperature/top_p unsupported or unsupported value -> retry without them once
+                if ("temperature" in msg or "top_p" in msg) and ("unsupported" in msg or "does not support" in msg or "unsupported_value" in msg):
+                    if not attempted_without_temp_top_p:
+                        try_payload_no_temp = dict(try_payload)
+                        try_payload_no_temp.pop('temperature', None)
+                        try_payload_no_temp.pop('top_p', None)
+                        attempted_without_temp_top_p = True
+                        try:
+                            return self.client.chat.completions.create(**try_payload_no_temp)
+                        except OpenAIError as e2:
+                            # If still token key issue, move to next token key; else record and break to next key
+                            m2 = str(e2).lower()
+                            if ("unsupported parameter" in m2 and any(k in m2 for k in ("max_tokens", "max_completion_tokens", "max_output_tokens"))) or (
+                                "invalid_request_error" in m2 and "token" in m2
+                            ):
+                                last_err = e2
+                                continue
+                            last_err = e2
+                            break
+                        except Exception as e2:
+                            last_err = e2
+                            break
+                    last_err = e
+                    break
+                raise
+            except Exception as e:
+                last_err = e
+                break
+        # If we exhausted retries, raise the last error
+        if last_err:
+            raise last_err
+        # Should not reach here
+        return self.client.chat.completions.create(**payload)
+
     def query(self, messages: List[Message], plaintext_output: bool = False, stream: bool = True, **kwargs) -> str:
         """Query OpenAI API with full message history, using streaming by default.
 
@@ -55,9 +143,10 @@ class OpenAIClient(LLMClient):
         payload = {
             "model": self.model,
             "messages": api_messages,
-            "max_tokens": self.config.MAX_TOKENS,
             "stream": should_stream,
         }
+        # Set initial token parameter key
+        self._set_token_param(payload, self._initial_token_param_key(), self.config.MAX_TOKENS)
         
         # Only add temperature and top_p for models that support them
         if self._model_supports_temperature_top_p():
@@ -65,9 +154,7 @@ class OpenAIClient(LLMClient):
             payload["top_p"] = self.config.TOP_P
         if self.config.VERBOSE:
             self.console.print(Rule("Querying OpenAI API", style="green"))
-            temp_info = f"temp={payload.get('temperature', 'N/A')}" if 'temperature' in payload else "temp=N/A"
-            top_p_info = f"top_p={payload.get('top_p', 'N/A')}" if 'top_p' in payload else "top_p=N/A"
-            self.console.print(f"[dim]Params:[/dim] [italic]max_tokens={payload['max_tokens']}, {temp_info}, {top_p_info}, stream={payload['stream']}[/italic]")
+            self._print_verbose_params(payload)
             self.console.print(Rule("Request Payload", style="dim blue"))
             try:
                 payload_str = json.dumps(payload, indent=2)
@@ -112,7 +199,8 @@ class OpenAIClient(LLMClient):
     def _stream_response(self, api_messages: List[dict], plaintext_output: bool, payload: dict) -> str:
         """Stream the response using the base class handler."""
         try:
-            stream = self.client.chat.completions.create(**payload)
+            # Try create with fallback token parameter handling
+            stream = self._chat_create_with_fallback(payload)
             return self._handle_streaming_output(
                 stream_iterator=self._iterate_openai_chunks(stream),
                 plaintext_output=plaintext_output,
@@ -142,7 +230,7 @@ class OpenAIClient(LLMClient):
         """Gets the full response without streaming."""
         try:
             payload['stream'] = False
-            completion = self.client.chat.completions.create(**payload)
+            completion = self._chat_create_with_fallback(payload)
             response_text = completion.choices[0].message.content or ""
             if self.config.VERBOSE:
                 usage = completion.usage
