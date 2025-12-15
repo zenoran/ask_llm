@@ -157,11 +157,11 @@ class Config(BaseSettings):
             if model_type == PROVIDER_OPENAI:
                 available_options.append(alias)
             elif model_type == PROVIDER_OLLAMA:
+                # Do not probe the Ollama server during normal execution.
+                # If the alias is defined, treat it as selectable and let actual
+                # Ollama usage/install flows perform connectivity/model checks.
                 model_id = model_info.get("model_id")
-                # Check Ollama availability lazily only when evaluating Ollama models
-                if not self.ollama_checked:
-                    self._check_ollama_availability()
-                if model_id and model_id in self.available_ollama_models:
+                if model_id:
                     available_options.append(alias)
             elif model_type == PROVIDER_GGUF:
                 if is_llama_cpp_available():

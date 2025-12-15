@@ -229,7 +229,8 @@ class ModelManager:
             save_ok = self.save_config(added=added_count, updated=updated_count)
             if save_ok:
                 self.config._load_models_config()
-                self.config.force_ollama_check()
+                if provider_type == PROVIDER_OLLAMA:
+                    self.config.force_ollama_check()
             return save_ok
         else:
             console.print("[green]Local configuration is up-to-date.[/green]")
@@ -461,7 +462,8 @@ def delete_model(alias: str, config: Config) -> bool:
     delete_ok = manager.delete_model_alias(alias)
     if delete_ok:
         config._load_models_config()
-        config.force_ollama_check()
+        # Avoid probing Ollama during unrelated operations.
+        # Ollama connectivity/model checks happen only when explicitly refreshing Ollama models.
         
         # If the model is a GGUF model, check if we should delete the model files as well
         if model_info and model_info.get('type') == PROVIDER_GGUF:

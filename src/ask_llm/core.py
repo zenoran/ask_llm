@@ -120,7 +120,7 @@ class AskLLM:
                 model_id = self.model_definition.get("model_id")
                 if not model_id:
                     raise ValueError(f"Missing 'model_id' in definition for alias '{model_alias}'")
-                if model_id not in self.config.available_ollama_models:
+                if self.config.ollama_checked and model_id not in self.config.available_ollama_models:
                      console.print(f"[yellow]Warning:[/yellow] Ollama model '{model_id}' (alias: '{model_alias}') not found on server {self.config.OLLAMA_URL}.")
                      console.print(f"  Attempting to use anyway, but may fail. Pull it with: `ollama pull {model_id}`")
                 return OllamaClient(model=model_id, config=config)

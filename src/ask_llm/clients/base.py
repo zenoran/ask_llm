@@ -3,6 +3,7 @@ from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.align import Align
 from rich.live import Live
+from rich.text import Text
 from abc import ABC, abstractmethod
 from typing import Iterator, List, Any
 import sys
@@ -78,10 +79,6 @@ class LLMClient(ABC):
         total_response = ""
         start_time = time.time()
         token_count = 0
-        first_part_buffer = ""
-        first_part_printed = False
-        stream_ended_during_buffering = False
-        rest_after_marker = "" # Store content immediately after \n\n
 
         if plaintext_output:
             print("", end='')
@@ -101,78 +98,89 @@ class LLMClient(ABC):
                 self.console.print(f"\n[bold red]Error during plaintext streaming:[/bold red] {e}")
                 total_response += f"\nERROR: {e}"
         else:
-            iterator = iter(stream_iterator)
-            live_display = None
-            live_buffer = ""
             split_marker = "\n\n"
-            last_refresh_time = time.time()
-            min_refresh_interval = 0.05 # 20fps max
+            first_part_buffer = ""
+            first_part_printed = False
+            cursor = "▌"
+            live_display: Live | None = None
+            visible_text = ""
+            overflow_buffer = ""
+            live_frozen = False
+            console_size = getattr(self.console, "size", None)
+            max_live_lines = max(5, (getattr(console_size, "height", 24) or 24) - 8)
+
+            def _split_visible(text: str) -> tuple[str, str]:
+                lines = text.splitlines(keepends=True)
+                if len(lines) <= max_live_lines:
+                    return text, ""
+                return "".join(lines[:max_live_lines]), "".join(lines[max_live_lines:])
+
+            def _start_live(initial: str) -> None:
+                nonlocal live_display, visible_text
+                if live_display:
+                    return
+                visible_text = initial
+                live_display = Live(
+                    Align(Markdown(f"{visible_text}{cursor}" if visible_text else cursor), align="left", pad=False),
+                    console=self.console,
+                    refresh_per_second=15,
+                    vertical_overflow="crop",
+                    transient=False,
+                    auto_refresh=False,
+                )
+                live_display.start(refresh=True)
+
+            def _update_live(add_cursor: bool = True) -> None:
+                if not live_display:
+                    return
+                suffix = cursor if add_cursor else ""
+                live_display.update(
+                    Align(Markdown(f"{visible_text}{suffix}"), align="left", pad=False),
+                    refresh=True,
+                )
 
             try:
-                while not first_part_printed:
-                    try:
-                        content = next(iterator)
-                        if content:
-                            total_response += content
-                            token_count += len(content.split())
-                            first_part_buffer += content
+                for content in stream_iterator:
+                    if not content:
+                        continue
+                    total_response += content
+                    token_count += len(content.split())
+                    if not first_part_printed:
+                        first_part_buffer += content
+                        if split_marker in first_part_buffer:
+                            first_part, remainder = first_part_buffer.split(split_marker, 1)
+                            self._print_assistant_message(first_part, panel_title=panel_title, panel_border_style=panel_border_style)
+                            first_part_printed = True
+                            prefixed = ("\n\n" + remainder) if remainder else "\n\n"
+                            visible_text, overflow_buffer = _split_visible(prefixed)
+                            _start_live(visible_text)
+                            if overflow_buffer:
+                                live_frozen = True
+                                _update_live()
+                        continue
 
-                            if split_marker in first_part_buffer:
-                                parts = first_part_buffer.split(split_marker, 1)
-                                first_part = parts[0]
-                                rest_after_marker = parts[1] # Store for Live seeding
-                                self._print_assistant_message(first_part, panel_title=panel_title, panel_border_style=panel_border_style)
-                                first_part_printed = True
-                                first_part_buffer = "" # Clear buffer
-                                break # Exit buffering loop
+                    if live_frozen:
+                        overflow_buffer += content
+                        continue
 
-                    except StopIteration:
-                        if first_part_buffer:
-                            self._print_assistant_message(first_part_buffer, panel_title=panel_title, panel_border_style=panel_border_style)
-                        first_part_printed = True
-                        stream_ended_during_buffering = True
-                        break
-                    except (KeyboardInterrupt, Exception) as e:
-                         if first_part_buffer and not first_part_printed:
-                             self._print_assistant_message(first_part_buffer, panel_title=panel_title, panel_border_style=panel_border_style)
-                         raise e # Re-raise
-                if first_part_printed and not stream_ended_during_buffering:
-                    live_buffer = rest_after_marker
-                    live_display = Live(
-                        Align(Markdown(live_buffer.strip() + "▌"), align="left", pad=False), # Initial content + cursor
-                        console=self.console,
-                        refresh_per_second=15,
-                        vertical_overflow="visible",
-                        auto_refresh=False # Manual refresh control
-                    )
-                    live_display.start(refresh=True)
-                    last_refresh_time = time.time()
-                    for content in iterator:
-                        if content:
-                            total_response += content
-                            token_count += len(content.split())
-                            live_buffer += content
-                            current_time = time.time()
-                            if current_time - last_refresh_time > min_refresh_interval:
-                                live_display.update(Align(Markdown(live_buffer.strip() + "▌"), align="left", pad=False), refresh=True)
-                                last_refresh_time = current_time
-                    live_display.update(Align(Markdown(live_buffer.strip()), align="left", pad=False), refresh=True)
+                    candidate = visible_text + content
+                    visible_text, extra = _split_visible(candidate)
+                    if extra:
+                        overflow_buffer = extra
+                        live_frozen = True
+                    _update_live()
+
+                if not first_part_printed and first_part_buffer:
+                    self._print_assistant_message(first_part_buffer, panel_title=panel_title, panel_border_style=panel_border_style)
 
             except KeyboardInterrupt:
                 self.console.print("\n[bold yellow]Interrupted![/bold yellow]")
             except Exception as e:
-                self.console.print(f"\n[bold red]Error during Rich streaming:[/bold red] {e}")
+                self.console.print(f"\n[bold red]Error during streaming:[/bold red] {e}")
                 total_response += f"\nERROR: {e}"
             finally:
-                if live_display and live_display.is_started:
-                    live_display.update(Align(Markdown(live_buffer.strip()), align="left", pad=False), refresh=True)
-                    live_display.stop()
                 if live_display:
-                    self.console.print()
-        end_time = time.time()
-        elapsed_time = end_time - start_time
-        if self.config.VERBOSE and elapsed_time > 0 and token_count > 0:
-            tokens_per_second = token_count / elapsed_time
-            self.console.print(f"[dim]Streamed {token_count} tokens in {elapsed_time:.2f}s ({tokens_per_second:.2f} tokens/sec)[/dim]")
-
-        return total_response.strip()
+                    _update_live(add_cursor=False)
+                    live_display.stop()
+                    if overflow_buffer.strip():
+                        self.console.print(Align(Markdown(overflow_buffer), align="left", pad=False))
