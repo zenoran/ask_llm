@@ -58,6 +58,17 @@ class Config(BaseSettings):
     # --- Memory Settings --- #
     MEMORY_ENABLED_DEFAULT: bool = Field(default=False, description="Whether to enable memory by default if --memory flag is not specified (Set via ASK_LLM_MEMORY_ENABLED_DEFAULT)") # Note: CLI flag currently overrides this
     MEMORY_N_RESULTS: int = Field(default=5, description="Number of relevant memories to retrieve during search (Set via ASK_LLM_MEMORY_N_RESULTS)")
+    MEMORY_PROTECTED_RECENT_TURNS: int = Field(default=3, description="Number of recent conversation turns to always include regardless of token limits (Set via ASK_LLM_MEMORY_PROTECTED_RECENT_TURNS)")
+    MEMORY_MIN_RELEVANCE: float = Field(default=0.1, description="Minimum relevance score (0.0-1.0) for memories to be included (Set via ASK_LLM_MEMORY_MIN_RELEVANCE)")
+    MEMORY_MAX_TOKEN_PERCENT: int = Field(default=30, description="Maximum percentage of context window to use for memories (Set via ASK_LLM_MEMORY_MAX_TOKEN_PERCENT)")
+    MEMORY_DEDUP_SIMILARITY: float = Field(default=0.85, description="Similarity threshold (0.0-1.0) for fuzzy deduplication of memories against history (Set via ASK_LLM_MEMORY_DEDUP_SIMILARITY)")
+
+    # --- MariaDB Memory Backend Settings --- #
+    MARIADB_HOST: str = Field(default="mariadb.home", description="MariaDB server hostname (Set via ASK_LLM_MARIADB_HOST)")
+    MARIADB_PORT: int = Field(default=3306, description="MariaDB server port (Set via ASK_LLM_MARIADB_PORT)")
+    MARIADB_USER: str = Field(default="ask_llm", description="MariaDB username (Set via ASK_LLM_MARIADB_USER)")
+    MARIADB_PASSWORD: str = Field(default="", description="MariaDB password (Set via ASK_LLM_MARIADB_PASSWORD)")
+    MARIADB_DATABASE: str = Field(default="ask_llm", description="MariaDB database name (Set via ASK_LLM_MARIADB_DATABASE)")
 
     # --- LLM Generation Settings --- #
     MAX_TOKENS: int = Field(default=1024*4, description="Default maximum tokens to generate")

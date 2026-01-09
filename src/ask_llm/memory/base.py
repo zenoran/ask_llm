@@ -40,19 +40,21 @@ class MemoryBackend(ABC):
         pass
     
     @abstractmethod
-    def search(self, query: str, n_results: int = 5) -> list[dict] | None:
+    def search(self, query: str, n_results: int = 5, min_relevance: float = 0.0) -> list[dict] | None:
         """Search for memories relevant to the query.
         
         Args:
             query: The text to search for relevant memories.
             n_results: Maximum number of results to return.
+            min_relevance: Minimum relevance score (0.0-1.0) for results.
+                          Results below this threshold are filtered out.
             
         Returns:
             A list of dictionaries containing retrieved memories, each with:
                 - id: The message ID
                 - document: The message content
                 - metadata: Dict with 'role' and 'timestamp'
-                - distance: Relevance score (lower is more relevant, optional)
+                - relevance: Relevance score (0.0-1.0, higher is more relevant)
             Returns None if search fails or no results found.
         """
         pass

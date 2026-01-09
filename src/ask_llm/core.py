@@ -2,6 +2,7 @@ import importlib.util
 import pathlib
 import time
 import uuid
+from difflib import SequenceMatcher
 from importlib.metadata import entry_points
 from rich.console import Console
 from .utils.config import Config, is_huggingface_available, is_llama_cpp_available
@@ -16,6 +17,14 @@ try:
 except ImportError:
     _tiktoken_present = False
     tiktoken = None # Placeholder
+
+
+def _text_similarity(text1: str, text2: str) -> float:
+    """Calculate similarity ratio between two strings using SequenceMatcher.
+    
+    Returns a float between 0.0 and 1.0, where 1.0 is an exact match.
+    """
+    return SequenceMatcher(None, text1, text2).ratio()
 
 
 def discover_memory_backends() -> dict:
@@ -239,11 +248,12 @@ class AskLLM:
         try:
             logger.debug(f"Attempting to retrieve relevant memories for prompt: '{prompt[:50]}...'")
             n_results = self.config.MEMORY_N_RESULTS
-            retrieved_memories_raw = self.memory_backend.search(prompt, n_results=n_results)
+            min_relevance = self.config.MEMORY_MIN_RELEVANCE
+            retrieved_memories_raw = self.memory_backend.search(prompt, n_results=n_results, min_relevance=min_relevance)
             if retrieved_memories_raw:
-                logger.debug(f"Retrieved {len(retrieved_memories_raw)} memories (max {n_results}):")
+                logger.debug(f"Retrieved {len(retrieved_memories_raw)} memories (max {n_results}, min_relevance={min_relevance}):")
                 for i, mem in enumerate(retrieved_memories_raw):
-                    logger.debug(f"  Mem {i+1}: ID={mem.get('id')}, Role={mem.get('metadata',{}).get('role')}, Dist={mem.get('distance', 0):.4f}, Content='{mem.get('document', '')[:60]}...'")
+                    logger.debug(f"  Mem {i+1}: ID={mem.get('id')}, Role={mem.get('metadata',{}).get('role')}, Relevance={mem.get('relevance', 0):.4f}, Content='{mem.get('document', '')[:60]}...'")
             else:
                 logger.debug("No relevant memories found or search failed.")
         except Exception as e:
@@ -253,18 +263,32 @@ class AskLLM:
         if not retrieved_memories_raw:
             return []
 
-        # Convert retrieved dicts to Message objects, sorted by relevance
-        sorted_memories = sorted(retrieved_memories_raw, key=lambda x: x.get('distance', 0.0))
+        # Convert retrieved dicts to Message objects
+        # Sort by relevance ASCENDING (least relevant first) for proper truncation order
+        # Truncation removes from index 0, so least relevant should be first
+        sorted_memories = sorted(retrieved_memories_raw, key=lambda x: x.get('relevance', 0.0))
         memory_messages = [
             Message(role=mem.get('metadata', {}).get('role', 'assistant'), content=mem.get('document', ''))
             for mem in sorted_memories if mem.get('document')
         ]
 
-        # Deduplicate against history turns
-        history_content_set = {msg.content for msg in history_turns}
-        unique_memory_messages = [
-            mem_msg for mem_msg in memory_messages if mem_msg.content not in history_content_set
-        ]
+        # Fuzzy deduplicate against history turns
+        # A memory is considered duplicate if similarity >= threshold
+        similarity_threshold = self.config.MEMORY_DEDUP_SIMILARITY
+        history_contents = [msg.content for msg in history_turns]
+        
+        unique_memory_messages = []
+        for mem_msg in memory_messages:
+            is_duplicate = False
+            for hist_content in history_contents:
+                similarity = _text_similarity(mem_msg.content, hist_content)
+                if similarity >= similarity_threshold:
+                    logger.debug(f"Dedup: Memory '{mem_msg.content[:40]}...' is {similarity:.2%} similar to history, skipping")
+                    is_duplicate = True
+                    break
+            if not is_duplicate:
+                unique_memory_messages.append(mem_msg)
+        
         return unique_memory_messages
 
     def _combine_memory_and_history(self, unique_memory_messages: list[Message], history_turns: list[Message]) -> tuple[list[Message], bool]:
@@ -285,10 +309,18 @@ class AskLLM:
     def _truncate_messages_if_needed(self,
                                    messages_to_truncate: list[Message],
                                    system_prompt_message: Message | None,
-                                   memory_delimiter_added: bool) -> list[Message]:
-        """Counts tokens and truncates the combined messages if they exceed the token limit."""
+                                   memory_delimiter_added: bool,
+                                   protected_recent_count: int = 0) -> list[Message]:
+        """Counts tokens and truncates the combined messages if they exceed the token limit.
+        
+        Args:
+            messages_to_truncate: Combined list of memories and history messages.
+            system_prompt_message: The system prompt message (counted separately).
+            memory_delimiter_added: Whether a memory delimiter was added.
+            protected_recent_count: Number of recent messages to protect from truncation.
+        """
         if not (_tiktoken_present and tiktoken):
-            if self.memory_manager: # Only warn if memory (which relies on this) is on
+            if self.memory_backend: # Only warn if memory (which relies on this) is on
                  logger.warning("`tiktoken` library not found. Skipping context token counting and truncation. Install with `pip install tiktoken`")
             return messages_to_truncate # Return as is if no tiktoken
 
@@ -321,48 +353,62 @@ class AskLLM:
             truncated_turns = list(messages_to_truncate) # Work on a copy
             current_token_count_turns = initial_token_count_turns
             
+            # Find the delimiter index
             delimiter_index = -1
+            memory_delimiter_content = "--- Relevant Past Conversation Snippets (older history or related topics) ---"
             if memory_delimiter_added:
-                memory_delimiter_content = "--- Relevant Past Conversation Snippets (older history or related topics) ---"
                 for i, msg in enumerate(truncated_turns):
                     if msg.role == "system" and msg.content == memory_delimiter_content:
                         delimiter_index = i
                         break
             
+            # Track memory and history boundaries
+            # Structure: [memory_0 (least relevant), ..., memory_N (most relevant), delimiter, history_0 (oldest), ..., history_N (newest)]
             num_memory_messages = delimiter_index if delimiter_index != -1 else 0
-            # history_start_index is the index in truncated_turns where the actual history messages begin
             history_start_index = delimiter_index + 1 if delimiter_index != -1 else 0
+            
+            # Calculate protected zone at the end (most recent history)
+            total_messages = len(truncated_turns)
+            protected_start_index = max(history_start_index, total_messages - protected_recent_count) if protected_recent_count > 0 else total_messages
             
             while current_token_count_turns > max_tokens_for_turns and len(truncated_turns) > 0:
                 message_removed_this_iteration = False
-                # 1. Try removing least relevant memories (from the start of truncated_turns)
+                
+                # 1. Try removing least relevant memories first (from the start, index 0)
+                # Memories are ordered: least relevant first, most relevant last (just before delimiter)
                 if num_memory_messages > 0:
                     removed_msg = truncated_turns.pop(0)
                     num_memory_messages -= 1
-                    if delimiter_index != -1: delimiter_index -= 1 # Adjust delimiter index
-                    history_start_index -=1 # Adjust history start index
+                    if delimiter_index != -1: delimiter_index -= 1
+                    history_start_index -= 1
+                    protected_start_index -= 1
                     message_removed_this_iteration = True
-                    logger.debug(f"Truncate Turns: Removed memory message (Role: {removed_msg.role}, Content: '{removed_msg.content[:50]}...')")
+                    logger.debug(f"Truncate Turns: Removed least relevant memory (Role: {removed_msg.role}, Content: '{removed_msg.content[:50]}...')")
                 
-                # 2. Try removing delimiter if no memories left and delimiter exists
-                elif delimiter_index != -1: # memory_delimiter_added implies delimiter_index was set
+                # 2. Try removing oldest history (non-protected)
+                elif history_start_index < protected_start_index and history_start_index < len(truncated_turns):
+                    removed_msg = truncated_turns.pop(history_start_index)
+                    protected_start_index -= 1
+                    message_removed_this_iteration = True
+                    logger.debug(f"Truncate Turns: Removed oldest history message (Role: {removed_msg.role}, Content: '{removed_msg.content[:50]}...')")
+                
+                # 3. Try removing delimiter if no more history to remove
+                elif delimiter_index != -1:
                     removed_msg = truncated_turns.pop(delimiter_index)
-                    history_start_index -=1 # Adjust history start index as delimiter is removed
-                    delimiter_index = -1 # Mark delimiter as removed
+                    history_start_index -= 1
+                    protected_start_index -= 1
+                    delimiter_index = -1
                     message_removed_this_iteration = True
                     logger.debug(f"Truncate Turns: Removed memory delimiter message.")
-                    
-                # 3. Try removing oldest history (from history_start_index)
-                # Ensure history_start_index is valid and points to an actual history message
-                elif history_start_index < len(truncated_turns):
-                    # msg_to_remove = truncated_turns[history_start_index] # For logging before pop
-                    # logger.debug(f"Truncate Turns: Attempting to remove history msg at index {history_start_index} (Role: {msg_to_remove.role}, Content: '{msg_to_remove.content[:50]}...')")
-                    removed_msg = truncated_turns.pop(history_start_index) # Remove from start of history part
+                
+                # 4. Last resort: remove protected history (oldest of the protected messages)
+                elif protected_start_index < len(truncated_turns):
+                    removed_msg = truncated_turns.pop(protected_start_index)
                     message_removed_this_iteration = True
-                    logger.debug(f"Truncate Turns: Removed history message (Role: {removed_msg.role}, Content: '{removed_msg.content[:50]}...')")
+                    logger.warning(f"Truncate Turns: Removed PROTECTED history message (Role: {removed_msg.role}, Content: '{removed_msg.content[:50]}...')")
                 else:
                     logger.warning("Truncation of turns stopped: No more messages to remove or invalid state.")
-                    break # Exit loop if no message can be removed
+                    break
                     
                 if message_removed_this_iteration:
                     current_token_count_turns = sum(
@@ -443,8 +489,12 @@ class AskLLM:
             )
 
             # Stage 4: Truncate messages if needed
+            # Calculate protected recent messages (each turn = 2 messages: user + assistant)
+            protected_turns = self.config.MEMORY_PROTECTED_RECENT_TURNS if self.memory_backend else 0
+            protected_messages = protected_turns * 2  # Each turn has user + assistant message
+            
             truncated_turns = self._truncate_messages_if_needed(
-                combined_turns, system_prompt_message, memory_delimiter_added
+                combined_turns, system_prompt_message, memory_delimiter_added, protected_messages
             )
 
             # Stage 5: Assemble final messages for LLM

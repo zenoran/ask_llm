@@ -12,13 +12,15 @@ To implement a custom memory backend:
     [project.entry-points."ask_llm.memory"]
     your_backend_name = "your_package.module:YourBackendClass"
 
-Example backend implementations:
-- MariaDB with fulltext search
-- PostgreSQL with pgvector
-- SQLite with FTS5
-- Redis with vector similarity
+Included backends:
+- MariaDBMemoryBackend: Uses MariaDB with fulltext search (requires mysql-connector-python)
 """
 
 from .base import MemoryBackend
 
-__all__ = ["MemoryBackend"]
+# Lazy import for MariaDB backend (requires mysql-connector-python)
+def get_mariadb_backend():
+    from .mariadb import MariaDBMemoryBackend
+    return MariaDBMemoryBackend
+
+__all__ = ["MemoryBackend", "get_mariadb_backend"]

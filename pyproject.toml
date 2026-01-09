@@ -37,10 +37,17 @@ llamacpp = [
     "llama-cpp-python",
 ]
 
+memory-mariadb = [
+    "mysql-connector-python>=8.0.0",
+]
+
 
 [project.scripts]
 ask-llm = "ask_llm.main:main"
 llm = "ask_llm.main:main"
+
+[project.entry-points."ask_llm.memory"]
+mariadb = "ask_llm.memory.mariadb:MariaDBMemoryBackend"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

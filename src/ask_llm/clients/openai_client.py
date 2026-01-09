@@ -28,15 +28,62 @@ class OpenAIClient(LLMClient):
     def _model_supports_temperature_top_p(self) -> bool:
         """Check if the model supports temperature and top_p parameters.
         
-        Some specialized models like gpt-4o-search-preview don't support these parameters.
+        Many newer models don't support custom temperature/top_p:
+        - ChatGPT models (*-chat-latest) 
+        - Search preview models
+        - Audio preview models
+        - o-series reasoning models (o1, o3, o4)
+        - Some gpt-5.x models
+        
+        See: https://platform.openai.com/docs/models
         """
-        # Models that don't support temperature/top_p
-        unsupported_models = [
-            "gpt-4o-search-preview",
-            "gpt-4o-audio-preview",
-            # Add other models here as needed
-        ]
-        return self.model not in unsupported_models
+        # Models/patterns that don't support temperature/top_p
+        unsupported_patterns = (
+            "-chat-latest",      # ChatGPT models (gpt-5-chat-latest, gpt-5.2-chat-latest)
+            "-search-preview",   # Search models
+            "-audio-preview",    # Audio models
+        )
+        unsupported_prefixes = (
+            "o1",    # o1 reasoning models
+            "o3",    # o3 reasoning models  
+            "o4",    # o4 reasoning models
+        )
+        
+        # Check patterns
+        for pattern in unsupported_patterns:
+            if pattern in self.model:
+                return False
+        
+        # Check prefixes
+        if self.model.startswith(unsupported_prefixes):
+            return False
+            
+        return True
+
+    def _model_requires_max_completion_tokens(self) -> bool:
+        """Check if the model requires max_completion_tokens instead of max_tokens.
+        
+        As of 2025, max_tokens is deprecated in favor of max_completion_tokens.
+        Only legacy models (gpt-3.5-turbo, gpt-4, gpt-4-turbo) still use max_tokens.
+        All newer models (gpt-4o, gpt-5.x, o-series, etc.) use max_completion_tokens.
+        
+        See: https://platform.openai.com/docs/api-reference/chat/create
+        """
+        # Models that still use the legacy max_tokens parameter
+        legacy_models = (
+            "gpt-3.5-turbo",
+            "gpt-4-turbo",
+            "gpt-4-0314",
+            "gpt-4-0613",
+            "gpt-4-32k",
+        )
+        # Check exact match or prefix match for legacy models
+        if self.model in legacy_models or self.model == "gpt-4":
+            return False
+        if self.model.startswith(("gpt-3.5-", "gpt-4-turbo-", "gpt-4-32k-")):
+            return False
+        # All other models use max_completion_tokens
+        return True
 
     # ---- Token parameter handling helpers ----
     _TOKEN_PARAM_CANDIDATES = ("max_tokens", "max_completion_tokens", "max_output_tokens")
@@ -147,6 +194,12 @@ class OpenAIClient(LLMClient):
         }
         # Set initial token parameter key
         self._set_token_param(payload, self._initial_token_param_key(), self.config.MAX_TOKENS)
+        
+        # Use max_completion_tokens for newer models, max_tokens for older ones
+        if self._model_requires_max_completion_tokens():
+            payload["max_completion_tokens"] = self.config.MAX_TOKENS
+        else:
+            payload["max_tokens"] = self.config.MAX_TOKENS
         
         # Only add temperature and top_p for models that support them
         if self._model_supports_temperature_top_p():
