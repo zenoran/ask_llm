@@ -30,7 +30,7 @@ def parse_arguments(config_obj: Config) -> argparse.Namespace:
     parser.add_argument("-c", "--command", help="Execute command and add output to question")
     parser.add_argument("--plain", action="store_true", help="Use plain text output")
     parser.add_argument("--no-stream", action="store_true", default=False, help="Disable streaming output")
-    parser.add_argument("--memory", action="store_true", help="Enable long-term vector memory (requires chromadb and sentence-transformers)")
+    parser.add_argument("--memory", action="store_true", help="Enable long-term memory (requires a memory backend package to be installed)")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging output.")
     return parser.parse_args()
 

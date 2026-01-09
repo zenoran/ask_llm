@@ -2,6 +2,7 @@ import importlib.util
 import pathlib
 import time
 import uuid
+from importlib.metadata import entry_points
 from rich.console import Console
 from .utils.config import Config, is_huggingface_available, is_llama_cpp_available
 from .utils.history import HistoryManager, Message
@@ -16,12 +17,20 @@ except ImportError:
     _tiktoken_present = False
     tiktoken = None # Placeholder
 
-try:
-    from .memory import MemoryManager
-    _memory_module_present = True
-except ImportError:
-    _memory_module_present = False
-    MemoryManager = None # Placeholder if memory.py doesn't exist or fails import
+
+def discover_memory_backends() -> dict:
+    """Discover installed memory backends via entry points."""
+    backends = {}
+    try:
+        eps = entry_points(group='ask_llm.memory')
+        for ep in eps:
+            try:
+                backends[ep.name] = ep.load()
+            except Exception as e:
+                logging.getLogger(__name__).warning(f"Failed to load memory backend '{ep.name}': {e}")
+    except Exception as e:
+        logging.getLogger(__name__).debug(f"No memory backends discovered: {e}")
+    return backends
 
 
 console = Console()
@@ -33,7 +42,7 @@ class AskLLM:
         self.config = config
         self.model_definition = self.config.defined_models.get("models", {}).get(resolved_model_alias)
         self.memory_enabled = memory_enabled
-        self.memory_manager: MemoryManager | None = None # type: ignore
+        self.memory_backend = None  # Will be set if a memory backend is discovered and enabled
 
         if not self.model_definition:
              raise ValueError(f"Could not find model definition for resolved alias: '{resolved_model_alias}'")
@@ -41,33 +50,26 @@ class AskLLM:
         self.client: LLMClient = self.initialize_client(config)
         self.history_manager = HistoryManager(client=self.client, config=self.config)
 
-        # Conditionally initialize MemoryManager
+        # Check for memory backends if memory is requested
         if self.memory_enabled:
-            if _memory_module_present and MemoryManager:
+            available_backends = discover_memory_backends()
+            if available_backends:
+                # Use the first available backend (could be made configurable)
+                backend_name, backend_class = next(iter(available_backends.items()))
                 try:
-                    logger.debug("Memory flag enabled, attempting to initialize MemoryManager...")
-                    # Pass the config object to MemoryManager
-                    self.memory_manager = MemoryManager(config=self.config)
-                except ImportError as e:
-                    logger.debug(f"Failed to initialize MemoryManager due to missing dependencies: {e}")
-                    if self.config.VERBOSE:
-                        console.print(f"[bold yellow]Warning:[/bold yellow] Memory enabled but failed to initialize: {e}")
-                        console.print("  Memory features will be disabled. Ensure 'chromadb' and 'sentence-transformers' are installed.")
-                    self.memory_manager = None # Ensure it's None on failure
+                    logger.debug(f"Memory enabled, initializing backend: {backend_name}")
+                    self.memory_backend = backend_class(config=self.config)
                 except Exception as e:
-                    logger.exception(f"An unexpected error occurred during MemoryManager initialization: {e}")
+                    logger.exception(f"Failed to initialize memory backend '{backend_name}': {e}")
                     if self.config.VERBOSE:
-                        console.print(f"[bold red]Error:[/bold red] Failed to initialize MemoryManager: {e}")
-                        console.print("  Memory features will be disabled.")
-                    self.memory_manager = None # Ensure it's None on failure
+                        console.print(f"[bold yellow]Warning:[/bold yellow] Memory enabled but backend '{backend_name}' failed to initialize: {e}")
+                    self.memory_backend = None
             else:
-                 logger.debug("Memory flag enabled, but MemoryManager module or class could not be imported.")
-                 if self.config.VERBOSE:
-                      console.print("[bold yellow]Warning:[/bold yellow] Memory enabled, but memory module failed to load. Memory features disabled.")
-                 self.memory_manager = None
+                console.print("[bold yellow]Warning:[/bold yellow] Memory enabled but no memory backends are installed.")
+                console.print("  Install a memory backend package (e.g., ask-llm-memory-mariadb) to use memory features.")
+                logger.debug("Memory flag enabled, but no memory backends discovered.")
         else:
             logger.debug("Memory flag is disabled.")
-
 
         self.load_history()
 
@@ -230,18 +232,18 @@ class AskLLM:
 
     def _retrieve_and_prepare_memory(self, prompt: str, history_turns: list[Message]) -> list[Message]:
         """Retrieves relevant memories and prepares them (deduplication)."""
-        if not self.memory_manager:
+        if not self.memory_backend:
             return []
 
         retrieved_memories_raw = None
         try:
             logger.debug(f"Attempting to retrieve relevant memories for prompt: '{prompt[:50]}...'")
             n_results = self.config.MEMORY_N_RESULTS
-            retrieved_memories_raw = self.memory_manager.search_relevant_memories(prompt, n_results=n_results)
+            retrieved_memories_raw = self.memory_backend.search(prompt, n_results=n_results)
             if retrieved_memories_raw:
                 logger.debug(f"Retrieved {len(retrieved_memories_raw)} memories (max {n_results}):")
                 for i, mem in enumerate(retrieved_memories_raw):
-                    logger.debug(f"  Mem {i+1}: ID={mem.get('id')}, Role={mem.get('metadata',{}).get('role')}, Dist={mem.get('distance'):.4f}, Content='{mem.get('document', '')[:60]}...'")
+                    logger.debug(f"  Mem {i+1}: ID={mem.get('id')}, Role={mem.get('metadata',{}).get('role')}, Dist={mem.get('distance', 0):.4f}, Content='{mem.get('document', '')[:60]}...'")
             else:
                 logger.debug("No relevant memories found or search failed.")
         except Exception as e:
@@ -407,8 +409,8 @@ class AskLLM:
         return response_content
 
     def _add_conversation_to_memory(self, user_prompt: str, assistant_response: str):
-        """Adds the user prompt and assistant response to the memory manager if enabled."""
-        if not self.memory_manager or not assistant_response: # Don't save empty assistant responses
+        """Adds the user prompt and assistant response to the memory backend if enabled."""
+        if not self.memory_backend or not assistant_response: # Don't save empty assistant responses
             return
         
         try:
@@ -416,10 +418,10 @@ class AskLLM:
             assistant_msg_id = str(uuid.uuid4())
             current_time = time.time()
 
-            self.memory_manager.add_memory(
+            self.memory_backend.add(
                 message_id=user_msg_id, role="user", content=user_prompt, timestamp=current_time
             )
-            self.memory_manager.add_memory(
+            self.memory_backend.add(
                 message_id=assistant_msg_id, role="assistant", content=assistant_response, timestamp=current_time + 0.001
             )
             logger.debug(f"Added user prompt (ID: {user_msg_id}) and assistant response (ID: {assistant_msg_id}) to memory.")
