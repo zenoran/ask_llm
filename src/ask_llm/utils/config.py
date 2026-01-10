@@ -52,7 +52,9 @@ class Config(BaseSettings):
     OLLAMA_URL: str = Field(default="http://localhost:11434")
     MODEL_CACHE_DIR: str = Field(default=os.path.expanduser("~/.cache/ask_llm/models"), description="Directory to cache downloaded GGUF models")
     MODELS_CONFIG_PATH: str = Field(default=str(DEFAULT_MODELS_YAML), description="Path to the models YAML definition file")
-    DEFAULT_MODEL_ALIAS: Optional[str] = Field(default=None, description="Alias from models.yaml to use if --model is not specified (Set via ASK_LLM_DEFAULT_MODEL_ALIAS in env or .env file)")
+    DEFAULT_MODEL_ALIAS: Optional[str] = Field(default=None, description="Alias from models.yaml to use if --model is not specified")
+    DEFAULT_BOT: str = Field(default="nova", description="Default bot to use if --bot is not specified")
+    DEFAULT_USER: str = Field(default="default", description="Default user profile to use if --user is not specified")
 
     # --- Memory Settings --- #
     MEMORY_N_RESULTS: int = Field(default=5, description="Number of relevant memories to retrieve during search (Set via ASK_LLM_MEMORY_N_RESULTS)")
@@ -81,10 +83,8 @@ class Config(BaseSettings):
     NO_STREAM: bool = Field(default=False, description="Disable streaming output")
     INTERACTIVE_MODE: bool = Field(default=False, description="Whether the app is in interactive mode (set based on args)")
 
-    # SYSTEM_MESSAGE is primary but other env variables can be used to override it
+    # SYSTEM_MESSAGE is set at runtime from bot config, this is just the default
     SYSTEM_MESSAGE: str = Field(default=prompts.SYSTEM_MESSAGE)
-    SYSTEM_MESSAGE_CHAT: str = Field(default=prompts.SYSTEM_MESSAGE_CHAT)
-    SYSTEM_MESSAGE_STORY: str = Field(default=prompts.SYSTEM_MESSAGE_STORY)
 
     defined_models: Dict[str, Any] = Field(default_factory=dict, exclude=True)
     available_ollama_models: List[str] = Field(default_factory=list, exclude=True)

@@ -3,6 +3,7 @@ import subprocess
 import traceback
 import sys  # Import sys for exit codes
 from rich.console import Console
+from rich.prompt import Prompt
 from ask_llm.utils.config import Config
 from ask_llm.utils.config import set_config_value
 from ask_llm.utils.input_handler import MultilineInputHandler
@@ -10,6 +11,7 @@ from ask_llm.core import AskLLM
 from ask_llm.model_manager import list_models, update_models_interactive, delete_model, ModelManager
 from ask_llm.gguf_handler import handle_add_gguf
 from ask_llm.bots import BotManager
+from ask_llm.user_profile import UserProfileManager, UserProfile, DEFAULT_USER_ID
 import logging
 from pathlib import Path
 from rich.table import Table
@@ -32,9 +34,10 @@ def show_memory_status(config: Config):
     
     # Check MariaDB connection
     mariadb_status = "[red]Not Configured[/red]"
-    mariadb_stats = None
-    short_term_count = 0
     long_term_count = 0
+    short_term_count = 0
+    long_term_table = ""
+    short_term_table = ""
     
     backends = discover_memory_backends()
     if 'mariadb' in backends:
@@ -43,16 +46,14 @@ def show_memory_status(config: Config):
             backend = backend_class(config, bot_id=default_bot.slug)
             mariadb_stats = backend.stats()
             long_term_count = mariadb_stats.get('total_count', 0)
+            long_term_table = mariadb_stats.get('table_name', '')
             mariadb_status = f"[green]Connected[/green] ({config.MARIADB_HOST}:{config.MARIADB_PORT}/{config.MARIADB_DATABASE})"
             
-            # Check for short-term table
-            from sqlmodel import Session, text
-            with Session(backend.engine) as session:
-                result = session.exec(text("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = :db AND table_name = 'short_term_memory'").bindparams(db=config.MARIADB_DATABASE)).first()
-                has_short_term = result[0] > 0 if result else False
-                if has_short_term:
-                    count_result = session.exec(text("SELECT COUNT(*) FROM short_term_memory WHERE bot_id = :bot_id").bindparams(bot_id=default_bot.slug)).first()
-                    short_term_count = count_result[0] if count_result else 0
+            # Check for short-term table using the new dynamic table name
+            short_term_mgr = backend_class.get_short_term_manager(config, bot_id=default_bot.slug)
+            short_term_stats = short_term_mgr.stats()
+            short_term_count = short_term_stats.get('total_count', 0)
+            short_term_table = short_term_stats.get('table_name', '')
         except Exception as e:
             mariadb_status = f"[red]Error: {e}[/red]"
     else:
@@ -70,8 +71,14 @@ def show_memory_status(config: Config):
     table.add_row("", "")
     table.add_row("[bold]Memory Backends[/bold]", "")
     table.add_row("  MariaDB Backend", mariadb_status)
-    table.add_row(f"  Long-term ({default_bot.slug})", f"[green]{long_term_count}[/green]" if long_term_count else "[dim]0[/dim]")
-    table.add_row(f"  Short-term ({default_bot.slug})", f"[green]{short_term_count}[/green]" if short_term_count else "[dim]0 (using file)[/dim]")
+    if long_term_table:
+        table.add_row(f"  Long-term ({long_term_table})", f"[green]{long_term_count}[/green]" if long_term_count else "[dim]0[/dim]")
+    else:
+        table.add_row(f"  Long-term", "[dim]No table[/dim]")
+    if short_term_table:
+        table.add_row(f"  Short-term ({short_term_table})", f"[green]{short_term_count}[/green]" if short_term_count else "[dim]0[/dim]")
+    else:
+        table.add_row(f"  Short-term", "[dim]No table (using file)[/dim]")
     table.add_row("", "")
     table.add_row("[bold]Configuration[/bold]", "")
     table.add_row("  Memory N Results", f"{config.MEMORY_N_RESULTS}")
@@ -116,6 +123,181 @@ def show_bots(config: Config):
     console.print()
 
 
+def show_user_profile(config: Config, user_id: str = DEFAULT_USER_ID):
+    """Display user profile."""
+    try:
+        manager = UserProfileManager(config)
+        profile = manager.get_profile(user_id)
+    except Exception as e:
+        console.print(f"[red]Could not load user profile: {e}[/red]")
+        return
+    
+    if not profile:
+        console.print(f"[yellow]No user profile found for '{user_id}'.[/yellow]")
+        console.print(f"[dim]Create one with: llm --user-profile-setup[/dim]")
+        return
+    
+    console.print(Panel.fit(f"[bold cyan]User Profile: {user_id}[/bold cyan]", border_style="cyan"))
+    console.print()
+    
+    table = Table(show_header=False, box=None, padding=(0, 2))
+    table.add_column("Field", style="cyan")
+    table.add_column("Value")
+    
+    table.add_row("[bold]Identity[/bold]", "")
+    table.add_row("  name", profile.name or "[dim]not set[/dim]")
+    table.add_row("  preferred_name", profile.preferred_name or "[dim]not set[/dim]")
+    
+    # Preferences
+    prefs = profile.preferences or {}
+    if prefs:
+        table.add_row("", "")
+        table.add_row("[bold]Preferences[/bold]", "")
+        for key, value in prefs.items():
+            table.add_row(f"  preferences.{key}", str(value))
+    
+    # Context
+    ctx = profile.context or {}
+    if ctx:
+        table.add_row("", "")
+        table.add_row("[bold]Context[/bold]", "")
+        for key, value in ctx.items():
+            if isinstance(value, list):
+                table.add_row(f"  context.{key}", ", ".join(str(v) for v in value))
+            else:
+                table.add_row(f"  context.{key}", str(value))
+    
+    console.print(table)
+    console.print()
+    console.print("[dim]Update with: llm --user-profile-set name=\"Your Name\"[/dim]")
+    console.print("[dim]Add context: llm --user-profile-set context.occupation=\"Developer\"[/dim]")
+    console.print()
+
+
+def show_users(config: Config):
+    """Display all user profiles."""
+    try:
+        manager = UserProfileManager(config)
+        profiles = manager.list_all_profiles()
+    except Exception as e:
+        console.print(f"[red]Could not load users: {e}[/red]")
+        return
+    
+    if not profiles:
+        console.print("[yellow]No user profiles found.[/yellow]")
+        console.print("[dim]Create one with: llm --user-profile-setup[/dim]")
+        return
+    
+    console.print(Panel.fit("[bold cyan]User Profiles[/bold cyan]", border_style="cyan"))
+    console.print()
+    
+    table = Table(show_header=True, box=None, padding=(0, 2))
+    table.add_column("User ID", style="cyan")
+    table.add_column("Name")
+    table.add_column("Preferred Name")
+    table.add_column("Occupation")
+    
+    for profile in profiles:
+        occupation = profile.context.get("occupation", "") if profile.context else ""
+        table.add_row(
+            profile.user_id,
+            profile.name or "[dim]-[/dim]",
+            profile.preferred_name or "[dim]-[/dim]",
+            occupation or "[dim]-[/dim]"
+        )
+    
+    console.print(table)
+    console.print()
+    console.print(f"[dim]Use --user <id> to select a user profile[/dim]")
+    console.print()
+
+
+def run_user_profile_setup(config: Config, user_id: str = DEFAULT_USER_ID) -> bool:
+    """Run interactive user profile setup wizard."""
+    console.print(Panel.fit("[bold cyan]User Profile Setup[/bold cyan]", border_style="cyan"))
+    console.print()
+    console.print(f"[dim]Setting up profile for user: {user_id}[/dim]")
+    console.print(f"[dim]Press Enter to skip any field.[/dim]")
+    console.print()
+    
+    try:
+        manager = UserProfileManager(config)
+        existing = manager.get_profile(user_id)
+        
+        # Prompt for basic info
+        name = Prompt.ask(
+            "What's your name?",
+            default=existing.name if existing and existing.name else ""
+        )
+        
+        preferred_name = Prompt.ask(
+            "What should I call you? (nickname)",
+            default=existing.preferred_name if existing and existing.preferred_name else name
+        )
+        
+        occupation = Prompt.ask(
+            "What do you do? (occupation)",
+            default=existing.context.get("occupation", "") if existing and existing.context else ""
+        )
+        
+        console.print()
+        
+        # Build profile
+        profile = UserProfile(
+            user_id=user_id,
+            name=name if name else None,
+            preferred_name=preferred_name if preferred_name else None,
+            preferences={},
+            context={}
+        )
+        
+        if occupation:
+            profile.context["occupation"] = occupation
+        
+        # Save profile
+        if manager.save_profile(profile):
+            console.print(f"[green]✓ User profile saved for '{user_id}'[/green]")
+            console.print()
+            return True
+        else:
+            console.print(f"[red]Failed to save user profile.[/red]")
+            return False
+            
+    except KeyboardInterrupt:
+        console.print()
+        console.print("[yellow]Setup cancelled.[/yellow]")
+        return False
+    except Exception as e:
+        console.print(f"[red]Error during setup: {e}[/red]")
+        return False
+
+
+def ensure_user_profile(config: Config, user_id: str = DEFAULT_USER_ID) -> UserProfile | None:
+    """Ensure user profile exists, prompting for setup if needed.
+    
+    Returns the profile, or None if setup was cancelled/failed.
+    """
+    try:
+        manager = UserProfileManager(config)
+        profile, is_new = manager.get_or_create_profile(user_id)
+        
+        # If profile has no name set, run setup wizard
+        if not profile.name:
+            console.print()
+            console.print(f"[yellow]Welcome! Let's set up your user profile.[/yellow]")
+            console.print()
+            if run_user_profile_setup(config, user_id):
+                return manager.get_profile(user_id)
+            else:
+                # User cancelled - return empty profile (will work, just no personalization)
+                return profile
+        
+        return profile
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"Could not ensure user profile: {e}")
+        return None
+
+
 def parse_arguments(config_obj: Config) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Query LLM models from the command line using model aliases defined in models.yaml")
     parser.add_argument("-m","--model",type=str,default=config_obj.DEFAULT_MODEL_ALIAS,help=f"Model alias defined in {config_obj.MODELS_CONFIG_PATH}. Supports partial matching. (Default: {config_obj.DEFAULT_MODEL_ALIAS or 'None'})")
@@ -136,6 +318,11 @@ def parse_arguments(config_obj: Config) -> argparse.Namespace:
     parser.add_argument("-b", "--bot", type=str, default=None, help="Bot to use (nova, spark, mira). Use --list-bots to see all.")
     parser.add_argument("--list-bots", action="store_true", help="List available bots and exit")
     parser.add_argument("--status", action="store_true", help="Show memory system status and configuration")
+    parser.add_argument("--user", type=str, default=DEFAULT_USER_ID, help="User profile to use (creates if not exists)")
+    parser.add_argument("--list-users", action="store_true", help="List all user profiles")
+    parser.add_argument("--user-profile", action="store_true", help="Show current user profile")
+    parser.add_argument("--user-profile-set", metavar="FIELD=VALUE", help="Set a user profile field (e.g., name=\"Nick\")")
+    parser.add_argument("--user-profile-setup", action="store_true", help="Run user profile setup wizard")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging output.")
     return parser.parse_args()
 
@@ -194,7 +381,7 @@ def main():
     elif getattr(args, 'config_list', False):
         console.print(f"[bold magenta]Current Configuration Settings:[/bold magenta]")
         console.print(f"(Sources: Defaults, Environment Variables, {config_obj.model_config.get('env_file', 'unknown')})\n")
-        exclude_fields = {'defined_models', 'available_ollama_models', 'ollama_checked', 'model_config'}
+        exclude_fields = {'defined_models', 'available_ollama_models', 'ollama_checked', 'model_config', 'SYSTEM_MESSAGE'}
         for field_name, field_info in sorted(config_obj.model_fields.items()):
             if field_name not in exclude_fields:
                 current_value = getattr(config_obj, field_name)
@@ -204,6 +391,7 @@ def main():
                     current_value_str = repr(current_value)
 
                 console.print(f"  [cyan]{field_name}[/cyan]: {current_value_str}")
+        console.print(f"\n  [dim]SYSTEM_MESSAGE: (set by bot config in bots.yaml)[/dim]")
         sys.exit(0)
 
     elif getattr(args, 'status', False):
@@ -212,6 +400,35 @@ def main():
 
     elif getattr(args, 'list_bots', False):
         show_bots(config_obj)
+        sys.exit(0)
+
+    elif getattr(args, 'list_users', False):
+        show_users(config_obj)
+        sys.exit(0)
+
+    elif getattr(args, 'user_profile', False):
+        show_user_profile(config_obj, args.user)
+        sys.exit(0)
+    
+    elif getattr(args, 'user_profile_setup', False):
+        success = run_user_profile_setup(config_obj, args.user)
+        sys.exit(0 if success else 1)
+    
+    elif getattr(args, 'user_profile_set', None):
+        try:
+            field, value = args.user_profile_set.split("=", 1)
+            field = field.strip()
+            value = value.strip().strip('"').strip("'")
+            manager = UserProfileManager(config_obj)
+            if manager.update_field(field, value, args.user):
+                console.print(f"[green]Updated {field} = {value}[/green]")
+            else:
+                console.print(f"[red]Invalid field: {field}[/red]")
+                console.print("[dim]Valid fields: name, preferred_name, preferences.*, context.*[/dim]")
+        except ValueError:
+            console.print("[red]Use format: --user-profile-set field=value[/red]")
+        except Exception as e:
+            console.print(f"[red]Error: {e}[/red]")
         sys.exit(0)
 
     elif args.list_models:
@@ -306,16 +523,27 @@ def run_app(args: argparse.Namespace, config_obj: Config, resolved_alias: str):
         bot = bot_manager.get_default_bot(local_mode=True)
         bot_id = bot.slug
     else:
-        # Default bot (Nova)
-        bot = bot_manager.get_default_bot()
+        # Default bot from config
+        bot = bot_manager.get_bot(config_obj.DEFAULT_BOT)
+        if not bot:
+            bot = bot_manager.get_default_bot()
         bot_id = bot.slug
+    
+    # Ensure user profile exists (prompts for setup on first use)
+    # Skip in local mode - it's transient/DB-free
+    # Use config default if --user not specified
+    user_id = args.user if args.user != DEFAULT_USER_ID else config_obj.DEFAULT_USER
+    user_profile = None
+    if not args.local:
+        user_profile = ensure_user_profile(config_obj, user_id)
     
     try:
         ask_llm = AskLLM(
             resolved_model_alias=resolved_alias,
             config=config_obj,
             local_mode=args.local,
-            bot_id=bot_id
+            bot_id=bot_id,
+            user_id=user_id
         )
     except (ImportError, FileNotFoundError, ValueError, Exception) as e:
          console.print(f"[bold red]Failed to initialize LLM client for '{resolved_alias}':[/bold red] {e}")

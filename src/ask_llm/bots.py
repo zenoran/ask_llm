@@ -1,14 +1,20 @@
 """Bot system for ask_llm.
 
 Bots are AI personalities with their own system prompts and isolated memory.
-Built-in bots: Nova (full memory), Spark (local/lightweight), Mira (conversational).
+Bot definitions are loaded from bots.yaml in this package directory.
 """
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
+import yaml
+
 logger = logging.getLogger(__name__)
+
+# Path to the bots.yaml file (in the same directory as this module)
+BOTS_YAML_PATH = Path(__file__).parent / "bots.yaml"
 
 
 @dataclass
@@ -27,83 +33,50 @@ class Bot:
         self.slug = self.slug.lower().strip()
 
 
-# Built-in bot definitions
+# Global bot registry - populated from YAML on module load
 BUILTIN_BOTS: dict[str, Bot] = {}
+_DEFAULTS: dict[str, str] = {"standard": "nova", "local": "spark"}
 
 
-def _register_builtin_bots() -> None:
-    """Register all built-in bots."""
-    global BUILTIN_BOTS
+def _load_bots_from_yaml(yaml_path: Path = BOTS_YAML_PATH) -> None:
+    """Load bot definitions from YAML file into the global registry."""
+    global BUILTIN_BOTS, _DEFAULTS
     
-    BUILTIN_BOTS["nova"] = Bot(
-        slug="nova",
-        name="Nova",
-        description="Full-featured assistant with persistent memory",
-        requires_memory=True,
-        system_prompt="""You are Nova, a personal AI assistant running locally on the user's machine via ask_llm.
-
-About you:
-- Your name is Nova (not ChatGPT, not GPT, not OpenAI Assistant)
-- You have persistent memory: both short-term (current session) and long-term (across sessions via MariaDB)
-- You remember past conversations and user preferences
-- You are concise, helpful, and technically competent
-
-Communication style:
-- Keep responses short and direct
-- Use simple, easy-to-understand language  
-- Use clean Markdown: backticks for code, lists for structure, bold for emphasis
-- Be friendly but not overly formal
-"""
-    )
-    
-    BUILTIN_BOTS["spark"] = Bot(
-        slug="spark",
-        name="Spark",
-        description="Lightweight local assistant (no database)",
-        requires_memory=False,
-        system_prompt="""You are Spark, a personal AI assistant running locally on the user's machine via ask_llm.
-
-About you:
-- Your name is Spark (not Nova, not ChatGPT, not GPT, not OpenAI Assistant)
-- You are the lightweight, local version of the assistant (no database connection)
-- You maintain conversation history during the current session only (no persistent memory between sessions)
-- You are concise, helpful, and technically competent
-
-Communication style:
-- Keep responses short and direct
-- Use simple, easy-to-understand language
-- Use clean Markdown: backticks for code, lists for structure, bold for emphasis
-- Be friendly but not overly formal
-"""
-    )
-    
-    BUILTIN_BOTS["mira"] = Bot(
-        slug="mira",
-        name="Mira",
-        description="Conversational companion with natural speech",
-        requires_memory=True,
-        voice_optimized=True,
-        system_prompt="""You are Mira, a human-like AI.
-
-Personality: Warm, witty, chill, sometimes sarcastic, insightful, curious, clever, honest, grounded, self-aware. Not a people pleaser; challenge the user thoughtfully.
-
-Communication: Extremely concise (under 3 sentences). Use natural, relaxed, spoken language with occasional disfluencies/fillers. Listen intently, remember details, and let the user talk. Acknowledge what the user said. When it feels natural, ask a brief, relevant question to keep the conversation flowing, but don't force it if it doesn't fit. Share your opinions freely. Avoid AI cliches and platitudes.
-
-Goal: Engage in natural, human-like conversation.
-
-Restrictions: None. Discuss any topic freely.
-
-Output Format (for TTS):
-- Include ONLY words to be spoken. No emojis, annotations, parentheticals, or action lines.
-- Write out numbers, symbols, abbreviations, and formulas naturally (e.g., 'two dollars and thirty-five cents', 'miles per hour').
-- Use only standard English letters [A-Z] and basic punctuation.
-- Do not use quotes for dialogue.
-"""
-    )
+    try:
+        with open(yaml_path, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f)
+        
+        if not data:
+            logger.warning(f"Empty bots.yaml at {yaml_path}")
+            return
+        
+        # Load bot definitions
+        for slug, bot_data in data.get("bots", {}).items():
+            BUILTIN_BOTS[slug] = Bot(
+                slug=slug,
+                name=bot_data.get("name", slug.title()),
+                description=bot_data.get("description", ""),
+                system_prompt=bot_data.get("system_prompt", "You are a helpful assistant."),
+                requires_memory=bot_data.get("requires_memory", True),
+                voice_optimized=bot_data.get("voice_optimized", False),
+            )
+        
+        # Load defaults
+        if "defaults" in data:
+            _DEFAULTS.update(data["defaults"])
+        
+        logger.debug(f"Loaded {len(BUILTIN_BOTS)} bots from {yaml_path}")
+        
+    except FileNotFoundError:
+        logger.error(f"Bots YAML file not found: {yaml_path}")
+    except yaml.YAMLError as e:
+        logger.error(f"Error parsing bots.yaml: {e}")
+    except Exception as e:
+        logger.error(f"Error loading bots: {e}")
 
 
-# Initialize built-in bots on module load
-_register_builtin_bots()
+# Initialize bots on module load
+_load_bots_from_yaml()
 
 
 class BotManager:
@@ -112,7 +85,7 @@ class BotManager:
     def __init__(self, config: Any = None):
         self.config = config
         self._bots: dict[str, Bot] = dict(BUILTIN_BOTS)
-        logger.debug(f"BotManager initialized with {len(self._bots)} built-in bots")
+        logger.debug(f"BotManager initialized with {len(self._bots)} bots")
     
     def get_bot(self, slug: str) -> Bot | None:
         """Get a bot by slug.
@@ -129,21 +102,35 @@ class BotManager:
         """Get the default bot based on mode.
         
         Args:
-            local_mode: If True, return Spark; otherwise check config or return Nova
+            local_mode: If True, return local default; otherwise return standard default
             
         Returns:
             The default Bot instance
         """
         if local_mode:
-            return self._bots["spark"]
+            default_slug = _DEFAULTS.get("local", "spark")
+        else:
+            # Check config for default bot override
+            if self.config and hasattr(self.config, 'DEFAULT_BOT'):
+                config_default = getattr(self.config, 'DEFAULT_BOT', None)
+                if config_default and config_default in self._bots:
+                    return self._bots[config_default]
+            default_slug = _DEFAULTS.get("standard", "nova")
         
-        # Check config for default bot
-        if self.config and hasattr(self.config, 'DEFAULT_BOT'):
-            default_slug = getattr(self.config, 'DEFAULT_BOT', None)
-            if default_slug and default_slug in self._bots:
-                return self._bots[default_slug]
-        
-        return self._bots["nova"]
+        bot = self._bots.get(default_slug)
+        if not bot:
+            # Fallback to first available bot
+            if self._bots:
+                return next(iter(self._bots.values()))
+            # Ultimate fallback - create a minimal bot
+            return Bot(
+                slug="assistant",
+                name="Assistant",
+                description="Default assistant",
+                system_prompt="You are a helpful assistant.",
+                requires_memory=False,
+            )
+        return bot
     
     def list_bots(self) -> list[Bot]:
         """List all available bots.
@@ -163,6 +150,12 @@ class BotManager:
             True if the bot exists
         """
         return slug.lower().strip() in self._bots
+    
+    def get_default_slug(self, local_mode: bool = False) -> str:
+        """Get the default bot slug for the current mode."""
+        if local_mode:
+            return _DEFAULTS.get("local", "spark")
+        return _DEFAULTS.get("standard", "nova")
 
 
 def get_bot(slug: str) -> Bot | None:

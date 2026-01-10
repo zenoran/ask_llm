@@ -9,6 +9,7 @@ from .utils.config import Config, is_huggingface_available, is_llama_cpp_availab
 from .utils.history import HistoryManager, Message
 from .clients import LLMClient
 from .bots import BotManager
+from .user_profile import UserProfileManager
 import logging
 from .utils.prompts import SYSTEM_REFINE_PROMPT
 
@@ -47,14 +48,16 @@ console = Console()
 logger = logging.getLogger(__name__)
 
 class AskLLM:
-    def __init__(self, resolved_model_alias: str, config: Config, local_mode: bool = False, bot_id: str = "nova"):
+    def __init__(self, resolved_model_alias: str, config: Config, local_mode: bool = False, bot_id: str = "nova", user_id: str = "default"):
         self.resolved_model_alias = resolved_model_alias
         self.config = config
         self.model_definition = self.config.defined_models.get("models", {}).get(resolved_model_alias)
         self.local_mode = local_mode  # When True, skip MariaDB and use local filesystem
         self.bot_id = bot_id
+        self.user_id = user_id
         self.memory_backend = None  # Long-term memory backend (MariaDB)
         self.short_term_backend = None  # Short-term memory (MariaDB session history)
+        self.user_profile = None  # User profile from database
 
         if not self.model_definition:
              raise ValueError(f"Could not find model definition for resolved alias: '{resolved_model_alias}'")
@@ -97,7 +100,22 @@ class AskLLM:
                 logger.debug("No memory backends discovered, using text file for history.")
 
         # Set system message from the bot's configured prompt
-        self.config.SYSTEM_MESSAGE = self.bot.system_prompt
+        # Inject user profile context before the bot's system prompt if not in local mode
+        if not self.local_mode:
+            try:
+                profile_manager = UserProfileManager(config)
+                self.user_profile, _ = profile_manager.get_or_create_profile(self.user_id)
+                profile_context = self.user_profile.to_context_string()
+                if profile_context:
+                    self.config.SYSTEM_MESSAGE = f"{profile_context}\n\n{self.bot.system_prompt}"
+                    logger.debug(f"Injected user profile for '{self.user_id}' into system prompt")
+                else:
+                    self.config.SYSTEM_MESSAGE = self.bot.system_prompt
+            except Exception as e:
+                logger.warning(f"Failed to load user profile: {e}")
+                self.config.SYSTEM_MESSAGE = self.bot.system_prompt
+        else:
+            self.config.SYSTEM_MESSAGE = self.bot.system_prompt
         logger.debug(f"Using bot '{self.bot.name}' ({self.bot_id}) with system prompt set")
 
         # Initialize history manager with short-term backend if available
