@@ -184,3 +184,5 @@ class LLMClient(ABC):
                     live_display.stop()
                     if overflow_buffer.strip():
                         self.console.print(Align(Markdown(overflow_buffer), align="left", pad=False))
+        
+        return total_response

@@ -2,26 +2,70 @@ import os
 import json
 import time
 import logging
+from typing import TYPE_CHECKING
+
 from ..clients.base import LLMClient
 from ..models.message import Message
 from rich.rule import Rule
 from .config import Config
 
+if TYPE_CHECKING:
+    from ..memory.mariadb import ShortTermMemoryManager
 
 logger = logging.getLogger(__name__)
+
+
 class HistoryManager:
     messages: list[Message] = []
     client: LLMClient
     config: Config
+    _db_backend: "ShortTermMemoryManager | None"
+    bot_id: str
 
-    def __init__(self, client: LLMClient, config: Config):
+    def __init__(
+        self,
+        client: LLMClient,
+        config: Config,
+        db_backend: "ShortTermMemoryManager | None" = None,
+        bot_id: str = "nova",
+    ):
         self.client = client
         self.config = config
-        self.history_file = config.HISTORY_FILE
+        self.bot_id = bot_id
         self.messages = []
+        self._db_backend = db_backend
+        
+        # Use per-bot history files for local mode
+        if config.HISTORY_FILE:
+            # Get the base path and insert bot_id
+            base_path = config.HISTORY_FILE
+            dir_name = os.path.dirname(base_path)
+            file_name = os.path.basename(base_path)
+            name, ext = os.path.splitext(file_name)
+            # Create bot-specific filename: history.json -> history_spark.json
+            self.history_file = os.path.join(dir_name, f"{name}_{bot_id}{ext}")
+        else:
+            self.history_file = None
+            
+        if db_backend:
+            logger.debug(f"HistoryManager using MariaDB short-term backend for bot: {bot_id}")
+        else:
+            logger.debug(f"HistoryManager using text file backend for bot: {bot_id} ({self.history_file})")
 
     def load_history(self, since_minutes: int | None = None):
         self.messages = []
+        
+        # Use MariaDB backend if available
+        if self._db_backend:
+            try:
+                self.messages = self._db_backend.get_messages(since_minutes=since_minutes)
+                logger.debug(f"Loaded {len(self.messages)} messages from MariaDB short-term memory")
+                return
+            except Exception as e:
+                logger.warning(f"Failed to load from MariaDB, falling back to file: {e}")
+                # Fall through to file-based loading
+        
+        # File-based fallback
         if not self.history_file or not os.path.exists(self.history_file):
             print("No history file found. Skipping history load.")
             logger.debug("No history file found. Skipping history load.")
@@ -38,12 +82,18 @@ class HistoryManager:
         except Exception as e:
             self.client.console.print(f"[bold red]Error loading history:[/bold red] {e}")
         if since_minutes is not None and self.messages:
-            logger.debug(f"Loading history from {since_minutes} minutes ago ({len(self.messages)} messages)")
-            cutoff = time.time() - since_minutes * 60
+            # Note: since_minutes is actually in seconds for backward compatibility
+            # (HISTORY_DURATION is in seconds, not minutes)
+            logger.debug(f"Loading history from {since_minutes} seconds ago ({len(self.messages)} messages)")
+            cutoff = time.time() - since_minutes
             self.messages = [msg for msg in self.messages if msg.timestamp >= cutoff]
 
     def save_history(self):
         """Persist message history to the history file."""
+        # MariaDB backend saves on add_message, so nothing to do here
+        if self._db_backend:
+            return
+            
         if not self.history_file:
             return
         try:
@@ -81,7 +131,16 @@ class HistoryManager:
         """Append a message to history and save."""
         message = Message(role, content)
         self.messages.append(message)
-        self.save_history()
+        
+        # Save to MariaDB if available, otherwise file
+        if self._db_backend:
+            try:
+                self._db_backend.add_message(role, content, message.timestamp)
+            except Exception as e:
+                logger.warning(f"Failed to save to MariaDB: {e}")
+                self.save_history()  # Fall back to file
+        else:
+            self.save_history()
 
 
     def print_history(self, pairs_limit=None):
@@ -127,6 +186,17 @@ class HistoryManager:
     def clear_history(self):
         """Clear the conversation history from memory and disk."""
         self.messages = []
+        
+        # Clear MariaDB if available
+        if self._db_backend:
+            try:
+                self._db_backend.clear()
+                self.client.console.print("[bold red]History cleared (MariaDB).[/bold red]")
+                return
+            except Exception as e:
+                logger.warning(f"Failed to clear MariaDB history: {e}")
+                # Fall through to file-based clearing
+        
         if self.history_file and os.path.exists(self.history_file):
             try:
                 os.remove(self.history_file)
@@ -147,4 +217,11 @@ class HistoryManager:
         """Remove the last message if it matches the specified role (used for cleanup on error/interrupt)."""
         if self.messages and self.messages[-1].role == role:
             self.messages.pop()
-            self.save_history()
+            # Remove from MariaDB as well if available
+            if self._db_backend:
+                try:
+                    self._db_backend.remove_last_message_if_partial(role)
+                except Exception as e:
+                    logger.warning(f"Failed to remove from MariaDB: {e}")
+            else:
+                self.save_history()

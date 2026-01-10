@@ -38,6 +38,7 @@ llamacpp = [
 ]
 
 memory-mariadb = [
+    "sqlmodel>=0.0.31",
     "mysql-connector-python>=8.0.0",
 ]
 

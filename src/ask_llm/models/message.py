@@ -11,7 +11,7 @@ class Message:
 
     def __init__(self, role: str, content: str, timestamp: float | None = None):
         self.role = role
-        self.content = content
+        self.content = content if content is not None else ""
         self.timestamp = timestamp if timestamp else time.time()
 
     @classmethod
@@ -36,7 +36,8 @@ class Message:
 
     def to_api_format(self) -> dict:
         """Convert to API-compatible format (without timestamp)"""
-        return {"role": self.role, "content": self.content}
+        # Ensure content is never None (OpenAI API rejects null content)
+        return {"role": self.role, "content": self.content or ""}
 
     def get_token_count(self, encoding, base_overhead: int) -> int:
         """

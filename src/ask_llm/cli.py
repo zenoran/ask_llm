@@ -9,10 +9,112 @@ from ask_llm.utils.input_handler import MultilineInputHandler
 from ask_llm.core import AskLLM
 from ask_llm.model_manager import list_models, update_models_interactive, delete_model, ModelManager
 from ask_llm.gguf_handler import handle_add_gguf
+from ask_llm.bots import BotManager
 import logging
 from pathlib import Path
+from rich.table import Table
+from rich.panel import Panel
 
 console = Console()
+
+
+def show_memory_status(config: Config):
+    """Display memory system status and configuration."""
+    from ask_llm.core import discover_memory_backends
+    
+    console.print(Panel.fit("[bold magenta]Memory System Status[/bold magenta]", border_style="magenta"))
+    console.print()
+    
+    # Get bot info
+    bot_manager = BotManager(config)
+    default_bot = bot_manager.get_default_bot()
+    local_bot = bot_manager.get_default_bot(local_mode=True)
+    
+    # Check MariaDB connection
+    mariadb_status = "[red]Not Configured[/red]"
+    mariadb_stats = None
+    short_term_count = 0
+    long_term_count = 0
+    
+    backends = discover_memory_backends()
+    if 'mariadb' in backends:
+        try:
+            backend_class = backends['mariadb']
+            backend = backend_class(config, bot_id=default_bot.slug)
+            mariadb_stats = backend.stats()
+            long_term_count = mariadb_stats.get('total_count', 0)
+            mariadb_status = f"[green]Connected[/green] ({config.MARIADB_HOST}:{config.MARIADB_PORT}/{config.MARIADB_DATABASE})"
+            
+            # Check for short-term table
+            from sqlmodel import Session, text
+            with Session(backend.engine) as session:
+                result = session.exec(text("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = :db AND table_name = 'short_term_memory'").bindparams(db=config.MARIADB_DATABASE)).first()
+                has_short_term = result[0] > 0 if result else False
+                if has_short_term:
+                    count_result = session.exec(text("SELECT COUNT(*) FROM short_term_memory WHERE bot_id = :bot_id").bindparams(bot_id=default_bot.slug)).first()
+                    short_term_count = count_result[0] if count_result else 0
+        except Exception as e:
+            mariadb_status = f"[red]Error: {e}[/red]"
+    else:
+        mariadb_status = "[yellow]Backend not installed[/yellow] (pip install ask_llm[memory-mariadb])"
+    
+    # Build status table
+    table = Table(show_header=False, box=None, padding=(0, 2))
+    table.add_column("Setting", style="cyan")
+    table.add_column("Value")
+    
+    table.add_row("[bold]Bots[/bold]", "")
+    table.add_row("  Default", f"[bold cyan]{default_bot.name}[/bold cyan] - {default_bot.description}")
+    table.add_row("  Local (--local)", f"[bold yellow]{local_bot.name}[/bold yellow] - {local_bot.description}")
+    table.add_row("  Available", ", ".join(b.slug for b in bot_manager.list_bots()))
+    table.add_row("", "")
+    table.add_row("[bold]Memory Backends[/bold]", "")
+    table.add_row("  MariaDB Backend", mariadb_status)
+    table.add_row(f"  Long-term ({default_bot.slug})", f"[green]{long_term_count}[/green]" if long_term_count else "[dim]0[/dim]")
+    table.add_row(f"  Short-term ({default_bot.slug})", f"[green]{short_term_count}[/green]" if short_term_count else "[dim]0 (using file)[/dim]")
+    table.add_row("", "")
+    table.add_row("[bold]Configuration[/bold]", "")
+    table.add_row("  Memory N Results", f"{config.MEMORY_N_RESULTS}")
+    table.add_row("  Min Relevance", f"{config.MEMORY_MIN_RELEVANCE}")
+    table.add_row("  Protected Recent Turns", f"{config.MEMORY_PROTECTED_RECENT_TURNS}")
+    table.add_row("  Dedup Similarity", f"{config.MEMORY_DEDUP_SIMILARITY}")
+    table.add_row("  History Duration", f"{config.HISTORY_DURATION}s ({config.HISTORY_DURATION // 60} min)")
+    table.add_row("  History File (--local)", f"{config.HISTORY_FILE}")
+    
+    console.print(table)
+    console.print()
+
+
+def show_bots(config: Config):
+    """Display available bots."""
+    bot_manager = BotManager(config)
+    bots = bot_manager.list_bots()
+    default_bot = bot_manager.get_default_bot()
+    
+    console.print(Panel.fit("[bold cyan]Available Bots[/bold cyan]", border_style="cyan"))
+    console.print()
+    
+    table = Table(show_header=True, box=None, padding=(0, 2))
+    table.add_column("Slug", style="cyan")
+    table.add_column("Name", style="bold")
+    table.add_column("Description")
+    table.add_column("Memory", justify="center")
+    
+    for bot in bots:
+        is_default = " ⭐" if bot.slug == default_bot.slug else ""
+        memory_icon = "[green]✓[/green]" if bot.requires_memory else "[dim]✗[/dim]"
+        table.add_row(
+            f"{bot.slug}{is_default}",
+            bot.name,
+            bot.description,
+            memory_icon
+        )
+    
+    console.print(table)
+    console.print()
+    console.print(f"[dim]⭐ = default bot | ✓ = requires MariaDB | Use -b/--bot <slug> to select[/dim]")
+    console.print()
+
 
 def parse_arguments(config_obj: Config) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Query LLM models from the command line using model aliases defined in models.yaml")
@@ -30,7 +132,10 @@ def parse_arguments(config_obj: Config) -> argparse.Namespace:
     parser.add_argument("-c", "--command", help="Execute command and add output to question")
     parser.add_argument("--plain", action="store_true", help="Use plain text output")
     parser.add_argument("--no-stream", action="store_true", default=False, help="Disable streaming output")
-    parser.add_argument("--memory", action="store_true", help="Enable long-term memory (requires a memory backend package to be installed)")
+    parser.add_argument("--local", action="store_true", help="Use local filesystem for history instead of MariaDB")
+    parser.add_argument("-b", "--bot", type=str, default=None, help="Bot to use (nova, spark, mira). Use --list-bots to see all.")
+    parser.add_argument("--list-bots", action="store_true", help="List available bots and exit")
+    parser.add_argument("--status", action="store_true", help="Show memory system status and configuration")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging output.")
     return parser.parse_args()
 
@@ -99,6 +204,14 @@ def main():
                     current_value_str = repr(current_value)
 
                 console.print(f"  [cyan]{field_name}[/cyan]: {current_value_str}")
+        sys.exit(0)
+
+    elif getattr(args, 'status', False):
+        show_memory_status(config_obj)
+        sys.exit(0)
+
+    elif getattr(args, 'list_bots', False):
+        show_bots(config_obj)
         sys.exit(0)
 
     elif args.list_models:
@@ -170,11 +283,39 @@ def main():
         sys.exit(0)
 
 def run_app(args: argparse.Namespace, config_obj: Config, resolved_alias: str):
+    # Determine which bot to use
+    bot_manager = BotManager(config_obj)
+    
+    # Handle --local with explicit --bot (conflicting intent warning)
+    if args.local and args.bot:
+        console.print(f"[yellow]Warning:[/yellow] Using --local with --bot {args.bot}. The bot will run without database memory.")
+        bot = bot_manager.get_bot(args.bot)
+        if not bot:
+            console.print(f"[bold red]Unknown bot: {args.bot}[/bold red]. Use --list-bots to see available bots.")
+            sys.exit(1)
+        bot_id = bot.slug
+    elif args.bot:
+        # Explicit bot selection
+        bot = bot_manager.get_bot(args.bot)
+        if not bot:
+            console.print(f"[bold red]Unknown bot: {args.bot}[/bold red]. Use --list-bots to see available bots.")
+            sys.exit(1)
+        bot_id = bot.slug
+    elif args.local:
+        # Local mode defaults to Spark
+        bot = bot_manager.get_default_bot(local_mode=True)
+        bot_id = bot.slug
+    else:
+        # Default bot (Nova)
+        bot = bot_manager.get_default_bot()
+        bot_id = bot.slug
+    
     try:
         ask_llm = AskLLM(
             resolved_model_alias=resolved_alias,
             config=config_obj,
-            memory_enabled=args.memory
+            local_mode=args.local,
+            bot_id=bot_id
         )
     except (ImportError, FileNotFoundError, ValueError, Exception) as e:
          console.print(f"[bold red]Failed to initialize LLM client for '{resolved_alias}':[/bold red] {e}")
@@ -224,6 +365,11 @@ def run_app(args: argparse.Namespace, config_obj: Config, resolved_alias: str):
         if config_obj.VERBOSE:
             console.print("Command output captured, querying LLM with it...", highlight=False)
         ask_llm.query(command_output_str.strip(), plaintext_output=plaintext_flag, stream=stream_flag)
+    elif not sys.stdin.isatty():
+        # Handle piped input - read once and exit
+        piped_input = sys.stdin.read().strip()
+        if piped_input:
+            ask_llm.query(piped_input, plaintext_output=plaintext_flag, stream=stream_flag)
     else:
         console.print("[bold green]Entering interactive mode. Type 'exit' or 'quit' to leave.[/bold green]", highlight=False)
         console.print("[bold green]Type '>' at the beginning of a line for multiline input mode (end with Ctrl+D or Ctrl+Z).[/bold green]", highlight=False)

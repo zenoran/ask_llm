@@ -14,18 +14,24 @@ class MemoryBackend(ABC):
     
     All backends must implement the core methods: add, search, clear, list, and stats.
     
+    Memory is isolated per bot - each bot has its own separate memory space.
+    
     Attributes:
         config: The application Config object containing settings.
+        bot_id: The bot identifier for memory isolation.
     """
     
-    def __init__(self, config: Any):
+    def __init__(self, config: Any, bot_id: str = "nova"):
         """Initialize the memory backend.
         
         Args:
             config: The application Config object. Backends can define their
                    own config fields with the ASK_LLM_ prefix.
+            bot_id: The bot identifier for memory isolation. Each bot maintains
+                   its own separate memory space.
         """
         self.config = config
+        self.bot_id = bot_id
     
     @abstractmethod
     def add(self, message_id: str, role: str, content: str, timestamp: float) -> None:

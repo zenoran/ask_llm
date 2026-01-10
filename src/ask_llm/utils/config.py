@@ -48,15 +48,13 @@ DOTENV_PATH = DEFAULT_MODELS_YAML.parent / ".env"
 
 class Config(BaseSettings):
     HISTORY_FILE: str = Field(default=os.path.expanduser("~/.cache/ask_llm/chat-history"))
-    HISTORY_DURATION: int = Field(default=60 * 10)
+    HISTORY_DURATION: int = Field(default=60 * 30)  # 30 minutes in seconds
     OLLAMA_URL: str = Field(default="http://localhost:11434")
     MODEL_CACHE_DIR: str = Field(default=os.path.expanduser("~/.cache/ask_llm/models"), description="Directory to cache downloaded GGUF models")
     MODELS_CONFIG_PATH: str = Field(default=str(DEFAULT_MODELS_YAML), description="Path to the models YAML definition file")
     DEFAULT_MODEL_ALIAS: Optional[str] = Field(default=None, description="Alias from models.yaml to use if --model is not specified (Set via ASK_LLM_DEFAULT_MODEL_ALIAS in env or .env file)")
-    ALLOW_DUPLICATE_RESPONSE: bool = Field(default=False, description="Allow identical consecutive assistant responses without retry")
 
     # --- Memory Settings --- #
-    MEMORY_ENABLED_DEFAULT: bool = Field(default=False, description="Whether to enable memory by default if --memory flag is not specified (Set via ASK_LLM_MEMORY_ENABLED_DEFAULT)") # Note: CLI flag currently overrides this
     MEMORY_N_RESULTS: int = Field(default=5, description="Number of relevant memories to retrieve during search (Set via ASK_LLM_MEMORY_N_RESULTS)")
     MEMORY_PROTECTED_RECENT_TURNS: int = Field(default=3, description="Number of recent conversation turns to always include regardless of token limits (Set via ASK_LLM_MEMORY_PROTECTED_RECENT_TURNS)")
     MEMORY_MIN_RELEVANCE: float = Field(default=0.1, description="Minimum relevance score (0.0-1.0) for memories to be included (Set via ASK_LLM_MEMORY_MIN_RELEVANCE)")

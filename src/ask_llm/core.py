@@ -8,6 +8,7 @@ from rich.console import Console
 from .utils.config import Config, is_huggingface_available, is_llama_cpp_available
 from .utils.history import HistoryManager, Message
 from .clients import LLMClient
+from .bots import BotManager
 import logging
 from .utils.prompts import SYSTEM_REFINE_PROMPT
 
@@ -46,39 +47,66 @@ console = Console()
 logger = logging.getLogger(__name__)
 
 class AskLLM:
-    def __init__(self, resolved_model_alias: str, config: Config, memory_enabled: bool = False):
+    def __init__(self, resolved_model_alias: str, config: Config, local_mode: bool = False, bot_id: str = "nova"):
         self.resolved_model_alias = resolved_model_alias
         self.config = config
         self.model_definition = self.config.defined_models.get("models", {}).get(resolved_model_alias)
-        self.memory_enabled = memory_enabled
-        self.memory_backend = None  # Will be set if a memory backend is discovered and enabled
+        self.local_mode = local_mode  # When True, skip MariaDB and use local filesystem
+        self.bot_id = bot_id
+        self.memory_backend = None  # Long-term memory backend (MariaDB)
+        self.short_term_backend = None  # Short-term memory (MariaDB session history)
 
         if not self.model_definition:
              raise ValueError(f"Could not find model definition for resolved alias: '{resolved_model_alias}'")
 
         self.client: LLMClient = self.initialize_client(config)
-        self.history_manager = HistoryManager(client=self.client, config=self.config)
+        
+        # Load the bot for system message
+        bot_manager = BotManager(config)
+        self.bot = bot_manager.get_bot(bot_id)
+        if not self.bot:
+            logger.warning(f"Bot '{bot_id}' not found, falling back to Nova")
+            self.bot = bot_manager.get_default_bot()
+            self.bot_id = self.bot.slug
 
-        # Check for memory backends if memory is requested
-        if self.memory_enabled:
+        # Check for memory backends (both long-term and short-term) unless in local mode
+        if self.local_mode:
+            logger.debug("Local mode enabled - using filesystem for history, skipping MariaDB")
+        else:
             available_backends = discover_memory_backends()
             if available_backends:
                 # Use the first available backend (could be made configurable)
                 backend_name, backend_class = next(iter(available_backends.items()))
                 try:
-                    logger.debug(f"Memory enabled, initializing backend: {backend_name}")
-                    self.memory_backend = backend_class(config=self.config)
+                    logger.debug(f"Discovered memory backend: {backend_name}")
+                    # Initialize long-term memory backend with bot_id
+                    self.memory_backend = backend_class(config=self.config, bot_id=self.bot_id)
+                    logger.debug(f"Long-term memory enabled using backend: {backend_name} for bot: {self.bot_id}")
+                    
+                    # Initialize short-term memory backend if available
+                    if hasattr(backend_class, 'get_short_term_manager'):
+                        self.short_term_backend = backend_class.get_short_term_manager(config=self.config, bot_id=self.bot_id)
+                        logger.debug(f"Short-term memory initialized using backend: {backend_name} for bot: {self.bot_id}")
                 except Exception as e:
                     logger.exception(f"Failed to initialize memory backend '{backend_name}': {e}")
                     if self.config.VERBOSE:
-                        console.print(f"[bold yellow]Warning:[/bold yellow] Memory enabled but backend '{backend_name}' failed to initialize: {e}")
+                        console.print(f"[bold yellow]Warning:[/bold yellow] Memory backend '{backend_name}' failed to initialize: {e}")
                     self.memory_backend = None
+                    self.short_term_backend = None
             else:
-                console.print("[bold yellow]Warning:[/bold yellow] Memory enabled but no memory backends are installed.")
-                console.print("  Install a memory backend package (e.g., ask-llm-memory-mariadb) to use memory features.")
-                logger.debug("Memory flag enabled, but no memory backends discovered.")
-        else:
-            logger.debug("Memory flag is disabled.")
+                logger.debug("No memory backends discovered, using text file for history.")
+
+        # Set system message from the bot's configured prompt
+        self.config.SYSTEM_MESSAGE = self.bot.system_prompt
+        logger.debug(f"Using bot '{self.bot.name}' ({self.bot_id}) with system prompt set")
+
+        # Initialize history manager with short-term backend if available
+        self.history_manager = HistoryManager(
+            client=self.client,
+            config=self.config,
+            db_backend=self.short_term_backend,
+            bot_id=self.bot_id,
+        )
 
         self.load_history()
 
@@ -444,12 +472,6 @@ class AskLLM:
             logger.debug(f"Streaming requested but client {type(self.client).__name__} does not support it. Disabling streaming.")
 
         response_content = self.client.query(**query_kwargs)
-
-        last_response = self.history_manager.get_last_assistant_message()
-        if last_response and response_content == last_response and not self.config.ALLOW_DUPLICATE_RESPONSE:
-            console.print("[yellow]Detected duplicate response. Regenerating with higher temperature...[/yellow]")
-            # Note: This might require adjusting temperature or other params in query_kwargs for actual regeneration
-            response_content = self.client.query(**query_kwargs) # Re-query
 
         self.history_manager.add_message("assistant", response_content)
         return response_content
