@@ -36,11 +36,12 @@ class Bot:
 # Global bot registry - populated from YAML on module load
 BUILTIN_BOTS: dict[str, Bot] = {}
 _DEFAULTS: dict[str, str] = {"standard": "nova", "local": "spark"}
+_SYSTEM_PROMPTS: dict[str, str] = {}
 
 
 def _load_bots_from_yaml(yaml_path: Path = BOTS_YAML_PATH) -> None:
     """Load bot definitions from YAML file into the global registry."""
-    global BUILTIN_BOTS, _DEFAULTS
+    global BUILTIN_BOTS, _DEFAULTS, _SYSTEM_PROMPTS
     
     try:
         with open(yaml_path, "r", encoding="utf-8") as f:
@@ -65,7 +66,11 @@ def _load_bots_from_yaml(yaml_path: Path = BOTS_YAML_PATH) -> None:
         if "defaults" in data:
             _DEFAULTS.update(data["defaults"])
         
-        logger.debug(f"Loaded {len(BUILTIN_BOTS)} bots from {yaml_path}")
+        # Load system prompts
+        if "system_prompts" in data:
+            _SYSTEM_PROMPTS.update(data["system_prompts"])
+        
+        logger.debug(f"Loaded {len(BUILTIN_BOTS)} bots and {len(_SYSTEM_PROMPTS)} system prompts from {yaml_path}")
         
     except FileNotFoundError:
         logger.error(f"Bots YAML file not found: {yaml_path}")
@@ -73,6 +78,11 @@ def _load_bots_from_yaml(yaml_path: Path = BOTS_YAML_PATH) -> None:
         logger.error(f"Error parsing bots.yaml: {e}")
     except Exception as e:
         logger.error(f"Error loading bots: {e}")
+
+
+def get_system_prompt(name: str) -> str | None:
+    """Get a system prompt by name (e.g., 'refine')."""
+    return _SYSTEM_PROMPTS.get(name)
 
 
 # Initialize bots on module load

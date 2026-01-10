@@ -8,10 +8,9 @@ from rich.console import Console
 from .utils.config import Config, is_huggingface_available, is_llama_cpp_available
 from .utils.history import HistoryManager, Message
 from .clients import LLMClient
-from .bots import BotManager
+from .bots import BotManager, get_system_prompt
 from .user_profile import UserProfileManager
 import logging
-from .utils.prompts import SYSTEM_REFINE_PROMPT
 
 try:
     import tiktoken
@@ -575,7 +574,8 @@ class AskLLM:
         """
         try:
             messages = []
-            messages.append(Message(role="system", content=SYSTEM_REFINE_PROMPT))
+            refine_prompt = get_system_prompt("refine") or "You are a prompt refinement assistant."
+            messages.append(Message(role="system", content=refine_prompt))
             
             # Add history context if provided
             if history:

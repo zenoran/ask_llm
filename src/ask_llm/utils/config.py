@@ -9,7 +9,10 @@ import yaml
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from rich.console import Console
-from ask_llm.utils import prompts
+
+# Default system message fallback - only used if bot config fails to load
+DEFAULT_SYSTEM_MESSAGE = """You are Nova, a personal AI assistant running locally via ask_llm.
+You have persistent memory across sessions. Keep responses concise and helpful."""
 
 PROVIDER_OPENAI = "openai"
 PROVIDER_OLLAMA = "ollama"
@@ -84,7 +87,7 @@ class Config(BaseSettings):
     INTERACTIVE_MODE: bool = Field(default=False, description="Whether the app is in interactive mode (set based on args)")
 
     # SYSTEM_MESSAGE is set at runtime from bot config, this is just the default
-    SYSTEM_MESSAGE: str = Field(default=prompts.SYSTEM_MESSAGE)
+    SYSTEM_MESSAGE: str = Field(default=DEFAULT_SYSTEM_MESSAGE)
 
     defined_models: Dict[str, Any] = Field(default_factory=dict, exclude=True)
     available_ollama_models: List[str] = Field(default_factory=list, exclude=True)
