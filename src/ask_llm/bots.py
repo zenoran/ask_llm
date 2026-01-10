@@ -25,8 +25,9 @@ class Bot:
     name: str  # Display name (e.g., "Nova", "Spark", "Mira")
     description: str  # Short description for --list-bots
     system_prompt: str  # The system message sent to the LLM
-    requires_memory: bool = True  # Whether this bot needs MariaDB
+    requires_memory: bool = True  # Whether this bot needs database/memory persistence
     voice_optimized: bool = False  # Whether output is optimized for TTS
+    default_model: str | None = None  # Default model alias for this bot
     
     def __post_init__(self):
         # Ensure slug is lowercase and valid
@@ -60,6 +61,7 @@ def _load_bots_from_yaml(yaml_path: Path = BOTS_YAML_PATH) -> None:
                 system_prompt=bot_data.get("system_prompt", "You are a helpful assistant."),
                 requires_memory=bot_data.get("requires_memory", True),
                 voice_optimized=bot_data.get("voice_optimized", False),
+                default_model=bot_data.get("default_model"),
             )
         
         # Load defaults

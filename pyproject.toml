@@ -13,6 +13,11 @@ dependencies = [
     "pyyaml>=6.0.2",
     "pytz>=2025.2",
     "tiktoken>=0.9.0",
+    # PostgreSQL memory backend
+    "sqlalchemy>=2.0.0",
+    "sqlmodel>=0.0.31",
+    "psycopg2-binary>=2.9.0",
+    "pgvector>=0.3.0",
 ]
 
 [project.optional-dependencies]
@@ -37,21 +42,20 @@ llamacpp = [
     "llama-cpp-python",
 ]
 
-memory-mariadb = [
-    "sqlmodel>=0.0.31",
-    "mysql-connector-python>=8.0.0",
-]
-
 
 [project.scripts]
 ask-llm = "ask_llm.main:main"
 llm = "ask_llm.main:main"
 
 [project.entry-points."ask_llm.memory"]
-mariadb = "ask_llm.memory.mariadb:MariaDBMemoryBackend"
+postgresql = "ask_llm.memory.postgresql:PostgreSQLMemoryBackend"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
+include-package-data = true
+
+[tool.setuptools.package-data]
+ask_llm = ["*.yaml"]
 
 [build-system]
 requires = ["setuptools>=61.0"]

@@ -66,12 +66,17 @@ class Config(BaseSettings):
     MEMORY_MAX_TOKEN_PERCENT: int = Field(default=30, description="Maximum percentage of context window to use for memories (Set via ASK_LLM_MEMORY_MAX_TOKEN_PERCENT)")
     MEMORY_DEDUP_SIMILARITY: float = Field(default=0.85, description="Similarity threshold (0.0-1.0) for fuzzy deduplication of memories against history (Set via ASK_LLM_MEMORY_DEDUP_SIMILARITY)")
 
-    # --- MariaDB Memory Backend Settings --- #
-    MARIADB_HOST: str = Field(default="mariadb.home", description="MariaDB server hostname (Set via ASK_LLM_MARIADB_HOST)")
-    MARIADB_PORT: int = Field(default=3306, description="MariaDB server port (Set via ASK_LLM_MARIADB_PORT)")
-    MARIADB_USER: str = Field(default="ask_llm", description="MariaDB username (Set via ASK_LLM_MARIADB_USER)")
-    MARIADB_PASSWORD: str = Field(default="", description="MariaDB password (Set via ASK_LLM_MARIADB_PASSWORD)")
-    MARIADB_DATABASE: str = Field(default="ask_llm", description="MariaDB database name (Set via ASK_LLM_MARIADB_DATABASE)")
+    # --- PostgreSQL Memory Backend Settings --- #
+    POSTGRES_HOST: str = Field(default="postgres.home", description="PostgreSQL server hostname (Set via ASK_LLM_POSTGRES_HOST)")
+    POSTGRES_PORT: int = Field(default=5432, description="PostgreSQL server port (Set via ASK_LLM_POSTGRES_PORT)")
+    POSTGRES_USER: str = Field(default="askllm", description="PostgreSQL username (Set via ASK_LLM_POSTGRES_USER)")
+    POSTGRES_PASSWORD: str = Field(default="", description="PostgreSQL password (Set via ASK_LLM_POSTGRES_PASSWORD)")
+    POSTGRES_DATABASE: str = Field(default="askllm", description="PostgreSQL database name (Set via ASK_LLM_POSTGRES_DATABASE)")
+    
+    # --- Memory Extraction Settings --- #
+    MEMORY_EXTRACTION_ENABLED: bool = Field(default=True, description="Enable LLM-based memory extraction from conversations")
+    MEMORY_EXTRACTION_MIN_IMPORTANCE: float = Field(default=0.3, description="Minimum importance score for extracted memories to be stored")
+    MEMORY_EMBEDDING_DIM: int = Field(default=1536, description="Dimension of embedding vectors for semantic search")
 
     # --- LLM Generation Settings --- #
     MAX_TOKENS: int = Field(default=1024*4, description="Default maximum tokens to generate")

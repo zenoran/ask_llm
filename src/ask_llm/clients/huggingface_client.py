@@ -177,11 +177,13 @@ class HuggingFaceClient(LLMClient):
                 thread = Thread(target=self.model.generate, kwargs=generation_kwargs)
                 thread.start()
 
+                # Let base class handle panel title using bot_name
+                panel_title, panel_border_style = self.get_styling()
                 response_text_final = self._handle_streaming_output(
                     stream_iterator=streamer,
                     plaintext_output=plaintext_output,
-                    panel_title=f"[bold cyan]{self.model_id}[/bold cyan]",
-                    panel_border_style="cyan",
+                    panel_title=panel_title,
+                    panel_border_style=panel_border_style,
                 )
                 thread.join() # Ensure thread finishes
             else:
@@ -206,8 +208,8 @@ class HuggingFaceClient(LLMClient):
                      parts = response_text_final.split("\n\n", 1)
                      first_part = parts[0]
                      second_part = parts[1] if len(parts) > 1 else None
-                     panel_title = f"[bold cyan]{self.model_id}[/bold cyan]"
-                     self._print_assistant_message(first_part, second_part=second_part, panel_title=panel_title, panel_border_style="cyan")
+                     panel_title, panel_border_style = self.get_styling()
+                     self._print_assistant_message(first_part, second_part=second_part, panel_title=panel_title, panel_border_style=panel_border_style)
 
         except Exception as e:
              self.console.print(f"[bold red]Error during HuggingFace generation:[/bold red] {e}")
@@ -246,13 +248,5 @@ class HuggingFaceClient(LLMClient):
 
     def get_styling(self) -> tuple[str | None, str]:
         """Return HuggingFace specific styling."""
-        panel_border_style = "cyan"
-        panel_title = f"[bold {panel_border_style}]{self.model_id}[/bold {panel_border_style}]"
-        return panel_title, panel_border_style
-    def format_message(self, role: str, content: str):
-        if role == "user":
-            self._print_user_message(content)
-        elif role == "assistant":
-             self._print_assistant_message(content, panel_title=f"[bold cyan]{self.model_id}[/bold cyan]", panel_border_style="cyan")
-    def _print_assistant_message(self, content: str, panel_title: str | None = None, panel_border_style: str = "cyan"):
-        super()._print_assistant_message(content, panel_title=panel_title or f"[bold cyan]HF ({self.model_id})[/bold cyan]", panel_border_style=panel_border_style)
+        # Return None for title to let base class use bot_name, only specify border style
+        return None, "cyan"

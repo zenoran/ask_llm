@@ -51,11 +51,11 @@ class AskLLM:
         self.resolved_model_alias = resolved_model_alias
         self.config = config
         self.model_definition = self.config.defined_models.get("models", {}).get(resolved_model_alias)
-        self.local_mode = local_mode  # When True, skip MariaDB and use local filesystem
+        self.local_mode = local_mode  # When True, skip database and use local filesystem
         self.bot_id = bot_id
         self.user_id = user_id
-        self.memory_backend = None  # Long-term memory backend (MariaDB)
-        self.short_term_backend = None  # Short-term memory (MariaDB session history)
+        self.memory_backend = None  # Long-term memory backend (PostgreSQL)
+        self.short_term_backend = None  # Short-term memory (PostgreSQL session history)
         self.user_profile = None  # User profile from database
 
         if not self.model_definition:
@@ -70,17 +70,21 @@ class AskLLM:
             logger.warning(f"Bot '{bot_id}' not found, falling back to Nova")
             self.bot = bot_manager.get_default_bot()
             self.bot_id = self.bot.slug
+        
+        # Set bot name on client for panel display
+        self.client.bot_name = self.bot.name
 
-        # Check for memory backends (both long-term and short-term) unless in local mode
+        # Check for memory backend unless in local mode
         if self.local_mode:
-            logger.debug("Local mode enabled - using filesystem for history, skipping MariaDB")
+            logger.debug("Local mode enabled - using filesystem for history, skipping database")
         else:
             available_backends = discover_memory_backends()
             if available_backends:
-                # Use the first available backend (could be made configurable)
+                # Use PostgreSQL backend
                 backend_name, backend_class = next(iter(available_backends.items()))
+                
                 try:
-                    logger.debug(f"Discovered memory backend: {backend_name}")
+                    logger.debug(f"Initializing memory backend: {backend_name}")
                     # Initialize long-term memory backend with bot_id
                     self.memory_backend = backend_class(config=self.config, bot_id=self.bot_id)
                     logger.debug(f"Long-term memory enabled using backend: {backend_name} for bot: {self.bot_id}")
@@ -88,11 +92,11 @@ class AskLLM:
                     # Initialize short-term memory backend if available
                     if hasattr(backend_class, 'get_short_term_manager'):
                         self.short_term_backend = backend_class.get_short_term_manager(config=self.config, bot_id=self.bot_id)
-                        logger.debug(f"Short-term memory initialized using backend: {backend_name} for bot: {self.bot_id}")
+                        logger.debug(f"Short-term memory initialized for bot: {self.bot_id}")
                 except Exception as e:
-                    logger.exception(f"Failed to initialize memory backend '{backend_name}': {e}")
+                    logger.exception(f"Failed to initialize memory backend: {e}")
                     if self.config.VERBOSE:
-                        console.print(f"[bold yellow]Warning:[/bold yellow] Memory backend '{backend_name}' failed to initialize: {e}")
+                        console.print(f"[bold yellow]Warning:[/bold yellow] Memory backend failed to initialize: {e}")
                     self.memory_backend = None
                     self.short_term_backend = None
             else:
@@ -494,24 +498,128 @@ class AskLLM:
         return response_content
 
     def _add_conversation_to_memory(self, user_prompt: str, assistant_response: str):
-        """Adds the user prompt and assistant response to the memory backend if enabled."""
-        if not self.memory_backend or not assistant_response: # Don't save empty assistant responses
+        """Adds the user prompt and assistant response to permanent storage and triggers memory extraction."""
+        if not self.memory_backend or not assistant_response:
             return
         
         try:
             user_msg_id = str(uuid.uuid4())
             assistant_msg_id = str(uuid.uuid4())
             current_time = time.time()
-
-            self.memory_backend.add(
-                message_id=user_msg_id, role="user", content=user_prompt, timestamp=current_time
+            
+            # Get session ID if available
+            session_id = None
+            if self.short_term_backend and hasattr(self.short_term_backend, 'session_id'):
+                session_id = self.short_term_backend.session_id
+            
+            # Store messages permanently
+            self.memory_backend.add_message(
+                message_id=user_msg_id,
+                role="user",
+                content=user_prompt,
+                timestamp=current_time,
+                session_id=session_id,
             )
-            self.memory_backend.add(
-                message_id=assistant_msg_id, role="assistant", content=assistant_response, timestamp=current_time + 0.001
+            self.memory_backend.add_message(
+                message_id=assistant_msg_id,
+                role="assistant",
+                content=assistant_response,
+                timestamp=current_time + 0.001,
+                session_id=session_id,
             )
-            logger.debug(f"Added user prompt (ID: {user_msg_id}) and assistant response (ID: {assistant_msg_id}) to memory.")
+            logger.debug(f"Added messages to storage (IDs: {user_msg_id}, {assistant_msg_id})")
+            
+            # Trigger memory extraction if enabled
+            if getattr(self.config, 'MEMORY_EXTRACTION_ENABLED', True):
+                self._extract_memories_from_exchange(
+                    user_prompt, assistant_response,
+                    [user_msg_id, assistant_msg_id]
+                )
         except Exception as e:
             logger.exception(f"Failed to add messages to memory: {e}")
+    
+    def _extract_memories_from_exchange(
+        self,
+        user_prompt: str,
+        assistant_response: str,
+        message_ids: list[str]
+    ):
+        """Extract important facts from a conversation exchange and store as memories.
+        
+        Uses the MemoryExtractionService to analyze the exchange and create
+        distilled, importance-weighted memories.
+        """
+        try:
+            from .memory.extraction import MemoryExtractionService
+            
+            # Create extraction service (without LLM for now - uses heuristics)
+            # TODO: Pass LLM client for better extraction when available
+            extraction_service = MemoryExtractionService(llm_client=None)
+            
+            messages = [
+                {"id": message_ids[0], "role": "user", "content": user_prompt},
+                {"id": message_ids[1], "role": "assistant", "content": assistant_response},
+            ]
+            
+            # Extract facts using heuristics (fast, no LLM call)
+            facts = extraction_service.extract_from_conversation(messages, use_llm=False)
+            
+            if not facts:
+                logger.debug("No facts extracted from conversation exchange")
+                return
+            
+            # Get existing memories for deduplication
+            existing_memories = []
+            if hasattr(self.memory_backend, 'list_recent'):
+                recent = self.memory_backend.list_recent(n=50)
+                existing_memories = [
+                    {
+                        "id": m.get("id"),
+                        "content": m.get("document", m.get("content", "")),
+                        "importance": m.get("metadata", {}).get("importance", 0.5),
+                    }
+                    for m in recent
+                ]
+            
+            # Determine what actions to take
+            actions = extraction_service.determine_memory_actions(facts, existing_memories)
+            
+            min_importance = getattr(self.config, 'MEMORY_EXTRACTION_MIN_IMPORTANCE', 0.3)
+            
+            # Execute memory actions
+            for action in actions:
+                if action.action == "ADD" and action.fact:
+                    if action.fact.importance >= min_importance:
+                        memory_id = str(uuid.uuid4())
+                        self.memory_backend.add_memory(
+                            memory_id=memory_id,
+                            content=action.fact.content,
+                            memory_type=action.fact.memory_type,
+                            importance=action.fact.importance,
+                            source_message_ids=action.fact.source_message_ids,
+                        )
+                        logger.debug(f"Added memory: {action.fact.content[:50]}... (importance: {action.fact.importance})")
+                        
+                elif action.action == "UPDATE" and action.fact and action.target_memory_id:
+                    if hasattr(self.memory_backend, 'add_memory'):
+                        self.memory_backend.add_memory(
+                            memory_id=action.target_memory_id,
+                            content=action.fact.content,
+                            memory_type=action.fact.memory_type,
+                            importance=action.fact.importance,
+                            source_message_ids=action.fact.source_message_ids,
+                        )
+                        logger.debug(f"Updated memory {action.target_memory_id}")
+                        
+                elif action.action == "DELETE" and action.target_memory_id:
+                    if hasattr(self.memory_backend, 'delete_memory'):
+                        self.memory_backend.delete_memory(action.target_memory_id)
+                        logger.debug(f"Deleted memory {action.target_memory_id}")
+                        
+        except ImportError as e:
+            logger.debug(f"Memory extraction not available: {e}")
+        except Exception as e:
+            logger.warning(f"Memory extraction failed: {e}")
 
 
     def query(self, prompt: str, plaintext_output: bool = False, stream: bool = True) -> str:

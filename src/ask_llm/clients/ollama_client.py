@@ -249,6 +249,5 @@ class OllamaClient(LLMClient):
 
     def get_styling(self) -> tuple[str | None, str]:
         """Return Ollama specific styling."""
-        panel_border_style = "purple"
-        panel_title = None # Default title format uses model name and border style
-        return panel_title, panel_border_style
+        # Return None for title to let base class use bot_name, only specify border style
+        return None, "purple"

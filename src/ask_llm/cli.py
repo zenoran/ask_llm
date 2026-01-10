@@ -20,71 +20,236 @@ from rich.panel import Panel
 console = Console()
 
 
-def show_memory_status(config: Config):
-    """Display memory system status and configuration."""
+def show_status(config: Config, args: argparse.Namespace | None = None):
+    """Display overall system status including dependencies, bots, memory, and configuration."""
+    import importlib.util
+    import os
+    import shutil
     from ask_llm.core import discover_memory_backends
+    from ask_llm.utils.config import is_huggingface_available, is_llama_cpp_available
     
-    console.print(Panel.fit("[bold magenta]Memory System Status[/bold magenta]", border_style="magenta"))
+    console.print(Panel.fit("[bold magenta]ask_llm System Status[/bold magenta]", border_style="magenta"))
     console.print()
-    
-    # Get bot info
-    bot_manager = BotManager(config)
-    default_bot = bot_manager.get_default_bot()
-    local_bot = bot_manager.get_default_bot(local_mode=True)
-    
-    # Check MariaDB connection
-    mariadb_status = "[red]Not Configured[/red]"
-    long_term_count = 0
-    short_term_count = 0
-    long_term_table = ""
-    short_term_table = ""
-    
-    backends = discover_memory_backends()
-    if 'mariadb' in backends:
-        try:
-            backend_class = backends['mariadb']
-            backend = backend_class(config, bot_id=default_bot.slug)
-            mariadb_stats = backend.stats()
-            long_term_count = mariadb_stats.get('total_count', 0)
-            long_term_table = mariadb_stats.get('table_name', '')
-            mariadb_status = f"[green]Connected[/green] ({config.MARIADB_HOST}:{config.MARIADB_PORT}/{config.MARIADB_DATABASE})"
-            
-            # Check for short-term table using the new dynamic table name
-            short_term_mgr = backend_class.get_short_term_manager(config, bot_id=default_bot.slug)
-            short_term_stats = short_term_mgr.stats()
-            short_term_count = short_term_stats.get('total_count', 0)
-            short_term_table = short_term_stats.get('table_name', '')
-        except Exception as e:
-            mariadb_status = f"[red]Error: {e}[/red]"
-    else:
-        mariadb_status = "[yellow]Backend not installed[/yellow] (pip install ask_llm[memory-mariadb])"
     
     # Build status table
     table = Table(show_header=False, box=None, padding=(0, 2))
     table.add_column("Setting", style="cyan")
     table.add_column("Value")
     
+    # --- Current Session Section (based on args) ---
+    if args:
+        table.add_row("[bold]Current Session[/bold]", "")
+        
+        # Determine effective bot
+        bot_manager = BotManager(config)
+        if args.bot:
+            target_bot = bot_manager.get_bot(args.bot)
+            if target_bot:
+                bot_display = f"[bold cyan]{target_bot.name}[/bold cyan] ({args.bot}) [dim]--bot {args.bot}[/dim]"
+            else:
+                bot_display = f"[red]Unknown: {args.bot}[/red]"
+        elif getattr(args, 'local', False):
+            target_bot = bot_manager.get_default_bot(local_mode=True)
+            bot_display = f"[bold yellow]{target_bot.name}[/bold yellow] ({target_bot.slug}) [dim]--local default[/dim]"
+        else:
+            target_bot = bot_manager.get_default_bot()
+            bot_display = f"[bold cyan]{target_bot.name}[/bold cyan] ({target_bot.slug}) [dim]default[/dim]"
+        table.add_row("  Bot", bot_display)
+        
+        # Determine effective model: -m flag > bot's default_model > config DEFAULT_MODEL_ALIAS
+        explicit_model = getattr(args, 'model', None)
+        if explicit_model:
+            model_alias = explicit_model
+            model_source = "[dim]-m flag[/dim]"
+        elif target_bot.default_model:
+            model_alias = target_bot.default_model
+            model_source = f"[dim]bot default[/dim]"
+        else:
+            model_alias = config.DEFAULT_MODEL_ALIAS
+            model_source = "[dim]config default[/dim]"
+        
+        if model_alias:
+            # Check if model exists in defined models
+            defined_models = config.defined_models.get("models", {})
+            if model_alias in defined_models:
+                model_def = defined_models.get(model_alias, {})
+                model_type = model_def.get("type", "unknown")
+                model_display = f"[bold green]{model_alias}[/bold green] [dim]({model_type})[/dim] {model_source}"
+            else:
+                # Check for partial matches
+                matches = [a for a in defined_models.keys() if model_alias.lower() in a.lower()]
+                if matches:
+                    model_display = f"[yellow]{model_alias}[/yellow] [dim](partial match: {matches[0]})[/dim] {model_source}"
+                else:
+                    model_display = f"[red]{model_alias}[/red] [dim](not found)[/dim] {model_source}"
+        else:
+            model_display = "[dim]not set[/dim]"
+        table.add_row("  Model", model_display)
+        
+        # Determine effective user
+        user_id = getattr(args, 'user', DEFAULT_USER_ID)
+        if getattr(args, 'local', False):
+            user_display = f"[dim]N/A (--local mode)[/dim]"
+        else:
+            try:
+                profile_manager = UserProfileManager(config)
+                profile = profile_manager.get_profile(user_id)
+                if profile and profile.name:
+                    user_display = f"[bold cyan]{profile.name}[/bold cyan] ({user_id})"
+                else:
+                    user_display = f"{user_id} [dim](no profile)[/dim]"
+            except Exception:
+                user_display = f"{user_id}"
+        table.add_row("  User", user_display)
+        
+        # Show mode
+        mode_parts = []
+        if getattr(args, 'local', False):
+            mode_parts.append("[yellow]local[/yellow]")
+        if getattr(args, 'plain', False):
+            mode_parts.append("plain")
+        if getattr(args, 'no_stream', False):
+            mode_parts.append("no-stream")
+        mode_display = ", ".join(mode_parts) if mode_parts else "[dim]default[/dim]"
+        table.add_row("  Mode", mode_display)
+        
+        table.add_row("", "")
+    
+    # --- Dependencies Section ---
+    table.add_row("[bold]Dependencies[/bold]", "")
+    
+    # Check CUDA availability
+    cuda_status = "[dim]○ Not available[/dim]"
+    nvcc_path = shutil.which("nvcc")
+    if nvcc_path:
+        # Try to get CUDA version
+        try:
+            import subprocess
+            result = subprocess.run(["nvcc", "--version"], capture_output=True, text=True, timeout=5)
+            if result.returncode == 0:
+                # Parse version from output like "Cuda compilation tools, release 12.2, V12.2.140"
+                import re
+                match = re.search(r"release ([\d.]+)", result.stdout)
+                version = match.group(1) if match else "unknown"
+                cuda_status = f"[green]✓ Available[/green] (CUDA {version})"
+            else:
+                cuda_status = f"[yellow]⚠ nvcc found but failed[/yellow]"
+        except Exception:
+            cuda_status = f"[green]✓ Available[/green] (nvcc at {nvcc_path})"
+    table.add_row("  CUDA", cuda_status)
+    
+    # Check huggingface-hub (for GGUF downloads)
+    hf_hub_available = importlib.util.find_spec("huggingface_hub") is not None
+    hf_hub_status = "[green]✓ Installed[/green]" if hf_hub_available else "[red]✗ Not installed[/red] (pip install huggingface-hub)"
+    table.add_row("  huggingface-hub", hf_hub_status)
+    
+    # Check llama-cpp-python (for GGUF inference)
+    llama_cpp_available = is_llama_cpp_available()
+    llama_cpp_status = "[green]✓ Installed[/green]" if llama_cpp_available else "[red]✗ Not installed[/red] (pip install llama-cpp-python)"
+    # If llama-cpp is installed, check if it has CUDA support
+    if llama_cpp_available:
+        try:
+            # Suppress the ggml_cuda_init logging during import (native C code writes to fd)
+            import sys
+            import os as os_module
+            # Save original file descriptors
+            devnull = os_module.open(os_module.devnull, os_module.O_WRONLY)
+            old_stdout_fd = os_module.dup(1)
+            old_stderr_fd = os_module.dup(2)
+            try:
+                os_module.dup2(devnull, 1)
+                os_module.dup2(devnull, 2)
+                from llama_cpp import llama_supports_gpu_offload
+                has_gpu = llama_supports_gpu_offload()
+            finally:
+                os_module.dup2(old_stdout_fd, 1)
+                os_module.dup2(old_stderr_fd, 2)
+                os_module.close(devnull)
+                os_module.close(old_stdout_fd)
+                os_module.close(old_stderr_fd)
+            if has_gpu:
+                llama_cpp_status = "[green]✓ Installed[/green] (GPU support)"
+            else:
+                llama_cpp_status = "[green]✓ Installed[/green] [dim](CPU only)[/dim]"
+        except (ImportError, AttributeError, OSError):
+            llama_cpp_status = "[green]✓ Installed[/green]"
+    table.add_row("  llama-cpp-python", llama_cpp_status)
+    
+    # Check HuggingFace transformers (for HF models)
+    hf_available = is_huggingface_available()
+    hf_status = "[green]✓ Installed[/green]" if hf_available else "[dim]○ Not installed[/dim] (pip install transformers torch)"
+    table.add_row("  transformers + torch", hf_status)
+    
+    # Check ollama connectivity
+    ollama_status = "[dim]○ Not checked[/dim]"
+    if config.OLLAMA_URL:
+        try:
+            import httpx
+            response = httpx.get(f"{config.OLLAMA_URL}/api/tags", timeout=2.0)
+            if response.status_code == 200:
+                model_count = len(response.json().get("models", []))
+                ollama_status = f"[green]✓ Connected[/green] ({model_count} models)"
+            else:
+                ollama_status = f"[yellow]⚠ Server responded with {response.status_code}[/yellow]"
+        except Exception:
+            ollama_status = f"[red]✗ Not reachable[/red] ({config.OLLAMA_URL})"
+    table.add_row("  Ollama server", ollama_status)
+    
+    # Check OpenAI API key (from environment variable)
+    openai_api_key = os.getenv("OPENAI_API_KEY")
+    openai_status = "[green]✓ API key set[/green]" if openai_api_key else "[dim]○ No API key[/dim] (export OPENAI_API_KEY=...)"
+    table.add_row("  OpenAI API", openai_status)
+    
+    table.add_row("", "")
+    
+    # --- Bots Section ---
+    bot_manager = BotManager(config)
+    default_bot = bot_manager.get_default_bot()
+    local_bot = bot_manager.get_default_bot(local_mode=True)
+    
     table.add_row("[bold]Bots[/bold]", "")
     table.add_row("  Default", f"[bold cyan]{default_bot.name}[/bold cyan] - {default_bot.description}")
     table.add_row("  Local (--local)", f"[bold yellow]{local_bot.name}[/bold yellow] - {local_bot.description}")
     table.add_row("  Available", ", ".join(b.slug for b in bot_manager.list_bots()))
     table.add_row("", "")
-    table.add_row("[bold]Memory Backends[/bold]", "")
-    table.add_row("  MariaDB Backend", mariadb_status)
-    if long_term_table:
-        table.add_row(f"  Long-term ({long_term_table})", f"[green]{long_term_count}[/green]" if long_term_count else "[dim]0[/dim]")
+    
+    # --- Memory Section ---
+    db_status = "[red]Not Configured[/red]"
+    long_term_count = 0
+    short_term_count = 0
+    long_term_table = ""
+    short_term_table = ""
+    
+    backends = discover_memory_backends()
+    if 'postgresql' in backends:
+        try:
+            backend_class = backends['postgresql']
+            backend = backend_class(config, bot_id=default_bot.slug)
+            db_stats = backend.stats()
+            long_term_count = db_stats.get('memories', {}).get('total_count', 0)
+            messages_count = db_stats.get('messages', {}).get('total_count', 0)
+            db_status = f"[green]Connected[/green] ({config.POSTGRES_HOST}:{config.POSTGRES_PORT}/{config.POSTGRES_DATABASE})"
+            
+            short_term_mgr = backend_class.get_short_term_manager(config, bot_id=default_bot.slug)
+            short_term_count = short_term_mgr.count()
+        except Exception as e:
+            db_status = f"[red]Error: {e}[/red]"
     else:
-        table.add_row(f"  Long-term", "[dim]No table[/dim]")
-    if short_term_table:
-        table.add_row(f"  Short-term ({short_term_table})", f"[green]{short_term_count}[/green]" if short_term_count else "[dim]0[/dim]")
-    else:
-        table.add_row(f"  Short-term", "[dim]No table (using file)[/dim]")
+        db_status = "[yellow]Backend not available[/yellow]"
+    
+    table.add_row("[bold]Memory[/bold]", "")
+    table.add_row("  PostgreSQL Backend", db_status)
+    table.add_row("  Messages (permanent)", f"[green]{messages_count}[/green]" if 'messages_count' in dir() and messages_count else "[dim]0[/dim]")
+    table.add_row("  Memories (distilled)", f"[green]{long_term_count}[/green]" if long_term_count else "[dim]0[/dim]")
+    table.add_row("  Session messages", f"[green]{short_term_count}[/green]" if short_term_count else "[dim]0[/dim]")
     table.add_row("", "")
+    
+    # --- Configuration Section ---
     table.add_row("[bold]Configuration[/bold]", "")
+    table.add_row("  Default Model", f"{config.DEFAULT_MODEL_ALIAS or '[dim]not set[/dim]'}")
+    table.add_row("  Models Config", f"{config.MODELS_CONFIG_PATH}")
     table.add_row("  Memory N Results", f"{config.MEMORY_N_RESULTS}")
     table.add_row("  Min Relevance", f"{config.MEMORY_MIN_RELEVANCE}")
-    table.add_row("  Protected Recent Turns", f"{config.MEMORY_PROTECTED_RECENT_TURNS}")
-    table.add_row("  Dedup Similarity", f"{config.MEMORY_DEDUP_SIMILARITY}")
     table.add_row("  History Duration", f"{config.HISTORY_DURATION}s ({config.HISTORY_DURATION // 60} min)")
     table.add_row("  History File (--local)", f"{config.HISTORY_FILE}")
     
@@ -105,21 +270,24 @@ def show_bots(config: Config):
     table.add_column("Slug", style="cyan")
     table.add_column("Name", style="bold")
     table.add_column("Description")
+    table.add_column("Default Model")
     table.add_column("Memory", justify="center")
     
     for bot in bots:
         is_default = " ⭐" if bot.slug == default_bot.slug else ""
         memory_icon = "[green]✓[/green]" if bot.requires_memory else "[dim]✗[/dim]"
+        default_model = bot.default_model or f"[dim]{config.DEFAULT_MODEL_ALIAS or 'global'}[/dim]"
         table.add_row(
             f"{bot.slug}{is_default}",
             bot.name,
             bot.description,
+            default_model,
             memory_icon
         )
     
     console.print(table)
     console.print()
-    console.print(f"[dim]⭐ = default bot | ✓ = requires MariaDB | Use -b/--bot <slug> to select[/dim]")
+    console.print(f"[dim]⭐ = default bot | ✓ = requires database | Use -b/--bot <slug> to select[/dim]")
     console.print()
 
 
@@ -300,10 +468,10 @@ def ensure_user_profile(config: Config, user_id: str = DEFAULT_USER_ID) -> UserP
 
 def parse_arguments(config_obj: Config) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Query LLM models from the command line using model aliases defined in models.yaml")
-    parser.add_argument("-m","--model",type=str,default=config_obj.DEFAULT_MODEL_ALIAS,help=f"Model alias defined in {config_obj.MODELS_CONFIG_PATH}. Supports partial matching. (Default: {config_obj.DEFAULT_MODEL_ALIAS or 'None'})")
-    parser.add_argument("--add-gguf",type=str,metavar="REPO_ID",help="Interactively select, download, and add a GGUF model from a Hugging Face repo ID to models.yaml.")
+    parser.add_argument("-m","--model",type=str,default=None,help=f"Model alias defined in {config_obj.MODELS_CONFIG_PATH}. Supports partial matching. (Default: bot's default or {config_obj.DEFAULT_MODEL_ALIAS or 'None'})")
+    parser.add_argument("--add-gguf",type=str,metavar="REPO_ID",help="(Deprecated: use --add-model gguf) Add a GGUF model from a Hugging Face repo ID.")
     parser.add_argument("--list-models",action="store_true",help="List available model aliases defined in the configuration file and exit.")
-    parser.add_argument("--add-model",type=str,choices=['ollama', 'openai'],metavar="TYPE",help="Refresh model list from a source: 'ollama' (check server availability), 'openai' (query API and update config)")
+    parser.add_argument("--add-model",type=str,choices=['ollama', 'openai', 'gguf'],metavar="TYPE",help="Add models: 'ollama' (refresh from server), 'openai' (query API), 'gguf' (add from HuggingFace repo)")
     parser.add_argument("--delete-model",type=str,metavar="ALIAS",help="Delete the specified model alias from the configuration file after confirmation.")
     parser.add_argument("--config-set", nargs=2, metavar=("KEY", "VALUE"), help="Set a configuration value (e.g., DEFAULT_MODEL_ALIAS) in the .env file.")
     parser.add_argument("--config-list", action="store_true", help="List the current effective configuration settings.")
@@ -314,7 +482,7 @@ def parse_arguments(config_obj: Config) -> argparse.Namespace:
     parser.add_argument("-c", "--command", help="Execute command and add output to question")
     parser.add_argument("--plain", action="store_true", help="Use plain text output")
     parser.add_argument("--no-stream", action="store_true", default=False, help="Disable streaming output")
-    parser.add_argument("--local", action="store_true", help="Use local filesystem for history instead of MariaDB")
+    parser.add_argument("--local", action="store_true", help="Use local filesystem for history instead of database")
     parser.add_argument("-b", "--bot", type=str, default=None, help="Bot to use (nova, spark, mira). Use --list-bots to see all.")
     parser.add_argument("--list-bots", action="store_true", help="List available bots and exit")
     parser.add_argument("--status", action="store_true", help="Show memory system status and configuration")
@@ -395,7 +563,7 @@ def main():
         sys.exit(0)
 
     elif getattr(args, 'status', False):
-        show_memory_status(config_obj)
+        show_status(config_obj, args)
         sys.exit(0)
 
     elif getattr(args, 'list_bots', False):
@@ -436,6 +604,8 @@ def main():
         sys.exit(0)
         return
     if args.add_gguf:
+        # Deprecated: redirect to the consolidated logic
+        console.print("[yellow]Note:[/yellow] --add-gguf is deprecated. Use --add-model gguf instead.")
         success = False
         try:
             success = handle_add_gguf(args.add_gguf, config_obj)
@@ -470,22 +640,51 @@ def main():
                 success = update_models_interactive(config_obj, provider='openai')
             elif args.add_model == 'ollama':
                 success = update_models_interactive(config_obj, provider='ollama')
+            elif args.add_model == 'gguf':
+                # Prompt for HuggingFace repo ID
+                repo_id = Prompt.ask("Enter HuggingFace repo ID (e.g., TheBloke/Llama-2-7B-GGUF)")
+                if repo_id and repo_id.strip():
+                    success = handle_add_gguf(repo_id.strip(), config_obj)
+                else:
+                    console.print("[red]No repo ID provided. Cancelled.[/red]")
+                    success = False
             if success:
-                console.print(f"[green]Model list refresh for '{args.add_model}' completed.[/green]")
+                console.print(f"[green]Model add for '{args.add_model}' completed.[/green]")
             else:
-                console.print(f"[red]Model list refresh for '{args.add_model}' failed or was cancelled.[/red]")
+                console.print(f"[red]Model add for '{args.add_model}' failed or was cancelled.[/red]")
         except KeyboardInterrupt:
-            console.print("[bold red]Model list refresh cancelled.[/bold red]")
+            console.print("[bold red]Model add cancelled.[/bold red]")
             success = False # Ensure failure on interrupt
         except Exception as e:
-            console.print(f"[bold red]Error during model refresh:[/bold red] {e}")
+            console.print(f"[bold red]Error during model add:[/bold red] {e}")
             if config_obj.VERBOSE:
                 traceback.print_exc()
             success = False
         sys.exit(0 if success else 1)
         return
+    
+    # Determine which bot will be used (needed to get bot's default model)
+    bot_manager = BotManager(config_obj)
+    if args.bot:
+        target_bot = bot_manager.get_bot(args.bot)
+        if not target_bot:
+            console.print(f"[bold red]Unknown bot: {args.bot}[/bold red]. Use --list-bots to see available bots.")
+            sys.exit(1)
+    elif args.local:
+        target_bot = bot_manager.get_default_bot(local_mode=True)
+    else:
+        target_bot = bot_manager.get_bot(config_obj.DEFAULT_BOT) or bot_manager.get_default_bot()
+    
+    # Determine effective model: -m flag > bot's default_model > config DEFAULT_MODEL_ALIAS
+    if args.model:
+        effective_model = args.model
+    elif target_bot.default_model:
+        effective_model = target_bot.default_model
+    else:
+        effective_model = config_obj.DEFAULT_MODEL_ALIAS
+    
     model_manager = ModelManager(config_obj)
-    resolved_alias = model_manager.resolve_model_alias(args.model)
+    resolved_alias = model_manager.resolve_model_alias(effective_model)
     if not resolved_alias:
         sys.exit(1)
         return

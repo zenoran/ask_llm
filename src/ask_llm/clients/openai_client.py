@@ -311,6 +311,5 @@ class OpenAIClient(LLMClient):
 
     def get_styling(self) -> tuple[str | None, str]:
         """Return OpenAI specific styling."""
-        panel_border_style = "green"
-        panel_title = f"[bold {panel_border_style}]{self.model}[/bold {panel_border_style}]"
-        return panel_title, panel_border_style
+        # Return None for title to let base class use bot_name, only specify border style
+        return None, "green"

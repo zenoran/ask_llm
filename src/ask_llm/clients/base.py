@@ -18,6 +18,7 @@ class LLMClient(ABC):
     def __init__(self, model: str, config: Config): # Accept config
         self.model = model
         self.config = config # Store config
+        self.bot_name: str | None = None  # Set by AskLLM after initialization
         force_term = not self.config.PLAIN_OUTPUT
         self.console = Console(force_terminal=force_term)
 
@@ -49,7 +50,8 @@ class LLMClient(ABC):
 
     def _print_assistant_message(self, content: str, panel_title: str | None = None, panel_border_style: str = "green", second_part: str | None = None):
         """Prints assistant message. First part in panel, optional second part below."""
-        title = panel_title or f"[bold {panel_border_style}]{self.model}[/bold {panel_border_style}]"
+        display_name = self.bot_name or self.model
+        title = panel_title or f"[bold {panel_border_style}]{display_name}[/bold {panel_border_style}]"
         assistant_panel = Panel(
             Markdown(content.strip()),
             title=title,

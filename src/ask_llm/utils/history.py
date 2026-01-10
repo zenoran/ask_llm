@@ -10,7 +10,7 @@ from rich.rule import Rule
 from .config import Config
 
 if TYPE_CHECKING:
-    from ..memory.mariadb import ShortTermMemoryManager
+    from ..memory.postgresql import PostgreSQLShortTermManager as ShortTermMemoryManager
 
 logger = logging.getLogger(__name__)
 
@@ -48,21 +48,21 @@ class HistoryManager:
             self.history_file = None
             
         if db_backend:
-            logger.debug(f"HistoryManager using MariaDB short-term backend for bot: {bot_id}")
+            logger.debug(f"HistoryManager using PostgreSQL short-term backend for bot: {bot_id}")
         else:
             logger.debug(f"HistoryManager using text file backend for bot: {bot_id} ({self.history_file})")
 
     def load_history(self, since_minutes: int | None = None):
         self.messages = []
         
-        # Use MariaDB backend if available
+        # Use PostgreSQL backend if available
         if self._db_backend:
             try:
                 self.messages = self._db_backend.get_messages(since_minutes=since_minutes)
-                logger.debug(f"Loaded {len(self.messages)} messages from MariaDB short-term memory")
+                logger.debug(f"Loaded {len(self.messages)} messages from PostgreSQL short-term memory")
                 return
             except Exception as e:
-                logger.warning(f"Failed to load from MariaDB, falling back to file: {e}")
+                logger.warning(f"Failed to load from PostgreSQL, falling back to file: {e}")
                 # Fall through to file-based loading
         
         # File-based fallback
@@ -90,7 +90,7 @@ class HistoryManager:
 
     def save_history(self):
         """Persist message history to the history file."""
-        # MariaDB backend saves on add_message, so nothing to do here
+        # PostgreSQL backend saves on add_message, so nothing to do here
         if self._db_backend:
             return
             
@@ -132,12 +132,12 @@ class HistoryManager:
         message = Message(role, content)
         self.messages.append(message)
         
-        # Save to MariaDB if available, otherwise file
+        # Save to PostgreSQL if available, otherwise file
         if self._db_backend:
             try:
                 self._db_backend.add_message(role, content, message.timestamp)
             except Exception as e:
-                logger.warning(f"Failed to save to MariaDB: {e}")
+                logger.warning(f"Failed to save to PostgreSQL: {e}")
                 self.save_history()  # Fall back to file
         else:
             self.save_history()
@@ -187,14 +187,14 @@ class HistoryManager:
         """Clear the conversation history from memory and disk."""
         self.messages = []
         
-        # Clear MariaDB if available
+        # Clear PostgreSQL if available
         if self._db_backend:
             try:
                 self._db_backend.clear()
-                self.client.console.print("[bold red]History cleared (MariaDB).[/bold red]")
+                self.client.console.print("[bold red]History cleared (PostgreSQL).[/bold red]")
                 return
             except Exception as e:
-                logger.warning(f"Failed to clear MariaDB history: {e}")
+                logger.warning(f"Failed to clear PostgreSQL history: {e}")
                 # Fall through to file-based clearing
         
         if self.history_file and os.path.exists(self.history_file):
@@ -217,11 +217,11 @@ class HistoryManager:
         """Remove the last message if it matches the specified role (used for cleanup on error/interrupt)."""
         if self.messages and self.messages[-1].role == role:
             self.messages.pop()
-            # Remove from MariaDB as well if available
+            # Remove from PostgreSQL as well if available
             if self._db_backend:
                 try:
                     self._db_backend.remove_last_message_if_partial(role)
                 except Exception as e:
-                    logger.warning(f"Failed to remove from MariaDB: {e}")
+                    logger.warning(f"Failed to remove from PostgreSQL: {e}")
             else:
                 self.save_history()

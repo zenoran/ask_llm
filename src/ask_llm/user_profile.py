@@ -1,6 +1,6 @@
 """User profile system for ask_llm.
 
-User profiles are stored in MariaDB and contain user preferences and context
+User profiles are stored in PostgreSQL and contain user preferences and context
 that bots can reference to personalize responses.
 
 Uses SQLModel ORM for clean, type-safe database operations.
@@ -71,19 +71,19 @@ class UserProfile(SQLModel, table=True):
 
 
 class UserProfileManager:
-    """Manages user profiles in MariaDB using SQLModel ORM."""
+    """Manages user profiles in PostgreSQL using SQLModel ORM."""
     
     def __init__(self, config: Any):
         self.config = config
         
-        host = getattr(config, 'MARIADB_HOST', 'localhost')
-        port = int(getattr(config, 'MARIADB_PORT', 3306))
-        user = getattr(config, 'MARIADB_USER', 'ask_llm')
-        password = getattr(config, 'MARIADB_PASSWORD', '')
-        database = getattr(config, 'MARIADB_DATABASE', 'ask_llm')
+        host = getattr(config, 'POSTGRES_HOST', 'localhost')
+        port = int(getattr(config, 'POSTGRES_PORT', 5432))
+        user = getattr(config, 'POSTGRES_USER', 'askllm')
+        password = getattr(config, 'POSTGRES_PASSWORD', '')
+        database = getattr(config, 'POSTGRES_DATABASE', 'askllm')
         
         encoded_password = quote_plus(password)
-        connection_url = f"mysql+mysqlconnector://{user}:{encoded_password}@{host}:{port}/{database}"
+        connection_url = f"postgresql+psycopg2://{user}:{encoded_password}@{host}:{port}/{database}"
         
         self.engine = create_engine(connection_url, echo=False)
         self._ensure_table_exists()

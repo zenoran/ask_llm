@@ -9,7 +9,7 @@ class MemoryBackend(ABC):
     
     Memory backends provide persistent storage and semantic retrieval of
     conversation history. Implementations can use various storage engines
-    (MariaDB, PostgreSQL, SQLite, etc.) and retrieval methods (fulltext search,
+    (PostgreSQL, SQLite, etc.) and retrieval methods (fulltext search,
     vector similarity, etc.).
     
     All backends must implement the core methods: add, search, clear, list, and stats.

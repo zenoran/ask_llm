@@ -13,14 +13,14 @@ To implement a custom memory backend:
     your_backend_name = "your_package.module:YourBackendClass"
 
 Included backends:
-- MariaDBMemoryBackend: Uses MariaDB with fulltext search (requires mysql-connector-python)
+- PostgreSQLMemoryBackend: Uses PostgreSQL with pgvector for semantic search
 """
 
 from .base import MemoryBackend
 
-# Lazy import for MariaDB backend (requires mysql-connector-python)
-def get_mariadb_backend():
-    from .mariadb import MariaDBMemoryBackend
-    return MariaDBMemoryBackend
+# Lazy import for PostgreSQL backend (requires psycopg2)
+def get_postgresql_backend():
+    from .postgresql import PostgreSQLMemoryBackend
+    return PostgreSQLMemoryBackend
 
-__all__ = ["MemoryBackend", "get_mariadb_backend"]
+__all__ = ["MemoryBackend", "get_postgresql_backend"]
