@@ -12,6 +12,7 @@ from ask_llm.model_manager import list_models, update_models_interactive, delete
 from ask_llm.gguf_handler import handle_add_gguf
 from ask_llm.bots import BotManager
 from ask_llm.user_profile import UserProfileManager, UserProfile, DEFAULT_USER_ID
+from ask_llm.utils.streaming import render_streaming_response, render_complete_response
 import logging
 from pathlib import Path
 from rich.table import Table
@@ -48,7 +49,6 @@ def query_via_service(
     
     Returns True if query was handled by service, False if service unavailable.
     """
-    from rich.panel import Panel
     from rich.markdown import Markdown
     from rich.align import Align
     
@@ -70,63 +70,26 @@ def query_via_service(
         "spark": ("yellow", "yellow"),
     }
     title_style, border_style = panel_styles.get(bot_id or "", ("green", "green"))
+    panel_title = f"[bold {title_style}]{bot_name}[/bold {title_style}]"
     
     try:
         if stream:
-            # Stream response
-            full_response = ""
-            if plaintext_output:
-                for chunk in client.chat_completion(
-                    messages=messages,
-                    model=model,
-                    bot_id=bot_id,
-                    user_id=user_id,
-                    stream=True,
-                ):
-                    print(chunk, end="", flush=True)
-                    full_response += chunk
-                print()  # Final newline
-            else:
-                # Stream with Rich Live display for real-time updates
-                from rich.live import Live
-                
-                with Live(
-                    Panel(
-                        Markdown("▌"),
-                        title=f"[bold {title_style}]{bot_name}[/bold {title_style}]",
-                        border_style=border_style,
-                        padding=(1, 2),
-                    ),
-                    console=console,
-                    refresh_per_second=10,
-                    transient=True,
-                ) as live:
-                    for chunk in client.chat_completion(
-                        messages=messages,
-                        model=model,
-                        bot_id=bot_id,
-                        user_id=user_id,
-                        stream=True,
-                    ):
-                        full_response += chunk
-                        live.update(
-                            Panel(
-                                Markdown(full_response + "▌"),
-                                title=f"[bold {title_style}]{bot_name}[/bold {title_style}]",
-                                border_style=border_style,
-                                padding=(1, 2),
-                            )
-                        )
-                
-                # Final display without cursor
-                if full_response:
-                    panel = Panel(
-                        Markdown(full_response.strip()),
-                        title=f"[bold {title_style}]{bot_name}[/bold {title_style}]",
-                        border_style=border_style,
-                        padding=(1, 2),
-                    )
-                    console.print(Align(panel, align="left"))
+            # Stream response using shared streaming utilities
+            stream_iterator = client.chat_completion(
+                messages=messages,
+                model=model,
+                bot_id=bot_id,
+                user_id=user_id,
+                stream=True,
+            )
+            
+            render_streaming_response(
+                stream_iterator=stream_iterator,
+                console=console,
+                panel_title=panel_title,
+                panel_border_style=border_style,
+                plaintext_output=plaintext_output,
+            )
             return True
         else:
             response = client.chat_completion_full(
@@ -139,13 +102,13 @@ def query_via_service(
                 if plaintext_output:
                     print(response)
                 else:
-                    panel = Panel(
-                        Markdown(response.strip()),
-                        title=f"[bold {title_style}]{bot_name}[/bold {title_style}]",
-                        border_style=border_style,
-                        padding=(1, 2),
+                    # Use shared render function for split display
+                    render_complete_response(
+                        response=response,
+                        console=console,
+                        panel_title=panel_title,
+                        panel_border_style=border_style,
                     )
-                    console.print(Align(panel, align="left"))
                 return True
     except Exception as e:
         logging.debug(f"Service query failed: {e}")
