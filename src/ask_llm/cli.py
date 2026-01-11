@@ -4,7 +4,7 @@ import traceback
 import sys  # Import sys for exit codes
 from rich.console import Console
 from rich.prompt import Prompt
-from ask_llm.utils.config import Config
+from ask_llm.utils.config import Config, has_database_credentials
 from ask_llm.utils.config import set_config_value
 from ask_llm.utils.input_handler import MultilineInputHandler
 from ask_llm.core import AskLLM
@@ -535,6 +535,12 @@ def regenerate_embeddings(config: Config, args: argparse.Namespace | None = None
     
     console.print(f"\n[bold]Regenerating Embeddings for Bot: {bot_id}[/bold]\n")
     
+    # Check for database credentials
+    if not has_database_credentials(config):
+        console.print("[red]Database credentials not configured.[/red]")
+        console.print("[dim]Set ASK_LLM_POSTGRES_PASSWORD in ~/.config/ask-llm/.env[/dim]")
+        return
+    
     try:
         from .memory.postgresql import PostgreSQLMemoryBackend
         backend = PostgreSQLMemoryBackend(config, bot_id)
@@ -583,6 +589,12 @@ def consolidate_memories(config: Config, args: argparse.Namespace | None = None)
     
     mode_str = "[yellow](DRY RUN)[/yellow] " if dry_run else ""
     console.print(f"\n[bold]{mode_str}Memory Consolidation for Bot: {bot_id}[/bold]\n")
+    
+    # Check for database credentials
+    if not has_database_credentials(config):
+        console.print("[red]Database credentials not configured.[/red]")
+        console.print("[dim]Set ASK_LLM_POSTGRES_PASSWORD in ~/.config/ask-llm/.env[/dim]")
+        return
     
     try:
         from .memory.postgresql import PostgreSQLMemoryBackend
@@ -726,6 +738,11 @@ def show_bots(config: Config):
 
 def show_user_profile(config: Config, user_id: str = DEFAULT_USER_ID):
     """Display user profile."""
+    if not has_database_credentials(config):
+        console.print("[yellow]User profiles require database connection.[/yellow]")
+        console.print("[dim]Set ASK_LLM_POSTGRES_PASSWORD in ~/.config/ask-llm/.env[/dim]")
+        return
+    
     try:
         manager = UserProfileManager(config)
         profile = manager.get_profile(user_id)
@@ -777,6 +794,11 @@ def show_user_profile(config: Config, user_id: str = DEFAULT_USER_ID):
 
 def show_users(config: Config):
     """Display all user profiles."""
+    if not has_database_credentials(config):
+        console.print("[yellow]User profiles require database connection.[/yellow]")
+        console.print("[dim]Set ASK_LLM_POSTGRES_PASSWORD in ~/.config/ask-llm/.env[/dim]")
+        return
+    
     try:
         manager = UserProfileManager(config)
         profiles = manager.list_all_profiles()
@@ -815,6 +837,11 @@ def show_users(config: Config):
 
 def run_user_profile_setup(config: Config, user_id: str = DEFAULT_USER_ID) -> bool:
     """Run interactive user profile setup wizard."""
+    if not has_database_credentials(config):
+        console.print("[yellow]User profiles require database connection.[/yellow]")
+        console.print("[dim]Set ASK_LLM_POSTGRES_PASSWORD in ~/.config/ask-llm/.env[/dim]")
+        return False
+    
     console.print(Panel.fit("[bold cyan]User Profile Setup[/bold cyan]", border_style="cyan"))
     console.print()
     console.print(f"[dim]Setting up profile for user: {user_id}[/dim]")
@@ -876,8 +903,12 @@ def run_user_profile_setup(config: Config, user_id: str = DEFAULT_USER_ID) -> bo
 def ensure_user_profile(config: Config, user_id: str = DEFAULT_USER_ID) -> UserProfile | None:
     """Ensure user profile exists, prompting for setup if needed.
     
-    Returns the profile, or None if setup was cancelled/failed.
+    Returns the profile, or None if setup was cancelled/failed or database unavailable.
     """
+    if not has_database_credentials(config):
+        logging.getLogger(__name__).debug("Database credentials not configured - skipping user profile")
+        return None
+    
     try:
         manager = UserProfileManager(config)
         profile, is_new = manager.get_or_create_profile(user_id)
@@ -1028,6 +1059,10 @@ def main():
         sys.exit(0 if success else 1)
     
     elif getattr(args, 'user_profile_set', None):
+        if not has_database_credentials(config_obj):
+            console.print("[yellow]User profiles require database connection.[/yellow]")
+            console.print("[dim]Set ASK_LLM_POSTGRES_PASSWORD in ~/.config/ask-llm/.env[/dim]")
+            sys.exit(1)
         try:
             field, value = args.user_profile_set.split("=", 1)
             field = field.strip()

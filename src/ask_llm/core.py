@@ -6,7 +6,7 @@ import uuid
 from difflib import SequenceMatcher
 from importlib.metadata import entry_points
 from rich.console import Console
-from .utils.config import Config, is_huggingface_available, is_llama_cpp_available
+from .utils.config import Config, is_huggingface_available, is_llama_cpp_available, has_database_credentials
 from .utils.history import HistoryManager, Message
 from .clients import LLMClient
 from .bots import BotManager, get_system_prompt
@@ -75,13 +75,16 @@ class AskLLM:
         # Set bot name on client for panel display
         self.client.bot_name = self.bot.name
 
-        # Initialize memory backends unless in local mode
+        # Initialize memory backends unless in local mode or credentials not configured
         # - Long-term memory (memory_backend): Only for bots with requires_memory=true
         #   This triggers LLM-based memory extraction which has overhead
         # - Short-term memory (short_term_backend): For all bots when DB is available
         #   This is just session history storage with no LLM overhead
+        self._db_available = False  # Track if database is available for other components
         if self.local_mode:
             logger.debug("Local mode enabled - using filesystem for history, skipping database")
+        elif not has_database_credentials(config):
+            logger.debug("Database credentials not configured (POSTGRES_PASSWORD not set) - using filesystem for history")
         else:
             available_backends = discover_memory_backends()
             if available_backends:
@@ -101,6 +104,8 @@ class AskLLM:
                     if hasattr(backend_class, 'get_short_term_manager'):
                         self.short_term_backend = backend_class.get_short_term_manager(config=self.config, bot_id=self.bot_id)
                         logger.debug(f"Short-term memory initialized for bot: {self.bot_id}")
+                    
+                    self._db_available = True
                 except Exception as e:
                     logger.exception(f"Failed to initialize memory backend: {e}")
                     if self.config.VERBOSE:
@@ -111,8 +116,8 @@ class AskLLM:
                 logger.debug("No memory backends discovered, using text file for history.")
 
         # Set system message from the bot's configured prompt
-        # Inject user profile context before the bot's system prompt if not in local mode
-        if not self.local_mode:
+        # Inject user profile context before the bot's system prompt if database is available
+        if self._db_available:
             try:
                 profile_manager = UserProfileManager(config)
                 self.user_profile, _ = profile_manager.get_or_create_profile(self.user_id)
