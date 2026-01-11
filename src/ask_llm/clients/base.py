@@ -171,8 +171,8 @@ class LLMClient(ABC):
                             first_part, remainder = first_part_buffer.split(split_marker, 1)
                             self._print_assistant_message(first_part, panel_title=panel_title, panel_border_style=panel_border_style)
                             first_part_printed = True
-                            prefixed = ("\n\n" + remainder) if remainder else "\n\n"
-                            visible_text, overflow_buffer = _split_visible(prefixed)
+                            # Don't add back the \n\n - it causes extra blank lines in markdown rendering
+                            visible_text, overflow_buffer = _split_visible(remainder.lstrip('\n'))
                             _start_live(visible_text)
                             if overflow_buffer:
                                 live_frozen = True
