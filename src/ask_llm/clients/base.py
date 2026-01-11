@@ -8,8 +8,12 @@ from abc import ABC, abstractmethod
 from typing import Iterator, List, Any
 import sys
 import time
+import platform
 from ..models.message import Message
 from ..utils.config import Config # Import Config for type hinting
+
+# Detect Windows for streaming workarounds
+IS_WINDOWS = platform.system() == "Windows"
 
 class LLMClient(ABC):
     """Abstract base class for LLM clients."""
@@ -95,7 +99,11 @@ class LLMClient(ABC):
         panel_title: str | None = None,
         panel_border_style: str = "green",
     ) -> str:
-        """Handles streaming. First part (pre-\n\n) in panel, rest via Rich Live."""
+        """Handles streaming. First part (pre-\n\n) in panel, rest below.
+        
+        On Windows, uses a simpler approach without Rich Live to avoid
+        terminal rendering issues with ANSI escape codes.
+        """
         total_response = ""
         start_time = time.time()
         token_count = 0
@@ -117,6 +125,11 @@ class LLMClient(ABC):
             except Exception as e:
                 self.console.print(f"\n[bold red]Error during plaintext streaming:[/bold red] {e}")
                 total_response += f"\nERROR: {e}"
+        elif IS_WINDOWS:
+            # Windows: Simple streaming without Live display to avoid rendering issues
+            total_response = self._handle_streaming_windows(
+                stream_iterator, panel_title, panel_border_style
+            )
         else:
             split_marker = "\n\n"
             first_part_buffer = ""
@@ -205,5 +218,74 @@ class LLMClient(ABC):
                     final_content = visible_text + overflow_buffer
                     if final_content.strip():
                         self.console.print(Align(Markdown(final_content.strip()), align="left", pad=False))
+        
+        return total_response
+
+    def _handle_streaming_windows(
+        self,
+        stream_iterator: Iterator[str],
+        panel_title: str | None = None,
+        panel_border_style: str = "green",
+    ) -> str:
+        """Windows-specific streaming handler.
+        
+        Uses simple print-based streaming to avoid Rich Live display issues
+        on Windows terminals. Collects full response, then renders with markdown.
+        """
+        total_response = ""
+        split_marker = "\n\n"
+        first_part_buffer = ""
+        first_part_printed = False
+        remainder_buffer = ""
+        
+        try:
+            # Show a simple cursor while streaming
+            print("▌ ", end='', flush=True)
+            
+            for content in stream_iterator:
+                if not content:
+                    continue
+                total_response += content
+                
+                if not first_part_printed:
+                    first_part_buffer += content
+                    if split_marker in first_part_buffer:
+                        first_part, remainder = first_part_buffer.split(split_marker, 1)
+                        # Clear the cursor line and print panel
+                        print("\r\033[K", end='', flush=True)
+                        self._print_assistant_message(first_part, panel_title=panel_title, panel_border_style=panel_border_style)
+                        first_part_printed = True
+                        remainder_buffer = remainder
+                        # Show streaming indicator for remainder
+                        if remainder:
+                            print(remainder, end='', flush=True)
+                else:
+                    remainder_buffer += content
+                    print(content, end='', flush=True)
+            
+            # Finalize output
+            if not first_part_printed:
+                # Never found split marker, print everything in panel
+                print("\r\033[K", end='', flush=True)
+                self._print_assistant_message(first_part_buffer, panel_title=panel_title, panel_border_style=panel_border_style)
+            elif remainder_buffer.strip():
+                # Clear streaming text, render final markdown
+                print("\r\033[K", end='')
+                # Move up to clear streamed lines
+                line_count = remainder_buffer.count('\n') + 1
+                for _ in range(line_count):
+                    print("\033[A\033[K", end='')
+                print(flush=True)
+                self.console.print(Align(Markdown(remainder_buffer.strip()), align="left", pad=False))
+            else:
+                print(flush=True)
+                
+        except KeyboardInterrupt:
+            print()
+            self.console.print("[bold yellow]Interrupted![/bold yellow]")
+        except Exception as e:
+            print()
+            self.console.print(f"[bold red]Error during streaming:[/bold red] {e}")
+            total_response += f"\nERROR: {e}"
         
         return total_response
