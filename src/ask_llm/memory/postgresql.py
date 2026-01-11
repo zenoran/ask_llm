@@ -956,30 +956,10 @@ class PostgreSQLMemoryBackend(MemoryBackend):
     def search(self, query: str, n_results: int = 5, min_relevance: float = 0.0) -> list[dict] | None:
         """Search for relevant memories (implements MemoryBackend interface).
         
-        When the background service is available, uses semantic embedding search
-        via the service (fast - model is already loaded). Otherwise falls back
-        to text-based search (also fast, but less accurate).
+        Uses text-based search for memory retrieval. Semantic embedding search
+        is only available when running through the background service (--service mode).
         """
-        results = None
-        
-        # Try semantic search via service first (fast - model already loaded)
-        try:
-            from ..service.client import get_service_client
-            client = get_service_client()
-            if client.is_available():
-                results = client.search_memories(
-                    query=query,
-                    bot_id=self.bot_id,
-                    n_results=n_results,
-                    min_relevance=min_relevance,
-                )
-                if results:
-                    logger.debug(f"Found {len(results)} memories via service semantic search")
-                    return results
-        except Exception as e:
-            logger.debug(f"Service search unavailable: {e}")
-        
-        # Fall back to local text search (fast, no model loading)
+        # Use text search (fast, no model loading required)
         text_results = self.search_memories_by_text(query, n_results, min_importance=min_relevance)
         if text_results:
             logger.debug(f"Found {len(text_results)} memories via text search")

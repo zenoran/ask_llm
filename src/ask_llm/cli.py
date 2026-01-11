@@ -1263,8 +1263,16 @@ def run_app(args: argparse.Namespace, config_obj: Config, resolved_alias: str):
     if not args.local:
         user_profile = ensure_user_profile(config_obj, user_id)
     
-    # Check if we're using service mode - skip local AskLLM initialization
-    use_service = getattr(args, 'service', False)
+    # Check if we're using service mode - explicit flag or config default
+    # --local takes precedence and disables service mode
+    use_service = False
+    if args.local:
+        use_service = False
+    elif getattr(args, 'service', False):
+        use_service = True
+    elif config_obj.USE_SERVICE:
+        use_service = True
+    
     ask_llm = None
     
     if not use_service:

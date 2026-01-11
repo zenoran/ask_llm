@@ -63,6 +63,7 @@ class ServiceClient:
         self.socket_path = Path(socket_path) if socket_path else DEFAULT_SOCKET_PATH
         self.http_url = http_url or f"http://localhost:{DEFAULT_HTTP_PORT}"
         self.timeout = timeout
+        self._availability_timeout = 0.5  # Fast timeout for availability checks
         self._available: bool | None = None
         self._last_check: float = 0
         self._check_interval = 30.0  # Re-check availability every 30 seconds
@@ -81,29 +82,36 @@ class ServiceClient:
         return self._available
     
     def _check_availability(self) -> bool:
-        """Actually check if service is reachable."""
-        # Try Unix socket first
+        """Actually check if service is reachable.
+        
+        Uses raw TCP socket connect which fails immediately on connection refused,
+        avoiding HTTP timeout delays.
+        """
+        # Try Unix socket first (Linux/macOS)
         if self.socket_path.exists():
             try:
                 sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-                sock.settimeout(self.timeout)
+                sock.setblocking(False)
                 sock.connect(str(self.socket_path))
                 sock.close()
                 logger.debug(f"Background service available via Unix socket: {self.socket_path}")
                 return True
-            except (socket.error, OSError) as e:
+            except (socket.error, OSError, BlockingIOError) as e:
                 logger.debug(f"Unix socket unavailable: {e}")
         
-        # Try HTTP
+        # Try raw TCP connect (fast - fails immediately if port not listening)
         try:
-            import urllib.request
-            req = urllib.request.Request(f"{self.http_url}/health", method="GET")
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                if resp.status == 200:
-                    logger.debug(f"Background service available via HTTP: {self.http_url}")
-                    return True
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(0.1)  # 100ms timeout max
+            result = sock.connect_ex(("127.0.0.1", DEFAULT_HTTP_PORT))
+            sock.close()
+            if result == 0:
+                logger.debug(f"Background service available via TCP port {DEFAULT_HTTP_PORT}")
+                return True
+            else:
+                logger.debug(f"TCP port {DEFAULT_HTTP_PORT} not listening (errno={result})")
         except Exception as e:
-            logger.debug(f"HTTP service unavailable: {e}")
+            logger.debug(f"TCP check failed: {e}")
         
         return False
     

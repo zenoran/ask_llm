@@ -91,6 +91,7 @@ class Config(BaseSettings):
     MEMORY_CONSOLIDATION_THRESHOLD: float = Field(default=0.75, description="Cosine similarity threshold for clustering similar memories (0.0-1.0)")
 
     # --- Service Settings --- #
+    USE_SERVICE: bool = Field(default=False, description="Route queries through the background service by default (same as --service flag)")
     SERVICE_MODEL: Optional[str] = Field(default=None, description="Default model alias for the background service API")
     SERVICE_HOST: str = Field(default="127.0.0.1", description="Host for the background service to bind to")
     SERVICE_PORT: int = Field(default=8642, description="Port for the background service to listen on")
