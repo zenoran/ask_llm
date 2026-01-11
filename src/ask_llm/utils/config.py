@@ -253,4 +253,19 @@ def set_config_value(key: str, value: str, config: Config) -> bool:
         console.print(f"[bold red]Error writing to {dotenv_path}:[/bold red] {e}")
         return False
 
+
+def has_database_credentials(cfg: Config | None = None) -> bool:
+    """Check if database credentials are configured.
+    
+    Returns True if POSTGRES_PASSWORD is set (non-empty string).
+    Other credentials have defaults so password is the key indicator.
+    
+    Args:
+        cfg: Config instance to check. If None, uses the global config.
+    """
+    if cfg is None:
+        cfg = config
+    return bool(cfg.POSTGRES_PASSWORD and cfg.POSTGRES_PASSWORD.strip())
+
+
 config = Config()

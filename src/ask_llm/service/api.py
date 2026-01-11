@@ -22,7 +22,7 @@ from typing import Any, AsyncIterator, Literal
 
 from pydantic import BaseModel, Field
 
-from ..utils.config import Config
+from ..utils.config import Config, has_database_credentials
 from .tasks import Task, TaskResult, TaskStatus, TaskType
 
 logger = logging.getLogger(__name__)
@@ -253,15 +253,20 @@ class BackgroundService:
     def get_memory_backend(self, bot_id: str):
         """Get or create memory backend for a bot."""
         if bot_id not in self._memory_backends:
-            try:
-                from ..memory.postgresql import PostgreSQLMemoryBackend
-                self._memory_backends[bot_id] = PostgreSQLMemoryBackend(
-                    config=self.config,
-                    bot_id=bot_id,
-                )
-            except Exception as e:
-                logger.warning(f"Memory backend unavailable for {bot_id}: {e}")
+            # Check credentials before attempting connection
+            if not has_database_credentials(self.config):
+                logger.debug(f"Database credentials not configured - memory backend unavailable for {bot_id}")
                 self._memory_backends[bot_id] = None
+            else:
+                try:
+                    from ..memory.postgresql import PostgreSQLMemoryBackend
+                    self._memory_backends[bot_id] = PostgreSQLMemoryBackend(
+                        config=self.config,
+                        bot_id=bot_id,
+                    )
+                except Exception as e:
+                    logger.warning(f"Memory backend unavailable for {bot_id}: {e}")
+                    self._memory_backends[bot_id] = None
         return self._memory_backends.get(bot_id)
     
     def _get_ask_llm(self, model_alias: str, bot_id: str, user_id: str, local_mode: bool = False):

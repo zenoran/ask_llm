@@ -4,7 +4,7 @@ import traceback
 import sys  # Import sys for exit codes
 from rich.console import Console
 from rich.prompt import Prompt
-from ask_llm.utils.config import Config
+from ask_llm.utils.config import Config, has_database_credentials
 from ask_llm.utils.config import set_config_value
 from ask_llm.utils.input_handler import MultilineInputHandler
 from ask_llm.core import AskLLM
@@ -386,32 +386,34 @@ def show_status(config: Config, args: argparse.Namespace | None = None):
     table.add_row("", "")
     
     # --- Memory Section ---
-    db_status = "[red]Not Configured[/red]"
+    db_status = "[yellow]Not Configured[/yellow]"
     long_term_count = 0
     short_term_count = 0
-    long_term_table = ""
-    short_term_table = ""
+    messages_count = 0
     
     backends = discover_memory_backends()
     if 'postgresql' in backends:
-        try:
-            backend_class = backends['postgresql']
-            backend = backend_class(config, bot_id=default_bot.slug)
-            db_stats = backend.stats()
-            long_term_count = db_stats.get('memories', {}).get('total_count', 0)
-            messages_count = db_stats.get('messages', {}).get('total_count', 0)
-            db_status = f"[green]Connected[/green] ({config.POSTGRES_HOST}:{config.POSTGRES_PORT}/{config.POSTGRES_DATABASE})"
-            
-            short_term_mgr = backend_class.get_short_term_manager(config, bot_id=default_bot.slug)
-            short_term_count = short_term_mgr.count()
-        except Exception as e:
-            db_status = f"[red]Error: {e}[/red]"
+        if not has_database_credentials(config):
+            db_status = "[yellow]Not Configured[/yellow] [dim](set ASK_LLM_POSTGRES_PASSWORD)[/dim]"
+        else:
+            try:
+                backend_class = backends['postgresql']
+                backend = backend_class(config, bot_id=default_bot.slug)
+                db_stats = backend.stats()
+                long_term_count = db_stats.get('memories', {}).get('total_count', 0)
+                messages_count = db_stats.get('messages', {}).get('total_count', 0)
+                db_status = f"[green]Connected[/green] ({config.POSTGRES_HOST}:{config.POSTGRES_PORT}/{config.POSTGRES_DATABASE})"
+                
+                short_term_mgr = backend_class.get_short_term_manager(config, bot_id=default_bot.slug)
+                short_term_count = short_term_mgr.count()
+            except Exception as e:
+                db_status = f"[red]Error: {e}[/red]"
     else:
         db_status = "[yellow]Backend not available[/yellow]"
     
     table.add_row("[bold]Memory[/bold]", "")
     table.add_row("  PostgreSQL Backend", db_status)
-    table.add_row("  Messages (permanent)", f"[green]{messages_count}[/green]" if 'messages_count' in dir() and messages_count else "[dim]0[/dim]")
+    table.add_row("  Messages (permanent)", f"[green]{messages_count}[/green]" if messages_count else "[dim]0[/dim]")
     table.add_row("  Memories (distilled)", f"[green]{long_term_count}[/green]" if long_term_count else "[dim]0[/dim]")
     table.add_row("  Session messages", f"[green]{short_term_count}[/green]" if short_term_count else "[dim]0[/dim]")
     table.add_row("", "")
@@ -495,6 +497,8 @@ def show_status(config: Config, args: argparse.Namespace | None = None):
             table.add_row("  Memory Backend", "[green]✓ PostgreSQL + pgvector[/green]")
         except ImportError:
             table.add_row("  Memory Backend", "[yellow]⚠ pgvector Python package not installed[/yellow]")
+    elif 'postgresql' in backends and not has_database_credentials(config):
+        table.add_row("  Memory Backend", "[dim]○ Not configured (set ASK_LLM_POSTGRES_PASSWORD)[/dim]")
     elif 'postgresql' in backends:
         table.add_row("  Memory Backend", "[red]✗ PostgreSQL connection failed[/red]")
     else:
@@ -534,6 +538,12 @@ def regenerate_embeddings(config: Config, args: argparse.Namespace | None = None
     bot_id = getattr(args, 'bot', None) or config.DEFAULT_BOT
     
     console.print(f"\n[bold]Regenerating Embeddings for Bot: {bot_id}[/bold]\n")
+    
+    # Check for database credentials
+    if not has_database_credentials(config):
+        console.print("[red]Database credentials not configured.[/red]")
+        console.print("[dim]Set ASK_LLM_POSTGRES_PASSWORD in ~/.config/ask-llm/.env[/dim]")
+        return
     
     try:
         from .memory.postgresql import PostgreSQLMemoryBackend
@@ -583,6 +593,12 @@ def consolidate_memories(config: Config, args: argparse.Namespace | None = None)
     
     mode_str = "[yellow](DRY RUN)[/yellow] " if dry_run else ""
     console.print(f"\n[bold]{mode_str}Memory Consolidation for Bot: {bot_id}[/bold]\n")
+    
+    # Check for database credentials
+    if not has_database_credentials(config):
+        console.print("[red]Database credentials not configured.[/red]")
+        console.print("[dim]Set ASK_LLM_POSTGRES_PASSWORD in ~/.config/ask-llm/.env[/dim]")
+        return
     
     try:
         from .memory.postgresql import PostgreSQLMemoryBackend
@@ -726,6 +742,11 @@ def show_bots(config: Config):
 
 def show_user_profile(config: Config, user_id: str = DEFAULT_USER_ID):
     """Display user profile."""
+    if not has_database_credentials(config):
+        console.print("[yellow]User profiles require database connection.[/yellow]")
+        console.print("[dim]Set ASK_LLM_POSTGRES_PASSWORD in ~/.config/ask-llm/.env[/dim]")
+        return
+    
     try:
         manager = UserProfileManager(config)
         profile = manager.get_profile(user_id)
@@ -777,6 +798,11 @@ def show_user_profile(config: Config, user_id: str = DEFAULT_USER_ID):
 
 def show_users(config: Config):
     """Display all user profiles."""
+    if not has_database_credentials(config):
+        console.print("[yellow]User profiles require database connection.[/yellow]")
+        console.print("[dim]Set ASK_LLM_POSTGRES_PASSWORD in ~/.config/ask-llm/.env[/dim]")
+        return
+    
     try:
         manager = UserProfileManager(config)
         profiles = manager.list_all_profiles()
@@ -815,6 +841,11 @@ def show_users(config: Config):
 
 def run_user_profile_setup(config: Config, user_id: str = DEFAULT_USER_ID) -> bool:
     """Run interactive user profile setup wizard."""
+    if not has_database_credentials(config):
+        console.print("[yellow]User profiles require database connection.[/yellow]")
+        console.print("[dim]Set ASK_LLM_POSTGRES_PASSWORD in ~/.config/ask-llm/.env[/dim]")
+        return False
+    
     console.print(Panel.fit("[bold cyan]User Profile Setup[/bold cyan]", border_style="cyan"))
     console.print()
     console.print(f"[dim]Setting up profile for user: {user_id}[/dim]")
@@ -876,8 +907,12 @@ def run_user_profile_setup(config: Config, user_id: str = DEFAULT_USER_ID) -> bo
 def ensure_user_profile(config: Config, user_id: str = DEFAULT_USER_ID) -> UserProfile | None:
     """Ensure user profile exists, prompting for setup if needed.
     
-    Returns the profile, or None if setup was cancelled/failed.
+    Returns the profile, or None if setup was cancelled/failed or database unavailable.
     """
+    if not has_database_credentials(config):
+        logging.getLogger(__name__).debug("Database credentials not configured - skipping user profile")
+        return None
+    
     try:
         manager = UserProfileManager(config)
         profile, is_new = manager.get_or_create_profile(user_id)
@@ -1028,6 +1063,10 @@ def main():
         sys.exit(0 if success else 1)
     
     elif getattr(args, 'user_profile_set', None):
+        if not has_database_credentials(config_obj):
+            console.print("[yellow]User profiles require database connection.[/yellow]")
+            console.print("[dim]Set ASK_LLM_POSTGRES_PASSWORD in ~/.config/ask-llm/.env[/dim]")
+            sys.exit(1)
         try:
             field, value = args.user_profile_set.split("=", 1)
             field = field.strip()
