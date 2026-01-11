@@ -956,33 +956,33 @@ class PostgreSQLMemoryBackend(MemoryBackend):
     def search(self, query: str, n_results: int = 5, min_relevance: float = 0.0) -> list[dict] | None:
         """Search for relevant memories (implements MemoryBackend interface).
         
-        Uses semantic embedding search for better matching. Falls back to text
-        search if embeddings aren't available, then to raw messages.
+        When the background service is available, uses semantic embedding search
+        via the service (fast - model is already loaded). Otherwise falls back
+        to text-based search (also fast, but less accurate).
         """
-        results = []
+        results = None
         
-        # Try embedding-based search first (semantic matching)
+        # Try semantic search via service first (fast - model already loaded)
         try:
-            from .embeddings import generate_embedding
-            query_embedding = generate_embedding(query, self.embedding_model)
-            
-            if query_embedding:
-                results = self.search_memories_by_embedding(
-                    query_embedding, n_results, min_importance=min_relevance
+            from ..service.client import get_service_client
+            client = get_service_client()
+            if client.is_available():
+                results = client.search_memories(
+                    query=query,
+                    bot_id=self.bot_id,
+                    n_results=n_results,
+                    min_relevance=min_relevance,
                 )
                 if results:
-                    logger.debug(f"Found {len(results)} memories via embedding search")
+                    logger.debug(f"Found {len(results)} memories via service semantic search")
+                    return results
         except Exception as e:
-            logger.debug(f"Embedding search not available: {e}")
+            logger.debug(f"Service search unavailable: {e}")
         
-        # Fallback to text search if embedding search returned nothing
-        if not results:
-            results = self.search_memories_by_text(query, n_results, min_importance=min_relevance)
-            if results:
-                logger.debug(f"Found {len(results)} memories via text search")
-        
-        if results:
-            # Format for backwards compatibility
+        # Fall back to local text search (fast, no model loading)
+        text_results = self.search_memories_by_text(query, n_results, min_importance=min_relevance)
+        if text_results:
+            logger.debug(f"Found {len(text_results)} memories via text search")
             return [
                 {
                     "id": r["id"],
@@ -994,7 +994,7 @@ class PostgreSQLMemoryBackend(MemoryBackend):
                     },
                     "relevance": r.get("similarity", r.get("relevance", r["importance"])),
                 }
-                for r in results
+                for r in text_results
             ]
         
         # Fallback: search raw messages if no memories exist

@@ -147,6 +147,42 @@ class HealthResponse(BaseModel):
     status: str = "ok"
 
 
+class MemorySearchRequest(BaseModel):
+    """Request for semantic memory search."""
+    query: str
+    bot_id: str = "nova"
+    n_results: int = Field(default=5, ge=1, le=50)
+    min_relevance: float = Field(default=0.0, ge=0.0, le=1.0)
+
+
+class MemorySearchResult(BaseModel):
+    """A single memory search result."""
+    id: str
+    content: str
+    memory_type: str
+    importance: float
+    relevance: float
+    source_message_ids: list[str] = []
+
+
+class MemorySearchResponse(BaseModel):
+    """Response for memory search."""
+    results: list[MemorySearchResult]
+    search_type: str = "embedding"  # "embedding" or "text"
+
+
+class GenerateEmbeddingRequest(BaseModel):
+    """Request to generate an embedding."""
+    text: str
+
+
+class GenerateEmbeddingResponse(BaseModel):
+    """Response with generated embedding."""
+    embedding: list[float]
+    dimension: int
+    model: str
+
+
 # =============================================================================
 # Background Service
 # =============================================================================
@@ -805,6 +841,94 @@ try:
         else:
             return TaskStatusResponse(task_id=task_id, status="pending")
 
+    # -------------------------------------------------------------------------
+    # Memory Endpoints
+    # -------------------------------------------------------------------------
+
+    @app.post("/v1/memory/search", response_model=MemorySearchResponse, tags=["Memory"])
+    async def search_memories(request: MemorySearchRequest):
+        """
+        Search memories using semantic embedding search.
+        
+        The service keeps the embedding model loaded, so this is fast after
+        the first request. Use this instead of local search to avoid loading
+        the model in the CLI process.
+        """
+        service = get_service()
+        backend = service.get_memory_backend(request.bot_id)
+        
+        if not backend:
+            raise HTTPException(
+                status_code=503,
+                detail=f"Memory backend not available for bot: {request.bot_id}"
+            )
+        
+        try:
+            from ..memory.embeddings import generate_embedding
+            query_embedding = generate_embedding(request.query, backend.embedding_model)
+            
+            if query_embedding:
+                results = backend.search_memories_by_embedding(
+                    query_embedding,
+                    n_results=request.n_results,
+                    min_importance=request.min_relevance,
+                )
+                search_type = "embedding"
+            else:
+                # Fall back to text search if embedding fails
+                results = backend.search_memories_by_text(
+                    request.query,
+                    n_results=request.n_results,
+                    min_importance=request.min_relevance,
+                )
+                search_type = "text"
+            
+            return MemorySearchResponse(
+                results=[
+                    MemorySearchResult(
+                        id=r["id"],
+                        content=r["content"],
+                        memory_type=r.get("memory_type", "misc"),
+                        importance=r.get("importance", 0.5),
+                        relevance=r.get("similarity", r.get("relevance", 0.0)),
+                        source_message_ids=r.get("source_message_ids", []),
+                    )
+                    for r in results
+                ] if results else [],
+                search_type=search_type,
+            )
+        except Exception as e:
+            logger.exception(f"Memory search failed: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.post("/v1/memory/embedding", response_model=GenerateEmbeddingResponse, tags=["Memory"])
+    async def generate_embedding_endpoint(request: GenerateEmbeddingRequest):
+        """
+        Generate an embedding for the given text.
+        
+        Uses the service's loaded embedding model (no model loading delay).
+        """
+        try:
+            from ..memory.embeddings import generate_embedding, get_embedding_model
+            
+            model_name = get_service().config.MEMORY_EMBEDDING_MODEL
+            embedding = generate_embedding(request.text, model_name)
+            
+            if not embedding:
+                raise HTTPException(
+                    status_code=500,
+                    detail="Failed to generate embedding"
+                )
+            
+            return GenerateEmbeddingResponse(
+                embedding=embedding,
+                dimension=len(embedding),
+                model=model_name,
+            )
+        except Exception as e:
+            logger.exception(f"Embedding generation failed: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
+
 except ImportError:
     # FastAPI not installed - create stub
     app = None
@@ -814,6 +938,69 @@ except ImportError:
 # =============================================================================
 # CLI Entry Point
 # =============================================================================
+
+def _find_service_pid(port: int) -> int | None:
+    """Find the PID of a process listening on the given port."""
+    import subprocess
+    try:
+        # Use lsof to find the process listening on the port
+        result = subprocess.run(
+            ["lsof", "-ti", f"tcp:{port}"],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            # May return multiple PIDs (parent/child), get the first one
+            pids = result.stdout.strip().split("\n")
+            return int(pids[0])
+    except (subprocess.SubprocessError, FileNotFoundError, ValueError):
+        pass
+    return None
+
+
+def _is_service_running(host: str, port: int) -> bool:
+    """Check if the service is already running by attempting to connect."""
+    import socket
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.settimeout(1)
+            # Use 127.0.0.1 for 0.0.0.0 since we can't connect to 0.0.0.0
+            check_host = "127.0.0.1" if host == "0.0.0.0" else host
+            result = sock.connect_ex((check_host, port))
+            return result == 0
+    except (OSError, socket.error):
+        return False
+
+
+def _kill_service(port: int) -> bool:
+    """Kill the service running on the given port. Returns True if successful."""
+    import signal
+    import os
+    
+    pid = _find_service_pid(port)
+    if pid is None:
+        return False
+    
+    try:
+        # Send SIGTERM for graceful shutdown
+        os.kill(pid, signal.SIGTERM)
+        
+        # Wait briefly for the process to terminate
+        import time
+        for _ in range(10):  # Wait up to 1 second
+            time.sleep(0.1)
+            try:
+                os.kill(pid, 0)  # Check if process still exists
+            except OSError:
+                return True  # Process terminated
+        
+        # If still running, send SIGKILL
+        os.kill(pid, signal.SIGKILL)
+        time.sleep(0.1)
+        return True
+    except OSError:
+        return False
+
 
 def main():
     """Entry point for the background service."""
@@ -827,6 +1014,8 @@ def main():
     parser.add_argument("--port", type=int, default=config.SERVICE_PORT, help="Port to listen on")
     parser.add_argument("--verbose", "-v", action="store_true", help="Verbose logging")
     parser.add_argument("--reload", action="store_true", help="Enable auto-reload (dev mode)")
+    parser.add_argument("--restart", action="store_true", help="Kill existing service and start a new one")
+    parser.add_argument("--stop", action="store_true", help="Stop the running service and exit")
     args = parser.parse_args()
     
     # Setup logging
@@ -835,6 +1024,34 @@ def main():
         level=log_level,
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     )
+    
+    # Handle --stop: kill the service and exit
+    if args.stop:
+        if _is_service_running(args.host, args.port):
+            print(f"Stopping service on port {args.port}...")
+            if _kill_service(args.port):
+                print("Service stopped.")
+                return 0
+            else:
+                print("Failed to stop service.")
+                return 1
+        else:
+            print(f"No service running on port {args.port}.")
+            return 0
+    
+    # Check if service is already running
+    if _is_service_running(args.host, args.port):
+        if args.restart:
+            print(f"Restarting service on port {args.port}...")
+            if not _kill_service(args.port):
+                print("Warning: Could not kill existing service, attempting to start anyway...")
+            # Brief pause to ensure port is released
+            import time
+            time.sleep(0.5)
+        else:
+            print(f"Service is already running on port {args.port}.")
+            print("Use --restart to restart the service, or --stop to stop it.")
+            return 0
     
     if app is None:
         print("Error: FastAPI not installed. Install with: pip install fastapi uvicorn")

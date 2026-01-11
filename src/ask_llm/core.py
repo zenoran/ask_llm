@@ -75,7 +75,11 @@ class AskLLM:
         # Set bot name on client for panel display
         self.client.bot_name = self.bot.name
 
-        # Check for memory backend unless in local mode
+        # Initialize memory backends unless in local mode
+        # - Long-term memory (memory_backend): Only for bots with requires_memory=true
+        #   This triggers LLM-based memory extraction which has overhead
+        # - Short-term memory (short_term_backend): For all bots when DB is available
+        #   This is just session history storage with no LLM overhead
         if self.local_mode:
             logger.debug("Local mode enabled - using filesystem for history, skipping database")
         else:
@@ -85,12 +89,15 @@ class AskLLM:
                 backend_name, backend_class = next(iter(available_backends.items()))
                 
                 try:
-                    logger.debug(f"Initializing memory backend: {backend_name}")
-                    # Initialize long-term memory backend with bot_id
-                    self.memory_backend = backend_class(config=self.config, bot_id=self.bot_id)
-                    logger.debug(f"Long-term memory enabled using backend: {backend_name} for bot: {self.bot_id}")
+                    # Initialize long-term memory only if bot requires it
+                    if self.bot.requires_memory:
+                        logger.debug(f"Initializing long-term memory backend: {backend_name}")
+                        self.memory_backend = backend_class(config=self.config, bot_id=self.bot_id)
+                        logger.debug(f"Long-term memory enabled using backend: {backend_name} for bot: {self.bot_id}")
+                    else:
+                        logger.debug(f"Bot '{self.bot.name}' has requires_memory=false - skipping long-term memory")
                     
-                    # Initialize short-term memory backend if available
+                    # Initialize short-term memory for all bots (no LLM overhead)
                     if hasattr(backend_class, 'get_short_term_manager'):
                         self.short_term_backend = backend_class.get_short_term_manager(config=self.config, bot_id=self.bot_id)
                         logger.debug(f"Short-term memory initialized for bot: {self.bot_id}")
@@ -578,8 +585,8 @@ class AskLLM:
     def _add_conversation_to_memory(self, user_prompt: str, assistant_response: str):
         """Triggers memory extraction from a conversation exchange.
         
-        Attempts to use background service if available, otherwise falls back
-        to local extraction (heuristics for local models, LLM for API models).
+        Only submits to background service if available. Does NOT fall back to
+        local extraction to avoid slow LLM calls blocking the CLI.
         
         Note: Messages are already saved by history_manager.add_message() which uses
         short_term_backend. This method only handles memory extraction.
@@ -592,18 +599,13 @@ class AskLLM:
             user_msg_id = str(uuid.uuid4())
             assistant_msg_id = str(uuid.uuid4())
             
-            # Trigger memory extraction if enabled
+            # Trigger memory extraction if enabled - only via background service
             if getattr(self.config, 'MEMORY_EXTRACTION_ENABLED', True):
-                # Try background service first
+                # Only use background service - no local fallback to avoid slow LLM calls
                 if self._submit_to_background_service(user_prompt, assistant_response, [user_msg_id, assistant_msg_id]):
                     logger.debug("Memory extraction submitted to background service")
-                    return
-                
-                # Fall back to local extraction
-                self._extract_memories_from_exchange(
-                    user_prompt, assistant_response,
-                    [user_msg_id, assistant_msg_id]
-                )
+                else:
+                    logger.debug("Background service unavailable - skipping memory extraction")
         except Exception as e:
             logger.exception(f"Failed to process memory extraction: {e}")
     

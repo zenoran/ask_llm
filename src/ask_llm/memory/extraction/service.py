@@ -132,9 +132,17 @@ class MemoryExtractionService:
         
         prompt = get_fact_extraction_prompt(conversation_text)
         
+        # Include a system message to prevent the client from injecting the bot's
+        # personality system prompt. The extraction task needs a clean context.
+        system_msg = Message(
+            role="system",
+            content="You are a memory extraction assistant. Extract facts from conversations and return them as JSON."
+        )
+        user_msg = Message(role="user", content=prompt)
+        
         # Use stream=False to avoid any output printing
         response = self.llm_client.query(
-            messages=[Message(role="user", content=prompt)],
+            messages=[system_msg, user_msg],
             plaintext_output=True,
             stream=False,
         )
@@ -319,9 +327,17 @@ class MemoryExtractionService:
         
         prompt = get_memory_update_prompt(existing_json, new_facts_json)
         
+        # Include a system message to prevent the client from injecting the bot's
+        # personality system prompt. The memory management task needs a clean context.
+        system_msg = Message(
+            role="system",
+            content="You are a memory management assistant. Compare facts and determine actions (ADD, UPDATE, DELETE, NONE) as JSON."
+        )
+        user_msg = Message(role="user", content=prompt)
+        
         # Use stream=False to avoid any output printing
         response = self.llm_client.query(
-            messages=[Message(role="user", content=prompt)],
+            messages=[system_msg, user_msg],
             plaintext_output=True,
             stream=False,
         )

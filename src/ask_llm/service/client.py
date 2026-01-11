@@ -384,6 +384,83 @@ class ServiceClient:
         
         return None
 
+    def search_memories(
+        self,
+        query: str,
+        bot_id: str = "nova",
+        n_results: int = 5,
+        min_relevance: float = 0.0,
+    ) -> list[dict] | None:
+        """
+        Search memories using the service's semantic search.
+        
+        The service keeps the embedding model loaded, so this is fast.
+        
+        Args:
+            query: Search query text
+            bot_id: Bot to search memories for
+            n_results: Maximum number of results
+            min_relevance: Minimum relevance score (0.0-1.0)
+        
+        Returns:
+            List of memory dicts, or None if service unavailable
+        """
+        if not self.is_available():
+            return None
+        
+        try:
+            response = self._request("POST", "/v1/memory/search", data={
+                "query": query,
+                "bot_id": bot_id,
+                "n_results": n_results,
+                "min_relevance": min_relevance,
+            })
+            
+            if response and "results" in response:
+                # Format results for compatibility with memory backend
+                return [
+                    {
+                        "id": r["id"],
+                        "document": r["content"],
+                        "metadata": {
+                            "memory_type": r.get("memory_type", "misc"),
+                            "importance": r.get("importance", 0.5),
+                            "source_message_ids": r.get("source_message_ids", []),
+                        },
+                        "relevance": r.get("relevance", 0.0),
+                    }
+                    for r in response["results"]
+                ]
+        except Exception as e:
+            logger.warning(f"Memory search via service failed: {e}")
+        
+        return None
+
+    def generate_embedding(self, text: str) -> list[float] | None:
+        """
+        Generate an embedding using the service's loaded model.
+        
+        Args:
+            text: Text to generate embedding for
+        
+        Returns:
+            Embedding vector, or None if service unavailable
+        """
+        if not self.is_available():
+            return None
+        
+        try:
+            response = self._request("POST", "/v1/memory/embedding", data={
+                "text": text,
+            })
+            
+            if response and "embedding" in response:
+                return response["embedding"]
+        except Exception as e:
+            logger.warning(f"Embedding generation via service failed: {e}")
+        
+        return None
+
 
 # Singleton instance for easy access
 _service_client: ServiceClient | None = None
