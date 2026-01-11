@@ -15,6 +15,8 @@ class TaskType(Enum):
     CONTEXT_COMPACTION = "context_compaction"
     EMBEDDING_GENERATION = "embedding_generation"
     MEMORY_CONSOLIDATION = "memory_consolidation"
+    MEANING_UPDATE = "meaning_update"
+    MEMORY_MAINTENANCE = "memory_maintenance"
 
 
 class TaskStatus(Enum):
@@ -136,4 +138,60 @@ def create_embedding_task(
             "memory_ids": memory_ids,
         },
         bot_id=bot_id,
+    )
+
+
+def create_meaning_update_task(
+    memory_id: str,
+    intent: str | None = None,
+    stakes: str | None = None,
+    emotional_charge: float | None = None,
+    recurrence_keywords: list[str] | None = None,
+    updated_tags: list[str] | None = None,
+    reason: str = "",
+    bot_id: str = "nova",
+) -> Task:
+    """Create a task to update meaning metadata on an existing memory."""
+    return Task(
+        task_type=TaskType.MEANING_UPDATE,
+        payload={
+            "memory_id": memory_id,
+            "intent": intent,
+            "stakes": stakes,
+            "emotional_charge": emotional_charge,
+            "recurrence_keywords": recurrence_keywords,
+            "updated_tags": updated_tags,
+            "reason": reason,
+        },
+        bot_id=bot_id,
+    )
+
+
+def create_maintenance_task(
+    bot_id: str = "nova",
+    run_consolidation: bool = True,
+    run_recurrence_detection: bool = True,
+    run_decay_pruning: bool = False,
+    run_orphan_cleanup: bool = False,
+    dry_run: bool = False,
+) -> Task:
+    """Create a unified memory maintenance task.
+    
+    This task orchestrates multiple maintenance operations:
+    - consolidation: merge similar memories
+    - recurrence_detection: identify and tag recurring themes
+    - decay_pruning: archive low-importance old memories
+    - orphan_cleanup: remove orphaned embeddings/metadata
+    """
+    return Task(
+        task_type=TaskType.MEMORY_MAINTENANCE,
+        payload={
+            "run_consolidation": run_consolidation,
+            "run_recurrence_detection": run_recurrence_detection,
+            "run_decay_pruning": run_decay_pruning,
+            "run_orphan_cleanup": run_orphan_cleanup,
+            "dry_run": dry_run,
+        },
+        bot_id=bot_id,
+        priority=-1,  # Lower priority - background job
     )

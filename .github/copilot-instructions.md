@@ -128,7 +128,7 @@ rg -l "import something" src/          # List files containing pattern
 ## Important Conventions
 
 - **Installation**: Uses `pipx` for global install via `install.sh` (not venv)
-- **Python command**: Always use `python3` (not `python`) for shell commands
+- **Python command**: Always use `uv run python` (not `python` or `python3`) for running Python scripts
 - **Search tool**: `grep` is aliased to `rg` (ripgrep) - use ripgrep syntax
 - **Source layout**: All code in `src/ask_llm/` (pyproject.toml `package-dir`)
 - **Logging**: Use `logging.getLogger(__name__)` - verbosity controlled by `--verbose` flag

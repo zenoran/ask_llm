@@ -122,12 +122,16 @@ def get_memory_table_pg(bot_id: str) -> Table:
         metadata,
         Column("id", String(36), primary_key=True),  # UUID
         Column("content", Text, nullable=False),
-        Column("memory_type", String(50), nullable=False, default="misc"),
+        Column("tags", JSON, nullable=False, default=["misc"]),
         Column("importance", Float, nullable=False, default=0.5),
         Column("source_message_ids", JSON, nullable=True),  # Array of message UUIDs
         Column("access_count", Integer, default=0),  # For reinforcement
         Column("last_accessed", DateTime, nullable=True),
-        Column("superseded_by", String(36), nullable=True),  # ID of memory that replaced this one
+        Column("intent", Text, nullable=True),
+            Column("stakes", Text, nullable=True),
+            Column("emotional_charge", Float, nullable=True),
+            Column("recurrence_keywords", JSON, nullable=True),
+            Column("meaning_updated_at", DateTime, nullable=True),
         Column("created_at", DateTime, default=datetime.utcnow),
         Column("updated_at", DateTime, default=datetime.utcnow, onupdate=datetime.utcnow),
         # embedding column added via raw SQL for pgvector
@@ -242,22 +246,44 @@ class PostgreSQLMemoryBackend(MemoryBackend):
                 CREATE TABLE IF NOT EXISTS {self._memories_table_name} (
                     id VARCHAR(36) PRIMARY KEY,
                     content TEXT NOT NULL,
-                    memory_type VARCHAR(50) NOT NULL DEFAULT 'misc',
+                    tags JSONB NOT NULL DEFAULT '["misc"]'::jsonb,
                     importance REAL NOT NULL DEFAULT 0.5,
                     source_message_ids JSONB,
                     access_count INTEGER DEFAULT 0,
                     last_accessed TIMESTAMP,
-                    superseded_by VARCHAR(36),
+                    intent TEXT,
+                    stakes TEXT,
+                    emotional_charge REAL,
+                    recurrence_keywords JSONB,
+                    meaning_updated_at TIMESTAMP,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    embedding vector({self.embedding_dim})
+                    embedding vector({self.embedding_dim}),
+                    meaning_embedding vector({self.embedding_dim})
                 )
             """)
             
-            # Add superseded_by column if it doesn't exist (migration)
-            add_superseded_sql = text(f"""
-                ALTER TABLE {self._memories_table_name} 
-                ADD COLUMN IF NOT EXISTS superseded_by VARCHAR(36)
+            # Migration: drop superseded_by column (we now delete instead of marking)
+            drop_superseded_sql = text(f"""
+                ALTER TABLE {self._memories_table_name}
+                DROP COLUMN IF EXISTS superseded_by
+            """)
+
+            add_tags_sql = text(f"""
+                ALTER TABLE {self._memories_table_name}
+                ADD COLUMN IF NOT EXISTS tags JSONB NOT NULL DEFAULT '["misc"]'::jsonb,
+                ADD COLUMN IF NOT EXISTS intent TEXT,
+                ADD COLUMN IF NOT EXISTS stakes TEXT,
+                ADD COLUMN IF NOT EXISTS emotional_charge REAL,
+                ADD COLUMN IF NOT EXISTS recurrence_keywords JSONB,
+                ADD COLUMN IF NOT EXISTS meaning_updated_at TIMESTAMP,
+                ADD COLUMN IF NOT EXISTS meaning_embedding vector({self.embedding_dim})
+            """)
+
+            # Migration: drop legacy memory_type column
+            drop_memory_type_sql = text(f"""
+                ALTER TABLE {self._memories_table_name}
+                DROP COLUMN IF EXISTS memory_type
             """)
             
             try:
@@ -266,9 +292,17 @@ class PostgreSQLMemoryBackend(MemoryBackend):
                 conn.execute(memories_sql)
                 # Run migrations for existing tables
                 try:
-                    conn.execute(add_superseded_sql)
+                    conn.execute(add_tags_sql)
                 except Exception:
-                    pass  # Column may already exist
+                    pass
+                try:
+                    conn.execute(drop_memory_type_sql)
+                except Exception:
+                    pass  # Column may already be dropped
+                try:
+                    conn.execute(drop_superseded_sql)
+                except Exception:
+                    pass  # Column may already be dropped
                 conn.commit()
                 
                 # Create indexes
@@ -286,8 +320,8 @@ class PostgreSQLMemoryBackend(MemoryBackend):
             f"CREATE INDEX IF NOT EXISTS idx_{self._messages_table_name}_session ON {self._messages_table_name}(session_id)",
             f"CREATE INDEX IF NOT EXISTS idx_{self._messages_table_name}_processed ON {self._messages_table_name}(processed)",
             f"CREATE INDEX IF NOT EXISTS idx_{self._memories_table_name}_importance ON {self._memories_table_name}(importance)",
-            f"CREATE INDEX IF NOT EXISTS idx_{self._memories_table_name}_type ON {self._memories_table_name}(memory_type)",
             f"CREATE INDEX IF NOT EXISTS idx_{self._memories_table_name}_accessed ON {self._memories_table_name}(last_accessed)",
+            f"CREATE INDEX IF NOT EXISTS idx_{self._memories_table_name}_tags_gin ON {self._memories_table_name} USING gin (tags)",
         ]
         
         # HNSW index for vector similarity (if we have embeddings)
@@ -296,6 +330,11 @@ class PostgreSQLMemoryBackend(MemoryBackend):
             CREATE INDEX IF NOT EXISTS idx_{self._memories_table_name}_embedding 
             ON {self._memories_table_name} 
             USING hnsw (embedding vector_cosine_ops)
+        """
+        meaning_hnsw_index = f"""
+            CREATE INDEX IF NOT EXISTS idx_{self._memories_table_name}_meaning_embedding 
+            ON {self._memories_table_name} 
+            USING hnsw (meaning_embedding vector_cosine_ops)
         """
         
         for idx_sql in indexes:
@@ -308,6 +347,10 @@ class PostgreSQLMemoryBackend(MemoryBackend):
             conn.execute(text(hnsw_index))
         except Exception as e:
             logger.debug(f"HNSW index creation (may already exist): {e}")
+        try:
+            conn.execute(text(meaning_hnsw_index))
+        except Exception as e:
+            logger.debug(f"Meaning HNSW index creation (may already exist): {e}")
         
         conn.commit()
     
@@ -436,10 +479,16 @@ class PostgreSQLMemoryBackend(MemoryBackend):
         self,
         memory_id: str,
         content: str,
-        memory_type: str = "misc",
+        tags: list[str] | None = None,
         importance: float = 0.5,
         source_message_ids: list[str] | None = None,
         embedding: list[float] | None = None,
+        intent: str | None = None,
+        stakes: str | None = None,
+        emotional_charge: float | None = None,
+        recurrence_keywords: list[str] | None = None,
+        meaning_embedding: list[float] | None = None,
+        meaning_updated_at: datetime | None = None,
     ) -> None:
         """Add a distilled memory to storage.
         
@@ -450,7 +499,13 @@ class PostgreSQLMemoryBackend(MemoryBackend):
             logger.warning(f"Skipping empty content for memory ID: {memory_id}")
             return
         
-        # Generate embedding if not provided
+        # Normalize tags
+        tags = tags or ["misc"]
+        tags = [t.strip().lower() for t in tags if isinstance(t, str) and t.strip()]
+        if not tags:
+            tags = ["misc"]
+        
+        # Generate embeddings if not provided
         if embedding is None:
             try:
                 from .embeddings import generate_embedding
@@ -459,6 +514,16 @@ class PostgreSQLMemoryBackend(MemoryBackend):
                     logger.debug(f"Generated embedding for memory: {content[:50]}...")
             except Exception as e:
                 logger.debug(f"Could not generate embedding: {e}")
+        if meaning_embedding is None:
+            try:
+                from .embeddings import generate_embedding
+                meaning_text_parts = [intent or "", stakes or "", "emotional" if emotional_charge else "", " ".join(recurrence_keywords or [])]
+                meaning_text = " | ".join([p for p in meaning_text_parts if p])
+                meaning_embedding = generate_embedding(meaning_text or content, self.embedding_model)
+            except Exception as e:
+                logger.debug(f"Could not generate meaning embedding: {e}")
+        if meaning_embedding:
+            meaning_updated_at = meaning_updated_at or datetime.utcnow()
         
         with self.engine.connect() as conn:
             try:
@@ -470,71 +535,59 @@ class PostgreSQLMemoryBackend(MemoryBackend):
                 
                 if existing:
                     # Update existing
-                    if embedding:
-                        update_sql = text(f"""
-                            UPDATE {self._memories_table_name}
-                            SET content = :content,
-                                memory_type = :memory_type,
-                                importance = :importance,
-                                source_message_ids = :source_ids,
-                                embedding = :embedding,
-                                updated_at = CURRENT_TIMESTAMP
-                            WHERE id = :id
-                        """)
-                        conn.execute(update_sql, {
-                            "id": memory_id,
-                            "content": content,
-                            "memory_type": memory_type,
-                            "importance": importance,
-                            "source_ids": json.dumps(source_message_ids or []),
-                            "embedding": str(embedding),
-                        })
-                    else:
-                        update_sql = text(f"""
-                            UPDATE {self._memories_table_name}
-                            SET content = :content,
-                                memory_type = :memory_type,
-                                importance = :importance,
-                                source_message_ids = :source_ids,
-                                updated_at = CURRENT_TIMESTAMP
-                            WHERE id = :id
-                        """)
-                        conn.execute(update_sql, {
-                            "id": memory_id,
-                            "content": content,
-                            "memory_type": memory_type,
-                            "importance": importance,
-                            "source_ids": json.dumps(source_message_ids or []),
-                        })
+                    update_sql = text(f"""
+                        UPDATE {self._memories_table_name}
+                        SET content = :content,
+                            tags = CAST(:tags AS jsonb),
+                            importance = :importance,
+                            source_message_ids = :source_ids,
+                            embedding = COALESCE(:embedding, embedding),
+                            intent = :intent,
+                            stakes = :stakes,
+                            emotional_charge = :emotional_charge,
+                            recurrence_keywords = CAST(:recurrence_keywords AS jsonb),
+                            meaning_embedding = COALESCE(:meaning_embedding, meaning_embedding),
+                            meaning_updated_at = COALESCE(:meaning_updated_at, meaning_updated_at),
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE id = :id
+                    """)
+                    conn.execute(update_sql, {
+                        "id": memory_id,
+                        "content": content,
+                        "tags": json.dumps(tags),
+                        "importance": importance,
+                        "source_ids": json.dumps(source_message_ids or []),
+                        "embedding": f"[{','.join(str(x) for x in embedding)}]" if embedding else None,
+                        "intent": intent,
+                        "stakes": stakes,
+                        "emotional_charge": emotional_charge,
+                        "recurrence_keywords": json.dumps(recurrence_keywords or []),
+                        "meaning_embedding": f"[{','.join(str(x) for x in meaning_embedding)}]" if meaning_embedding else None,
+                        "meaning_updated_at": meaning_updated_at,
+                    })
                 else:
                     # Insert new
-                    if embedding:
-                        insert_sql = text(f"""
-                            INSERT INTO {self._memories_table_name}
-                            (id, content, memory_type, importance, source_message_ids, embedding, created_at)
-                            VALUES (:id, :content, :memory_type, :importance, :source_ids, :embedding, CURRENT_TIMESTAMP)
-                        """)
-                        conn.execute(insert_sql, {
-                            "id": memory_id,
-                            "content": content,
-                            "memory_type": memory_type,
-                            "importance": importance,
-                            "source_ids": json.dumps(source_message_ids or []),
-                            "embedding": str(embedding),
-                        })
-                    else:
-                        insert_sql = text(f"""
-                            INSERT INTO {self._memories_table_name}
-                            (id, content, memory_type, importance, source_message_ids, created_at)
-                            VALUES (:id, :content, :memory_type, :importance, :source_ids, CURRENT_TIMESTAMP)
-                        """)
-                        conn.execute(insert_sql, {
-                            "id": memory_id,
-                            "content": content,
-                            "memory_type": memory_type,
-                            "importance": importance,
-                            "source_ids": json.dumps(source_message_ids or []),
-                        })
+                    insert_sql = text(f"""
+                        INSERT INTO {self._memories_table_name}
+                        (id, content, tags, importance, source_message_ids, embedding,
+                         intent, stakes, emotional_charge, recurrence_keywords, meaning_embedding, meaning_updated_at, created_at)
+                        VALUES (:id, :content, CAST(:tags AS jsonb), :importance, :source_ids, :embedding,
+                                :intent, :stakes, :emotional_charge, CAST(:recurrence_keywords AS jsonb), :meaning_embedding, :meaning_updated_at, CURRENT_TIMESTAMP)
+                    """)
+                    conn.execute(insert_sql, {
+                        "id": memory_id,
+                        "content": content,
+                        "tags": json.dumps(tags),
+                        "importance": importance,
+                        "source_ids": json.dumps(source_message_ids or []),
+                        "embedding": f"[{','.join(str(x) for x in embedding)}]" if embedding else None,
+                        "intent": intent,
+                        "stakes": stakes,
+                        "emotional_charge": emotional_charge,
+                        "recurrence_keywords": json.dumps(recurrence_keywords or []),
+                        "meaning_embedding": f"[{','.join(str(x) for x in meaning_embedding)}]" if meaning_embedding else None,
+                        "meaning_updated_at": meaning_updated_at,
+                    })
                 
                 conn.commit()
                 logger.debug(f"Added memory {memory_id} to {self._memories_table_name}")
@@ -555,35 +608,6 @@ class PostgreSQLMemoryBackend(MemoryBackend):
             except Exception as e:
                 session.rollback()
                 logger.error(f"Failed to delete memory {memory_id}: {e}")
-                return False
-    
-    def supersede_memory(self, old_memory_id: str, new_memory_id: str) -> bool:
-        """Mark an old memory as superseded by a new one.
-        
-        This preserves history while ensuring the old memory won't be retrieved.
-        Use this instead of delete when a fact changes (e.g., user moved cities).
-        
-        Args:
-            old_memory_id: ID of the memory being superseded
-            new_memory_id: ID of the new memory that replaces it
-            
-        Returns:
-            True if successful
-        """
-        with self.engine.connect() as conn:
-            try:
-                sql = text(f"""
-                    UPDATE {self._memories_table_name}
-                    SET superseded_by = :new_id,
-                        updated_at = CURRENT_TIMESTAMP
-                    WHERE id = :old_id
-                """)
-                conn.execute(sql, {"old_id": old_memory_id, "new_id": new_memory_id})
-                conn.commit()
-                logger.debug(f"Memory {old_memory_id} superseded by {new_memory_id}")
-                return True
-            except Exception as e:
-                logger.error(f"Failed to supersede memory: {e}")
                 return False
     
     def update_memory_access(self, memory_id: str) -> None:
@@ -610,7 +634,7 @@ class PostgreSQLMemoryBackend(MemoryBackend):
         query: str,
         n_results: int = 5,
         min_importance: float = 0.0,
-        memory_types: list[str] | None = None,
+        tags: list[str] | None = None,
     ) -> list[dict]:
         """Search memories using PostgreSQL full-text search."""
         if not query or query.isspace():
@@ -619,20 +643,21 @@ class PostgreSQLMemoryBackend(MemoryBackend):
         with self.engine.connect() as conn:
             try:
                 # Build the query with optional filters
-                type_filter = ""
-                if memory_types:
-                    type_list = ", ".join(f"'{t}'" for t in memory_types)
-                    type_filter = f"AND memory_type IN ({type_list})"
+                tag_filter = ""
+                if tags:
+                    tag_list = ",".join(f"'" + t + "'" for t in tags)
+                    tag_filter = f"AND tags ?| ARRAY[{tag_list}]"
                 
                 # Use PostgreSQL full-text search
                 sql = text(f"""
-                    SELECT id, content, memory_type, importance, source_message_ids,
+                          SELECT id, content, tags, importance, source_message_ids,
                            access_count, last_accessed, created_at,
+                           intent, stakes, emotional_charge,
                            ts_rank(to_tsvector('english', content), plainto_tsquery('english', :query)) AS rank
                     FROM {self._memories_table_name}
                     WHERE to_tsvector('english', content) @@ plainto_tsquery('english', :query)
                     AND importance >= :min_importance
-                    {type_filter}
+                    {tag_filter}
                     ORDER BY rank DESC, importance DESC
                     LIMIT :limit
                 """)
@@ -648,14 +673,18 @@ class PostgreSQLMemoryBackend(MemoryBackend):
                     # Update access tracking
                     self.update_memory_access(row.id)
                     
+                    row_tags = row.tags if isinstance(row.tags, list) else (json.loads(row.tags) if row.tags else ["misc"])
                     results.append({
                         "id": row.id,
                         "content": row.content,
-                        "memory_type": row.memory_type,
+                        "tags": row_tags,
                         "importance": row.importance,
                         "source_message_ids": row.source_message_ids or [],
                         "access_count": row.access_count,
                         "relevance": row.rank,
+                        "intent": row.intent,
+                        "stakes": row.stakes,
+                        "emotional_charge": row.emotional_charge,
                     })
                 
                 return results
@@ -669,7 +698,9 @@ class PostgreSQLMemoryBackend(MemoryBackend):
         embedding: list[float],
         n_results: int = 5,
         min_importance: float = 0.0,
-        memory_types: list[str] | None = None,
+        tags: list[str] | None = None,
+        meaning_embedding: list[float] | None = None,
+        meaning_weight: float | None = None,
     ) -> list[dict]:
         """Search memories using vector similarity with temporal decay and diversity.
         
@@ -690,9 +721,9 @@ class PostgreSQLMemoryBackend(MemoryBackend):
         recency_weight = getattr(self.config, 'MEMORY_RECENCY_WEIGHT', 0.3)
         diversity_enabled = getattr(self.config, 'MEMORY_DIVERSITY_ENABLED', True)
         
-        # Different decay rates per memory type (multiplier on half_life)
+        # Different decay rates per tag (multiplier on half_life)
         # Higher = slower decay (more persistent)
-        type_decay_multipliers = {
+        tag_decay_multipliers = {
             'fact': 2.0,          # Core facts persist longer
             'professional': 1.5,  # Career info moderately persistent
             'preference': 0.8,    # Preferences change
@@ -700,45 +731,46 @@ class PostgreSQLMemoryBackend(MemoryBackend):
             'relationship': 1.0,  # Relationships change at normal rate
             'event': 0.5,         # Events become less relevant quickly
             'plan': 0.3,          # Plans/goals are very temporal
-            'misc': 1.0,          # Default rate
         }
         
         with self.engine.connect() as conn:
             try:
-                type_filter = ""
-                if memory_types:
-                    type_list = ", ".join(f"'{t}'" for t in memory_types)
-                    type_filter = f"AND memory_type IN ({type_list})"
+                tag_filter = ""
+                if tags:
+                    tag_list = ",".join(f"'" + t + "'" for t in tags)
+                    tag_filter = f"AND tags ?| ARRAY[{tag_list}]"
                 
                 if decay_enabled:
                     # Fetch more candidates for post-processing with decay + diversity
                     fetch_limit = n_results * 4 if diversity_enabled else n_results * 2
                     
                     sql = text(f"""
-                        SELECT id, content, memory_type, importance, source_message_ids,
-                               access_count, last_accessed, created_at, superseded_by,
+                           SELECT id, content, tags, importance, source_message_ids,
+                               access_count, last_accessed, created_at,
+                               intent, stakes, emotional_charge,
                                1 - (embedding <=> :embedding) AS similarity,
+                               CASE WHEN :use_meaning THEN 1 - (meaning_embedding <=> :meaning_embedding) ELSE NULL END AS meaning_similarity,
                                EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - created_at)) / 86400.0 AS age_days
                         FROM {self._memories_table_name}
                         WHERE embedding IS NOT NULL
                         AND importance >= :min_importance
-                        AND superseded_by IS NULL
-                        {type_filter}
+                        {tag_filter}
                         ORDER BY embedding <=> :embedding
                         LIMIT :limit
                     """)
                 else:
                     # Simple similarity-based search without decay
                     sql = text(f"""
-                        SELECT id, content, memory_type, importance, source_message_ids,
-                               access_count, last_accessed, created_at, superseded_by,
+                           SELECT id, content, tags, importance, source_message_ids,
+                               access_count, last_accessed, created_at,
+                               intent, stakes, emotional_charge,
                                1 - (embedding <=> :embedding) AS similarity,
+                               CASE WHEN :use_meaning THEN 1 - (meaning_embedding <=> :meaning_embedding) ELSE NULL END AS meaning_similarity,
                                0 AS age_days
                         FROM {self._memories_table_name}
                         WHERE embedding IS NOT NULL
                         AND importance >= :min_importance
-                        AND superseded_by IS NULL
-                        {type_filter}
+                        {tag_filter}
                         ORDER BY embedding <=> :embedding
                         LIMIT :limit
                     """)
@@ -746,6 +778,8 @@ class PostgreSQLMemoryBackend(MemoryBackend):
                 
                 rows = conn.execute(sql, {
                     "embedding": str(embedding),
+                    "meaning_embedding": str(meaning_embedding) if meaning_embedding else str(embedding),
+                    "use_meaning": bool(meaning_embedding),
                     "min_importance": min_importance,
                     "limit": fetch_limit,
                 }).fetchall()
@@ -757,16 +791,23 @@ class PostgreSQLMemoryBackend(MemoryBackend):
                 import math
                 scored_results = []
                 
+                meaning_w = meaning_weight if meaning_weight is not None else getattr(self.config, 'MEMORY_MEANING_WEIGHT', 0.3)
+                meaning_w = max(0.0, min(1.0, meaning_w))
                 for row in rows:
                     # Convert Decimal types to float for calculations
                     similarity = float(row.similarity) if row.similarity else 0.0
+                    meaning_similarity = float(row.meaning_similarity) if meaning_embedding and row.meaning_similarity is not None else None
                     importance = float(row.importance) if row.importance else 0.5
                     age_days = float(row.age_days) if row.age_days else 0.0
                     access_count = int(row.access_count) if row.access_count else 0
                     
-                    # Get type-specific half-life
-                    type_multiplier = type_decay_multipliers.get(row.memory_type, 1.0)
-                    effective_half_life = half_life_days * type_multiplier
+                    # Parse tags
+                    row_tags = row.tags if isinstance(row.tags, list) else (json.loads(row.tags) if row.tags else ["misc"])
+                    
+                    # Get tag-specific half-life (use first tag for decay rate)
+                    primary_tag = row_tags[0] if row_tags else "misc"
+                    tag_multiplier = tag_decay_multipliers.get(primary_tag, 1.0)
+                    effective_half_life = half_life_days * tag_multiplier
                     
                     # Temporal decay: exp(-age * ln(2) / half_life)
                     if decay_enabled and age_days > 0:
@@ -777,14 +818,19 @@ class PostgreSQLMemoryBackend(MemoryBackend):
                     # Access boost: 1 + factor * log(access_count + 1)
                     access_boost = 1.0 + access_boost_factor * math.log(access_count + 1)
                     
+                    # Combine semantic similarities
+                    sim_combined = similarity
+                    if meaning_similarity is not None:
+                        sim_combined = (1 - meaning_w) * similarity + meaning_w * meaning_similarity
+                    
                     # Combined score:
                     # similarity provides base relevance
                     # importance is the extracted importance
                     # decay_factor reduces old memories
                     # access_boost reinforces frequently used ones
                     # recency_weight balances recency vs base importance
-                    base_score = similarity * importance
-                    recency_score = similarity * decay_factor
+                    base_score = sim_combined * importance
+                    recency_score = sim_combined * decay_factor
                     effective_score = (
                         (1 - recency_weight) * base_score + 
                         recency_weight * recency_score
@@ -793,14 +839,18 @@ class PostgreSQLMemoryBackend(MemoryBackend):
                     scored_results.append({
                         "id": row.id,
                         "content": row.content,
-                        "memory_type": row.memory_type,
+                        "tags": row_tags,
                         "importance": importance,
                         "source_message_ids": row.source_message_ids or [],
                         "access_count": access_count,
                         "similarity": similarity,
+                        "meaning_similarity": meaning_similarity,
                         "age_days": age_days,
                         "decay_factor": decay_factor,
                         "effective_score": effective_score,
+                        "intent": row.intent,
+                        "stakes": row.stakes,
+                        "emotional_charge": float(row.emotional_charge) if row.emotional_charge else None,
                     })
                 
                 # Sort by effective score
@@ -841,15 +891,16 @@ class PostgreSQLMemoryBackend(MemoryBackend):
         selected.append(candidates[0])
         used_ids.add(candidates[0]["id"])
         
-        # 2. Ensure type diversity - try to get one from each represented type
-        types_seen = {candidates[0]["memory_type"]}
+        # 2. Ensure tag diversity - try to get one from each represented tag set
+        tags_seen = set(candidates[0].get("tags", ["misc"]))
         for candidate in candidates[1:]:
             if len(selected) >= n_results:
                 break
-            if candidate["memory_type"] not in types_seen and candidate["id"] not in used_ids:
+            candidate_tags = set(candidate.get("tags", ["misc"]))
+            if not candidate_tags.issubset(tags_seen) and candidate["id"] not in used_ids:
                 selected.append(candidate)
                 used_ids.add(candidate["id"])
-                types_seen.add(candidate["memory_type"])
+                tags_seen.update(candidate_tags)
         
         # 3. Ensure temporal diversity - split into time buckets
         if len(selected) < n_results:
@@ -1021,12 +1072,19 @@ class PostgreSQLMemoryBackend(MemoryBackend):
             return {
                 "id": r["id"],
                 "document": r["content"],
+                "content": r["content"],  # Keep both for compatibility
                 "metadata": {
-                    "memory_type": r["memory_type"],
+                    "tags": r.get("tags", ["misc"]),
                     "importance": r["importance"],
                     "source_message_ids": r.get("source_message_ids", []),
                 },
                 "relevance": r.get("similarity", r.get("relevance", r["importance"])),
+                # Meaning fields for structured context
+                "intent": r.get("intent"),
+                "stakes": r.get("stakes"),
+                "emotional_charge": r.get("emotional_charge"),
+                "tags": r.get("tags", ["misc"]),
+                "importance": r.get("importance", 0.5),
             }
         
         # 1. Try text search on memories - but only accept high-quality matches
@@ -1102,8 +1160,9 @@ class PostgreSQLMemoryBackend(MemoryBackend):
         with self.engine.connect() as conn:
             try:
                 sql = text(f"""
-                    SELECT id, content, memory_type, importance, source_message_ids,
-                           access_count, last_accessed, created_at
+                    SELECT id, content, tags, importance, source_message_ids,
+                           access_count, last_accessed, created_at,
+                           intent, stakes, emotional_charge
                     FROM {self._memories_table_name}
                     WHERE importance >= :min_importance
                     ORDER BY importance DESC, access_count DESC, created_at DESC
@@ -1119,10 +1178,13 @@ class PostgreSQLMemoryBackend(MemoryBackend):
                     {
                         "id": row.id,
                         "content": row.content,
-                        "memory_type": row.memory_type,
+                        "tags": row.tags if isinstance(row.tags, list) else (json.loads(row.tags) if row.tags else ["misc"]),
                         "importance": row.importance,
                         "source_message_ids": row.source_message_ids or [],
                         "relevance": row.importance,  # Use importance as relevance for fallback
+                        "intent": row.intent,
+                        "stakes": row.stakes,
+                        "emotional_charge": float(row.emotional_charge) if row.emotional_charge else None,
                     }
                     for row in rows
                 ]
@@ -1400,7 +1462,7 @@ class PostgreSQLMemoryBackend(MemoryBackend):
                     "id": row.id,
                     "document": row.content,
                     "metadata": {
-                        "memory_type": row.memory_type,
+                        "tags": row.tags if isinstance(row.tags, list) else (json.loads(row.tags) if row.tags else ["misc"]),
                         "importance": row.importance,
                         "source_message_ids": row.source_message_ids or [],
                     },

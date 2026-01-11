@@ -14,7 +14,7 @@ from typing import Any, Protocol, TYPE_CHECKING
 from .prompts import (
     FACT_EXTRACTION_PROMPT,
     MEMORY_UPDATE_PROMPT,
-    MEMORY_TYPES,
+    MEMORY_TAGS,
     get_fact_extraction_prompt,
     get_memory_update_prompt,
     estimate_importance,
@@ -38,17 +38,48 @@ class LLMClientProtocol(Protocol):
 class ExtractedFact:
     """A fact extracted from a conversation."""
     content: str
-    memory_type: str
+    tags: list[str]
     importance: float
     source_message_ids: list[str] = field(default_factory=list)
+    meaning: "MeaningAssociation" | None = None
     
     def to_dict(self) -> dict:
         return {
             "content": self.content,
-            "memory_type": self.memory_type,
+            "tags": self.tags,
             "importance": self.importance,
             "source_message_ids": self.source_message_ids,
+            "meaning": self.meaning.to_dict() if self.meaning else None,
         }
+
+
+@dataclass
+class MeaningAssociation:
+    """Meaning-level attributes for a memory."""
+    intent: str | None = None
+    stakes: str | None = None
+    emotional_charge: float | None = None  # 0-1 scale
+    recurrence_keywords: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        return {
+            "intent": self.intent,
+            "stakes": self.stakes,
+            "emotional_charge": self.emotional_charge,
+            "recurrence_keywords": self.recurrence_keywords,
+        }
+
+    def to_embedding_text(self) -> str:
+        parts = []
+        if self.intent:
+            parts.append(f"intent: {self.intent}")
+        if self.stakes:
+            parts.append(f"stakes: {self.stakes}")
+        if self.emotional_charge is not None:
+            parts.append(f"emotional_charge: {self.emotional_charge:.2f}")
+        if self.recurrence_keywords:
+            parts.append(f"recurrence: {' '.join(self.recurrence_keywords)}")
+        return " | ".join(parts)
 
 
 @dataclass
@@ -149,7 +180,7 @@ class MemoryExtractionService:
         
         # Parse JSON response
         facts = self._parse_extraction_response(response, message_ids)
-        return facts
+        return [self._enrich_meaning(f) for f in facts]
     
     def _parse_extraction_response(
         self,
@@ -191,18 +222,33 @@ class MemoryExtractionService:
                 if not content:
                     continue
                 
-                memory_type = raw_fact.get("memory_type", "misc")
-                if memory_type not in MEMORY_TYPES:
-                    memory_type = "misc"
+                raw_tags = raw_fact.get("tags") or []
+                if isinstance(raw_tags, str):
+                    raw_tags = [raw_tags]
+                tags = [t.strip().lower() for t in raw_tags if t and isinstance(t, str)]
+                if not tags:
+                    tags = ["misc"]
+                # Normalize known tags
+                normalized = []
+                for tag in tags:
+                    normalized.append(tag if tag in MEMORY_TAGS else tag)
+                tags = normalized
                 
                 importance = float(raw_fact.get("importance", 0.5))
                 importance = max(0.0, min(1.0, importance))  # Clamp to 0-1
                 
+                # Capture LLM-inferred intent if provided
+                llm_intent = raw_fact.get("intent")
+                meaning = None
+                if llm_intent:
+                    meaning = MeaningAssociation(intent=llm_intent)
+                
                 facts.append(ExtractedFact(
                     content=content,
-                    memory_type=memory_type,
+                    tags=tags,
                     importance=importance,
                     source_message_ids=message_ids.copy(),
+                    meaning=meaning,
                 ))
                 
         except json.JSONDecodeError as e:
@@ -272,7 +318,7 @@ class MemoryExtractionService:
             
             content = msg.get("content", "")
             
-            for memory_type, type_patterns in patterns.items():
+            for tag, type_patterns in patterns.items():
                 for pattern in type_patterns:
                     matches = re.findall(pattern, content, re.IGNORECASE)
                     for match in matches:
@@ -284,12 +330,12 @@ class MemoryExtractionService:
                         
                         facts.append(ExtractedFact(
                             content=fact_content,
-                            memory_type=memory_type,
+                            tags=[tag],
                             importance=importance,
                             source_message_ids=message_ids.copy(),
                         ))
-        
-        return facts
+        # Attach lightweight meaning heuristics
+        return [self._enrich_meaning(f) for f in facts]
     
     def determine_memory_actions(
         self,
@@ -324,6 +370,60 @@ class MemoryExtractionService:
                 return self._determine_actions_with_heuristics(new_facts, existing_memories)
         else:
             return self._determine_actions_with_heuristics(new_facts, existing_memories)
+
+    # ------------------------------------------------------------------
+    # Meaning enrichment (heuristic, inline)
+    # ------------------------------------------------------------------
+    def _enrich_meaning(self, fact: ExtractedFact) -> ExtractedFact:
+        """Attach heuristic meaning metadata to a fact.
+        
+        Preserves LLM-inferred intent if present, fills in other fields with heuristics.
+        """
+        # Preserve LLM-inferred intent if we already have meaning
+        existing_intent = fact.meaning.intent if fact.meaning else None
+        
+        meaning = MeaningAssociation(
+            intent=existing_intent or self._infer_intent(fact),
+            stakes=self._infer_stakes(fact),
+            emotional_charge=self._infer_emotion(fact),
+            recurrence_keywords=self._infer_recurrence(fact),
+        )
+        fact.meaning = meaning
+        return fact
+
+    def _infer_intent(self, fact: ExtractedFact) -> str:
+        tags = set(fact.tags)
+        if "plan" in tags:
+            return "planning or future goal"
+        if "event" in tags:
+            return "share time-bound event"
+        if "preference" in tags:
+            return "express preference"
+        if "professional" in tags:
+            return "share work/professional context"
+        if "health" in tags:
+            return "share health context"
+        return "share personal context"
+
+    def _infer_stakes(self, fact: ExtractedFact) -> str:
+        if fact.importance >= 0.8:
+            return "critical to remember; forgetting would harm trust or outcomes"
+        if fact.importance >= 0.6:
+            return "important context for smooth interactions"
+        return "nice-to-know; low stakes"
+
+    def _infer_emotion(self, fact: ExtractedFact) -> float:
+        text = fact.content.lower()
+        charge = 0.2 + 0.6 * fact.importance
+        keywords_high = ["love", "hate", "angry", "excited", "anxious", "worried", "sad"]
+        if any(k in text for k in keywords_high):
+            charge = max(charge, 0.8)
+        return min(1.0, max(0.0, charge))
+
+    def _infer_recurrence(self, fact: ExtractedFact) -> list[str]:
+        tags = [t for t in fact.tags if t]
+        words = re.findall(r"[a-zA-Z]{4,}", fact.content.lower())
+        return list(set(tags + words[:3]))
     
     def _determine_actions_with_llm(
         self,
@@ -365,8 +465,24 @@ class MemoryExtractionService:
         response: str,
         new_facts: list[ExtractedFact],
     ) -> list[MemoryAction]:
-        """Parse the LLM response into MemoryAction objects."""
+        """Parse the LLM response into MemoryAction objects.
+        
+        When possible, matches parsed facts back to original facts to preserve
+        meaning fields (intent, etc.) that were extracted with conversation context.
+        """
         actions = []
+        
+        # Build lookup for matching back to original facts
+        def find_original_fact(content: str) -> ExtractedFact | None:
+            """Find original fact by content similarity."""
+            content_lower = content.lower().strip()
+            for fact in new_facts:
+                if fact.content.lower().strip() == content_lower:
+                    return fact
+                # Also try partial match for slight LLM rewording
+                if len(content_lower) > 20 and content_lower[:20] in fact.content.lower():
+                    return fact
+            return None
         
         # Try to extract JSON from the response (look for code blocks first)
         code_block_match = re.search(r'```(?:json)?\s*(\{[\s\S]*?\})\s*```', response)
@@ -390,12 +506,28 @@ class MemoryExtractionService:
                 
                 if action_type == "ADD":
                     fact_data = raw_action.get("fact", {})
-                    fact = ExtractedFact(
-                        content=fact_data.get("content", ""),
-                        memory_type=fact_data.get("memory_type", "misc"),
-                        importance=float(fact_data.get("importance", 0.5)),
-                        source_message_ids=fact_data.get("source_message_ids", []),
-                    )
+                    content = fact_data.get("content", "")
+                    
+                    # Try to match back to original fact (preserves intent from extraction)
+                    original = find_original_fact(content)
+                    if original:
+                        fact = original
+                    else:
+                        # Fallback: create new fact with heuristic meaning
+                        tags = fact_data.get("tags") or fact_data.get("memory_type") or []
+                        if isinstance(tags, str):
+                            tags = [tags]
+                        tags = [t.strip().lower() for t in tags if t]
+                        if not tags:
+                            tags = ["misc"]
+                        fact = ExtractedFact(
+                            content=content,
+                            tags=tags,
+                            importance=float(fact_data.get("importance", 0.5)),
+                            source_message_ids=fact_data.get("source_message_ids", []),
+                        )
+                        fact = self._enrich_meaning(fact)
+                    
                     actions.append(MemoryAction(
                         action="ADD",
                         fact=fact,
@@ -404,12 +536,28 @@ class MemoryExtractionService:
                     
                 elif action_type == "UPDATE":
                     fact_data = raw_action.get("fact", {})
-                    fact = ExtractedFact(
-                        content=fact_data.get("content", ""),
-                        memory_type=fact_data.get("memory_type", "misc"),
-                        importance=float(fact_data.get("importance", 0.5)),
-                        source_message_ids=fact_data.get("source_message_ids", []),
-                    )
+                    content = fact_data.get("content", "")
+                    
+                    # Try to match back to original fact (preserves intent from extraction)
+                    original = find_original_fact(content)
+                    if original:
+                        fact = original
+                    else:
+                        # Fallback: create new fact with heuristic meaning
+                        tags = fact_data.get("tags") or fact_data.get("memory_type") or []
+                        if isinstance(tags, str):
+                            tags = [tags]
+                        tags = [t.strip().lower() for t in tags if t]
+                        if not tags:
+                            tags = ["misc"]
+                        fact = ExtractedFact(
+                            content=content,
+                            tags=tags,
+                            importance=float(fact_data.get("importance", 0.5)),
+                            source_message_ids=fact_data.get("source_message_ids", []),
+                        )
+                        fact = self._enrich_meaning(fact)
+                    
                     actions.append(MemoryAction(
                         action="UPDATE",
                         fact=fact,

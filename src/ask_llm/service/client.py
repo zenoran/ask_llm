@@ -431,7 +431,7 @@ class ServiceClient:
                         "id": r["id"],
                         "document": r["content"],
                         "metadata": {
-                            "memory_type": r.get("memory_type", "misc"),
+                            "tags": r.get("tags", ["misc"]),
                             "importance": r.get("importance", 0.5),
                             "source_message_ids": r.get("source_message_ids", []),
                         },

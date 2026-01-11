@@ -466,6 +466,10 @@ class BackgroundService:
                 result = await self._process_compaction(task)
             elif task.task_type == TaskType.EMBEDDING_GENERATION:
                 result = await self._process_embeddings(task)
+            elif task.task_type == TaskType.MEANING_UPDATE:
+                result = await self._process_meaning_update(task)
+            elif task.task_type == TaskType.MEMORY_MAINTENANCE:
+                result = await self._process_maintenance(task)
             else:
                 raise ValueError(f"Unknown task type: {task.task_type}")
             
@@ -524,9 +528,13 @@ class BackgroundService:
                         memory_backend.add_memory(
                             memory_id=str(uuid.uuid4()),
                             content=fact.content,
-                            memory_type=fact.memory_type,
+                            tags=fact.tags,
                             importance=fact.importance,
                             source_message_ids=fact.source_message_ids,
+                            intent=fact.meaning.intent if fact.meaning else None,
+                            stakes=fact.meaning.stakes if fact.meaning else None,
+                            emotional_charge=fact.meaning.emotional_charge if fact.meaning else None,
+                            recurrence_keywords=fact.meaning.recurrence_keywords if fact.meaning else None,
                         )
                         stored_count += 1
                     except Exception as e:
@@ -543,6 +551,73 @@ class BackgroundService:
         """Process an embedding generation task."""
         # TODO: Implement with embedding model
         return {"embeddings_generated": 0, "reason": "Not yet implemented"}
+
+    async def _process_meaning_update(self, task: Task) -> dict:
+        """Process a meaning update task."""
+        from ..memory.maintenance import update_memory_meaning
+
+        bot_id = task.bot_id
+        payload = task.payload
+        memory_id = payload.get("memory_id")
+        if not memory_id:
+            return {"updated": False, "reason": "No memory_id provided"}
+
+        memory_backend = self.get_memory_backend(bot_id)
+        if not memory_backend:
+            return {"updated": False, "reason": "Memory backend unavailable"}
+
+        loop = asyncio.get_event_loop()
+        success = await loop.run_in_executor(
+            None,
+            lambda: update_memory_meaning(
+                backend=memory_backend,
+                memory_id=memory_id,
+                intent=payload.get("intent"),
+                stakes=payload.get("stakes"),
+                emotional_charge=payload.get("emotional_charge"),
+                recurrence_keywords=payload.get("recurrence_keywords"),
+                updated_tags=payload.get("updated_tags"),
+            ),
+        )
+        return {"updated": success, "memory_id": memory_id}
+
+    async def _process_maintenance(self, task: Task) -> dict:
+        """Process a unified memory maintenance task."""
+        from ..memory.maintenance import MemoryMaintenance
+
+        bot_id = task.bot_id
+        payload = task.payload
+
+        memory_backend = self.get_memory_backend(bot_id)
+        if not memory_backend:
+            return {"error": "Memory backend unavailable"}
+
+        # Get local LLM client for consolidation
+        llm_client = None
+        if self._extraction_model:
+            try:
+                llm_client = self.get_client(self._extraction_model)
+            except Exception as e:
+                logger.warning(f"Could not load LLM for maintenance: {e}")
+
+        maint = MemoryMaintenance(
+            backend=memory_backend,
+            llm_client=llm_client,
+            config=self.config,
+        )
+
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(
+            None,
+            lambda: maint.run(
+                run_consolidation=payload.get("run_consolidation", True),
+                run_recurrence_detection=payload.get("run_recurrence_detection", True),
+                run_decay_pruning=payload.get("run_decay_pruning", False),
+                run_orphan_cleanup=payload.get("run_orphan_cleanup", False),
+                dry_run=payload.get("dry_run", False),
+            ),
+        )
+        return result.to_dict()
     
     def submit_task(self, task: Task) -> str:
         """Submit a task to the processing queue."""

@@ -262,18 +262,22 @@ class OpenAIClient(LLMClient):
 
     def _prepare_api_messages(self, messages: List[Message]) -> list[dict]:
         prepared = []
-        has_system = False
+        system_contents = []
         system_message = self.config.SYSTEM_MESSAGE
+        
         for msg in messages:
             api_msg = msg.to_api_format()
             if api_msg['role'] == 'system':
-                if not has_system:
-                    prepared.insert(0, api_msg)
-                    has_system = True
+                # Collect all system messages to merge
+                system_contents.append(api_msg['content'])
             else:
                 prepared.append(api_msg)
 
-        if not has_system and system_message:
+        # Merge all system content into a single system message
+        if system_contents:
+            merged_system = "\n\n".join(system_contents)
+            prepared.insert(0, {"role": "system", "content": merged_system})
+        elif system_message:
             prepared.insert(0, {"role": "system", "content": system_message})
 
         return prepared

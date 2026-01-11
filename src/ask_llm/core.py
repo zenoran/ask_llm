@@ -301,10 +301,14 @@ class AskLLM:
             logger.warning("Could not find leading system prompt in history messages.")
         return system_prompt_message, processing_messages
 
-    def _retrieve_and_prepare_memory(self, prompt: str, history_turns: list[Message]) -> list[Message]:
-        """Retrieves relevant memories and prepares them (deduplication)."""
+    def _retrieve_and_prepare_memory(self, prompt: str, history_turns: list[Message]) -> tuple[list[dict], str]:
+        """Retrieves relevant memories and builds structured context.
+        
+        Returns:
+            Tuple of (raw_memories, structured_context_string)
+        """
         if not self.memory_backend:
-            return []
+            return [], ""
 
         retrieved_memories_raw = None
         try:
@@ -315,56 +319,63 @@ class AskLLM:
             if retrieved_memories_raw:
                 logger.debug(f"Retrieved {len(retrieved_memories_raw)} memories (max {n_results}, min_relevance={min_relevance}):")
                 for i, mem in enumerate(retrieved_memories_raw):
-                    logger.debug(f"  Mem {i+1}: ID={mem.get('id')}, Role={mem.get('metadata',{}).get('role')}, Relevance={mem.get('relevance', 0):.4f}, Content='{mem.get('document', '')[:60]}...'")
+                    logger.debug(f"  Mem {i+1}: ID={mem.get('id')}, Relevance={mem.get('relevance', 0):.4f}, Intent={mem.get('intent')}, Content='{mem.get('document', mem.get('content', ''))[:60]}...'")
             else:
                 logger.debug("No relevant memories found or search failed.")
         except Exception as e:
             logger.exception(f"Error during memory retrieval: {e}")
-            return []
+            return [], ""
 
         if not retrieved_memories_raw:
-            return []
-
-        # Convert retrieved dicts to Message objects
-        # Sort by relevance ASCENDING (least relevant first) for proper truncation order
-        # Truncation removes from index 0, so least relevant should be first
-        sorted_memories = sorted(retrieved_memories_raw, key=lambda x: x.get('relevance', 0.0))
-        memory_messages = [
-            Message(role='system', content=f"[Memory] {mem.get('document', '')}")
-            for mem in sorted_memories if mem.get('document')
-        ]
+            return [], ""
 
         # Fuzzy deduplicate against history turns
-        # A memory is considered duplicate if similarity >= threshold
         similarity_threshold = self.config.MEMORY_DEDUP_SIMILARITY
         history_contents = [msg.content for msg in history_turns]
         
-        unique_memory_messages = []
-        for mem_msg in memory_messages:
+        unique_memories = []
+        for mem in retrieved_memories_raw:
+            content = mem.get('document', mem.get('content', ''))
+            if not content:
+                continue
             is_duplicate = False
             for hist_content in history_contents:
-                similarity = _text_similarity(mem_msg.content, hist_content)
+                similarity = _text_similarity(content, hist_content)
                 if similarity >= similarity_threshold:
-                    logger.debug(f"Dedup: Memory '{mem_msg.content[:40]}...' is {similarity:.2%} similar to history, skipping")
+                    logger.debug(f"Dedup: Memory '{content[:40]}...' is {similarity:.2%} similar to history, skipping")
                     is_duplicate = True
                     break
             if not is_duplicate:
-                unique_memory_messages.append(mem_msg)
+                unique_memories.append(mem)
         
-        return unique_memory_messages
+        if not unique_memories:
+            return [], ""
+        
+        # Build structured context using meaning fields
+        from .memory.context_builder import build_memory_context_string
+        
+        # Get user name from profile if available
+        user_name = None
+        if self.user_profile:
+            user_name = getattr(self.user_profile, 'name', None) or getattr(self.user_profile, 'display_name', None)
+        
+        structured_context = build_memory_context_string(unique_memories, user_name=user_name)
+        
+        return unique_memories, structured_context
 
-    def _combine_memory_and_history(self, unique_memory_messages: list[Message], history_turns: list[Message]) -> tuple[list[Message], bool]:
-        """Combines unique memories with history turns, adding a delimiter if memories exist."""
+    def _combine_memory_and_history(self, memory_context: str, history_turns: list[Message]) -> tuple[list[Message], bool]:
+        """Combines structured memory context with history turns."""
         final_combined_turns = list(history_turns)
         memory_delimiter_added = False
 
-        if unique_memory_messages:
-            logger.debug(f"Adding {len(unique_memory_messages)} unique memories to context.")
-            memory_delimiter = Message(role="system", content="--- Things you remember about the user (from past conversations) ---")
-            final_combined_turns = unique_memory_messages + [memory_delimiter] + final_combined_turns
+        if memory_context:
+            logger.debug(f"Adding structured memory context ({len(memory_context)} chars) to conversation.")
+            # Insert memory context as a system message before history
+            memory_message = Message(role="system", content=memory_context)
+            final_combined_turns = [memory_message] + final_combined_turns
             memory_delimiter_added = True
         else:
-            logger.debug("No unique memories to combine after deduplication.")
+            logger.debug("No memory context to add.")
         
         return final_combined_turns, memory_delimiter_added
 
@@ -517,12 +528,12 @@ class AskLLM:
         # Stage 1: Prepare initial prompt and history
         system_prompt_message, history_turns = self._prepare_initial_prompt_and_history(prompt)
 
-        # Stage 2: Retrieve and prepare memory
-        unique_memory_messages = self._retrieve_and_prepare_memory(prompt, history_turns)
+        # Stage 2: Retrieve and prepare memory (returns structured context string)
+        _, memory_context = self._retrieve_and_prepare_memory(prompt, history_turns)
 
-        # Stage 3: Combine memory and history
+        # Stage 3: Combine memory context and history
         combined_turns, memory_delimiter_added = self._combine_memory_and_history(
-            unique_memory_messages, history_turns
+            memory_context, history_turns
         )
 
         # Stage 4: Truncate messages if needed
@@ -714,9 +725,13 @@ class AskLLM:
                         self.memory_backend.add_memory(
                             memory_id=memory_id,
                             content=action.fact.content,
-                            memory_type=action.fact.memory_type,
+                            tags=action.fact.tags,
                             importance=action.fact.importance,
                             source_message_ids=action.fact.source_message_ids,
+                            intent=action.fact.meaning.intent if action.fact.meaning else None,
+                            stakes=action.fact.meaning.stakes if action.fact.meaning else None,
+                            emotional_charge=action.fact.meaning.emotional_charge if action.fact.meaning else None,
+                            recurrence_keywords=action.fact.meaning.recurrence_keywords if action.fact.meaning else None,
                         )
                         logger.debug(f"Added memory: {action.fact.content[:50]}... (importance: {action.fact.importance})")
                         
@@ -726,9 +741,13 @@ class AskLLM:
                     self.memory_backend.add_memory(
                         memory_id=new_memory_id,
                         content=action.fact.content,
-                        memory_type=action.fact.memory_type,
+                        tags=action.fact.tags,
                         importance=action.fact.importance,
                         source_message_ids=action.fact.source_message_ids,
+                        intent=action.fact.meaning.intent if action.fact.meaning else None,
+                        stakes=action.fact.meaning.stakes if action.fact.meaning else None,
+                        emotional_charge=action.fact.meaning.emotional_charge if action.fact.meaning else None,
+                        recurrence_keywords=action.fact.meaning.recurrence_keywords if action.fact.meaning else None,
                     )
                     # Mark old memory as superseded instead of overwriting
                     if hasattr(self.memory_backend, 'supersede_memory'):
@@ -759,12 +778,12 @@ class AskLLM:
             # Stage 1: Prepare initial prompt and history
             system_prompt_message, history_turns = self._prepare_initial_prompt_and_history(prompt)
 
-            # Stage 2: Retrieve and prepare memory
-            unique_memory_messages = self._retrieve_and_prepare_memory(prompt, history_turns)
+            # Stage 2: Retrieve and prepare memory (returns structured context string)
+            _, memory_context = self._retrieve_and_prepare_memory(prompt, history_turns)
 
-            # Stage 3: Combine memory and history
+            # Stage 3: Combine memory context and history
             combined_turns, memory_delimiter_added = self._combine_memory_and_history(
-                unique_memory_messages, history_turns
+                memory_context, history_turns
             )
 
             # Stage 4: Truncate messages if needed

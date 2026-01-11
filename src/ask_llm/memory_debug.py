@@ -17,6 +17,7 @@ Usage:
 """
 
 import argparse
+import json
 import sys
 from datetime import datetime
 from rich.console import Console
@@ -211,11 +212,11 @@ def show_stats(backend, bot_id: str):
         except Exception:
             msg_forgotten = 0  # Table may not exist yet
         
-        # Memory types
-        type_counts = conn.execute(text(f"""
-            SELECT memory_type, COUNT(*) as count 
-            FROM {bot_id}_memories 
-            GROUP BY memory_type 
+        # Tag distribution
+        tag_counts = conn.execute(text(f"""
+            SELECT tag, COUNT(*) as count 
+            FROM {bot_id}_memories, jsonb_array_elements_text(tags) AS tag
+            GROUP BY tag
             ORDER BY count DESC
         """)).fetchall()
         
@@ -240,12 +241,12 @@ def show_stats(backend, bot_id: str):
 [bold]Messages:[/bold] {msg_count} total ({msg_forgotten} forgotten/recoverable)
 """, title="Memory Statistics"))
     
-    # Memory types table
-    table = Table(title="Memory Types")
-    table.add_column("Type", style="cyan")
+    # Tag distribution table
+    table = Table(title="Tag Distribution")
+    table.add_column("Tag", style="cyan")
     table.add_column("Count", justify="right")
-    for row in type_counts:
-        table.add_row(row.memory_type, str(row.count))
+    for row in tag_counts:
+        table.add_row(row.tag, str(row.count))
     console.print(table)
     
     # Importance distribution
@@ -263,7 +264,7 @@ def list_all_memories(backend, limit: int):
     
     with backend.engine.connect() as conn:
         rows = conn.execute(text(f"""
-            SELECT id, content, memory_type, importance, access_count, created_at
+            SELECT id, content, tags, importance, access_count, created_at
             FROM {backend._memories_table_name}
             ORDER BY importance DESC, access_count DESC, created_at DESC
             LIMIT :limit
@@ -271,15 +272,16 @@ def list_all_memories(backend, limit: int):
     
     table = Table(title=f"Top {limit} Memories by Importance")
     table.add_column("Imp", justify="right", style="cyan", width=4)
-    table.add_column("Type", style="magenta", width=12)
+    table.add_column("Tags", style="magenta", width=20)
     table.add_column("Content", style="white", max_width=80)
     table.add_column("Acc", justify="right", width=3)
     
     for row in rows:
         content = row.content[:100] + "..." if len(row.content) > 100 else row.content
+        tags = row.tags if isinstance(row.tags, list) else (json.loads(row.tags) if row.tags else ["misc"])
         table.add_row(
             f"{row.importance:.2f}",
-            row.memory_type,
+            ", ".join(tags[:3]),
             content,
             str(row.access_count or 0),
         )
@@ -398,16 +400,20 @@ def display_results(results: list, method: str):
     table = Table()
     table.add_column("Rel", justify="right", style="cyan", width=5)
     table.add_column("Imp", justify="right", style="yellow", width=4)
-    table.add_column("Type", style="magenta", width=12)
+    table.add_column("Tags", style="magenta", width=20)
     table.add_column("Content", style="white", max_width=80)
     
     for r in results:
         content = r["content"][:100] + "..." if len(r["content"]) > 100 else r["content"]
         relevance = r.get("relevance", r.get("similarity", 0))
+        tags = r.get("tags", ["misc"])
+        if isinstance(tags, str):
+            import json
+            tags = json.loads(tags) if tags else ["misc"]
         table.add_row(
             f"{relevance:.3f}",
             f"{r['importance']:.2f}",
-            r["memory_type"],
+            ", ".join(tags[:3]) if tags else "misc",
             content,
         )
     
@@ -521,10 +527,11 @@ def handle_consolidate(backend, config, dry_run: bool = False):
     
     for i, cluster in enumerate(clusters[:20], 1):  # Show first 20
         sample = cluster.memories[0]["content"][:60] + "..." if len(cluster.memories[0]["content"]) > 60 else cluster.memories[0]["content"]
+        tags = cluster.combined_tags
         table.add_row(
             str(i),
             str(len(cluster)),
-            cluster.memories[0]["memory_type"],
+            ", ".join(tags[:3]),
             f"{cluster.avg_similarity:.2f}",
             sample,
         )

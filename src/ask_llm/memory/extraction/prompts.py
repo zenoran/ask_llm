@@ -4,16 +4,16 @@ These prompts are used to distill important facts from conversations
 and handle memory updates/conflicts.
 """
 
-# Memory types for categorization
-MEMORY_TYPES = [
-    "preference",      # User preferences and likes/dislikes
-    "fact",           # Factual information about the user
-    "event",          # Past or planned events
-    "plan",           # Goals, intentions, future plans
-    "professional",   # Work, career, skills
-    "health",         # Health-related information
-    "relationship",   # Information about relationships/people
-    "misc",           # Anything that doesn't fit above
+# Canonical tags for categorization (extensible)
+MEMORY_TAGS = [
+  "preference",      # User preferences and likes/dislikes
+  "fact",            # Factual information about the user
+  "event",           # Past or planned events
+  "plan",            # Goals, intentions, future plans
+  "professional",    # Work, career, skills
+  "health",          # Health-related information
+  "relationship",    # Information about relationships/people
+  "misc",            # Anything that doesn't fit above
 ]
 
 # Note: Use get_fact_extraction_prompt(conversation) to get the formatted prompt
@@ -36,13 +36,14 @@ Rules:
 6. Do NOT extract trivial or temporary information (e.g., "User said hello")
 7. If no important facts are present, return an empty list
 
-For each fact, also assign:
-- memory_type: One of """ + str(MEMORY_TYPES) + """
+For each fact, assign:
+- tags: One or more from """ + str(MEMORY_TAGS) + """ (you may add additional short tags if needed)
 - importance: Float 0.0-1.0 where:
   - 0.0-0.3: Nice to know, low priority
   - 0.4-0.6: Moderately important, useful context
   - 0.7-0.9: Important, should be remembered
   - 1.0: Critical, essential information
+- intent: A brief phrase (3-6 words) describing WHY the user shared this. Be specific to the situation rather than generic.
 
 Examples:
 
@@ -57,18 +58,21 @@ Output:
   "facts": [
     {{
       "content": "User is a software engineer working at Google",
-      "memory_type": "professional",
-      "importance": 0.8
+      "tags": ["professional"],
+      "importance": 0.8,
+      "intent": "establishing context"
     }},
     {{
       "content": "User works primarily on backend projects",
-      "memory_type": "professional", 
-      "importance": 0.6
+      "tags": ["professional"], 
+      "importance": 0.6,
+      "intent": "providing background"
     }},
     {{
       "content": "User uses Python and Go programming languages",
-      "memory_type": "professional",
-      "importance": 0.7
+      "tags": ["professional"],
+      "importance": 0.7,
+      "intent": "providing background"
     }}
   ]
 }}
@@ -96,13 +100,15 @@ Output:
   "facts": [
     {{
       "content": "User has a doctor's appointment scheduled for next Tuesday",
-      "memory_type": "event",
-      "importance": 0.5
+      "tags": ["event"],
+      "importance": 0.5,
+      "intent": "sharing upcoming event"
     }},
     {{
       "content": "User has chronic lower back pain that has persisted for approximately 2 years",
-      "memory_type": "health",
-      "importance": 0.8
+      "tags": ["health"],
+      "importance": 0.8,
+      "intent": "providing health context"
     }}
   ]
 }}
@@ -116,8 +122,8 @@ Output only valid JSON:"""
 
 
 def get_fact_extraction_prompt(conversation: str) -> str:
-    """Get the fact extraction prompt with the conversation filled in."""
-    return FACT_EXTRACTION_PROMPT_TEMPLATE.format(conversation=conversation)
+  """Get the fact extraction prompt with the conversation filled in."""
+  return FACT_EXTRACTION_PROMPT_TEMPLATE.format(conversation=conversation)
 
 
 MEMORY_UPDATE_PROMPT_TEMPLATE = """You are a memory management assistant. Your task is to compare newly extracted facts against existing memories and determine the appropriate action for each new fact.
@@ -150,8 +156,8 @@ Existing memories:
 
 New facts:
 [
-  {{"content": "User recently moved to Seattle", "memory_type": "fact", "importance": 0.8}},
-  {{"content": "User works on machine learning projects", "memory_type": "professional", "importance": 0.7}}
+  {{"content": "User recently moved to Seattle", "tags": ["fact"], "importance": 0.8}},
+  {{"content": "User works on machine learning projects", "tags": ["professional"], "importance": 0.7}}
 ]
 
 Output:
@@ -167,7 +173,7 @@ Output:
       "action": "ADD",
       "fact": {{
         "content": "User lives in Seattle",
-        "memory_type": "fact",
+        "tags": ["fact"],
         "importance": 0.8
       }},
       "reason": "New location information"
@@ -176,7 +182,7 @@ Output:
       "action": "ADD",
       "fact": {{
         "content": "User works on machine learning projects",
-        "memory_type": "professional",
+        "tags": ["professional"],
         "importance": 0.7
       }},
       "reason": "Adds specific detail about work, complements existing engineer memory"

@@ -52,6 +52,25 @@ class MemoryCluster:
             if isinstance(sources, list):
                 ids.update(sources)
         return list(ids)
+
+    @property
+    def combined_tags(self) -> list[str]:
+        """Union of all tags from memories in the cluster."""
+        tags = set()
+        for m in self.memories:
+            mem_tags = m.get("tags") or []
+            if isinstance(mem_tags, list):
+                tags.update(mem_tags)
+        return list(tags) or ["misc"]
+    
+    @property
+    def best_intent(self) -> str | None:
+        """Get intent from highest-importance memory that has one."""
+        sorted_mems = sorted(self.memories, key=lambda m: m.get("importance", 0), reverse=True)
+        for m in sorted_mems:
+            if m.get("intent"):
+                return m["intent"]
+        return None
     
     def __len__(self) -> int:
         return len(self.memories)
@@ -123,16 +142,15 @@ class MemoryConsolidator:
         self.threshold = similarity_threshold or self.DEFAULT_SIMILARITY_THRESHOLD
     
     def get_all_active_memories_with_embeddings(self) -> list[dict]:
-        """Fetch all non-superseded memories that have embeddings."""
+        """Fetch all memories that have embeddings."""
         from sqlalchemy import text
         
         with self.backend.engine.connect() as conn:
             sql = text(f"""
-                SELECT id, content, memory_type, importance, source_message_ids,
-                       access_count, last_accessed, created_at, embedding
+                SELECT id, content, tags, importance, source_message_ids,
+                       access_count, last_accessed, created_at, embedding, intent
                 FROM {self.backend._memories_table_name}
-                WHERE superseded_by IS NULL
-                  AND embedding IS NOT NULL
+                WHERE embedding IS NOT NULL
                 ORDER BY created_at ASC
             """)
             rows = conn.execute(sql).fetchall()
@@ -151,10 +169,11 @@ class MemoryConsolidator:
                 memories.append({
                     "id": row.id,
                     "content": row.content,
-                    "memory_type": row.memory_type,
+                    "tags": row.tags if isinstance(row.tags, list) else (json.loads(row.tags) if row.tags else ["misc"]),
                     "importance": float(row.importance) if row.importance else 0.5,
                     "source_message_ids": row.source_message_ids,
                     "access_count": row.access_count or 0,
+                    "intent": row.intent,
                     "last_accessed": row.last_accessed,
                     "created_at": row.created_at,
                     "embedding": embedding,
@@ -213,14 +232,16 @@ class MemoryConsolidator:
                     continue
                 
                 mem_j = memories[j]
-                same_type = mem_i["memory_type"] == mem_j["memory_type"]
+                tags_i = set(mem_i.get("tags") or [])
+                tags_j = set(mem_j.get("tags") or [])
+                tag_overlap = bool(tags_i & tags_j)
                 embedding_sim = similarity_matrix[i, j]
                 
                 # Determine if should cluster (ordered by speed - fastest checks first)
                 should_cluster = False
                 
-                if same_type and embedding_sim >= self.threshold:
-                    # Same type, meets basic threshold
+                if tag_overlap and embedding_sim >= self.threshold:
+                    # Same type OR overlapping tags, meets basic threshold
                     should_cluster = True
                 elif embedding_sim >= self.CROSS_TYPE_SIMILARITY_THRESHOLD:
                     # Very high embedding similarity, allow cross-type
@@ -284,11 +305,11 @@ class MemoryConsolidator:
             memory_texts.append(f"{i}. {mem['content']}")
         
         memories_list = "\n".join(memory_texts)
-        memory_type = cluster.memories[0]["memory_type"]
+        tags = cluster.combined_tags
         
         prompt = f"""You are a memory consolidation system. Your task is to merge these similar memories into a single, comprehensive fact.
 
-Memory Type: {memory_type}
+Tags: {', '.join(tags)}
 
 Memories to merge:
 {memories_list}
@@ -345,76 +366,87 @@ Merged memory:"""
     ) -> str:
         """Create a new merged memory in the database.
         
+        Uses the backend's add_memory method which handles embedding generation
+        and meaning field heuristics.
+        
         Returns the new memory ID.
         """
-        import json
-        from sqlalchemy import text
-        from .embeddings import generate_embedding
-        
         memory_id = str(uuid.uuid4())
-        memory_type = cluster.memories[0]["memory_type"]
+        tags = cluster.combined_tags
         importance = cluster.combined_importance
-        access_count = cluster.total_access_count
         source_message_ids = cluster.all_source_message_ids
         
-        # Convert source_message_ids to JSON for JSONB column
-        source_message_ids_json = json.dumps(source_message_ids)
+        # Use intent from highest-importance memory (LLM-inferred, if available)
+        intent = cluster.best_intent
+        # Other meaning fields use heuristics
+        stakes = self._infer_stakes(importance)
+        emotional_charge = self._infer_emotion(content, importance)
+        recurrence_keywords = self._infer_recurrence(content, tags)
         
-        # Generate embedding for the merged content
-        embedding = generate_embedding(content, self.backend.embedding_model)
+        # Use backend's add_memory which handles embeddings and schema properly
+        self.backend.add_memory(
+            memory_id=memory_id,
+            content=content,
+            tags=tags,
+            importance=importance,
+            source_message_ids=source_message_ids,
+            intent=intent,
+            stakes=stakes,
+            emotional_charge=emotional_charge,
+            recurrence_keywords=recurrence_keywords,
+        )
         
-        with self.backend.engine.connect() as conn:
-            if embedding:
+        # Update access count separately (add_memory doesn't support it)
+        access_count = cluster.total_access_count
+        if access_count > 0:
+            from sqlalchemy import text
+            with self.backend.engine.connect() as conn:
                 sql = text(f"""
-                    INSERT INTO {self.backend._memories_table_name}
-                    (id, content, memory_type, importance, source_message_ids,
-                     access_count, created_at, updated_at, embedding)
-                    VALUES (:id, :content, :memory_type, :importance, CAST(:source_message_ids AS jsonb),
-                            :access_count, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, :embedding)
+                    UPDATE {self.backend._memories_table_name}
+                    SET access_count = :count
+                    WHERE id = :id
                 """)
-                conn.execute(sql, {
-                    "id": memory_id,
-                    "content": content,
-                    "memory_type": memory_type,
-                    "importance": importance,
-                    "source_message_ids": source_message_ids_json,
-                    "access_count": access_count,
-                    "embedding": f"[{','.join(str(x) for x in embedding)}]",
-                })
-            else:
-                sql = text(f"""
-                    INSERT INTO {self.backend._memories_table_name}
-                    (id, content, memory_type, importance, source_message_ids,
-                     access_count, created_at, updated_at)
-                    VALUES (:id, :content, :memory_type, :importance, CAST(:source_message_ids AS jsonb),
-                            :access_count, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-                """)
-                conn.execute(sql, {
-                    "id": memory_id,
-                    "content": content,
-                    "memory_type": memory_type,
-                    "importance": importance,
-                    "source_message_ids": source_message_ids_json,
-                    "access_count": access_count,
-                })
-            
-            conn.commit()
+                conn.execute(sql, {"count": access_count, "id": memory_id})
+                conn.commit()
         
         return memory_id
     
-    def supersede_memories(self, memory_ids: list[str], new_memory_id: str) -> None:
-        """Mark memories as superseded by the new merged memory."""
+    def _infer_stakes(self, importance: float) -> str:
+        """Infer stakes from importance score."""
+        if importance >= 0.8:
+            return "critical to remember; forgetting would harm trust or outcomes"
+        if importance >= 0.6:
+            return "important context for smooth interactions"
+        return "nice-to-know; low stakes"
+    
+    def _infer_emotion(self, content: str, importance: float) -> float:
+        """Infer emotional charge from content and importance."""
+        text_lower = content.lower()
+        charge = 0.2 + 0.6 * importance
+        keywords_high = ["love", "hate", "angry", "excited", "anxious", "worried", "sad"]
+        if any(k in text_lower for k in keywords_high):
+            charge = max(charge, 0.8)
+        return min(1.0, max(0.0, charge))
+    
+    def _infer_recurrence(self, content: str, tags: list[str]) -> list[str]:
+        """Extract recurrence keywords from content and tags."""
+        import re
+        tag_list = [t for t in tags if t]
+        words = re.findall(r"[a-zA-Z]{4,}", content.lower())
+        return list(set(tag_list + words[:3]))
+    
+    def delete_merged_memories(self, memory_ids: list[str]) -> None:
+        """Delete the old memories that were merged into a new one."""
         from sqlalchemy import text
         
         with self.backend.engine.connect() as conn:
             sql = text(f"""
-                UPDATE {self.backend._memories_table_name}
-                SET superseded_by = :new_id,
-                    updated_at = CURRENT_TIMESTAMP
+                DELETE FROM {self.backend._memories_table_name}
                 WHERE id = ANY(:ids)
             """)
-            conn.execute(sql, {"new_id": new_memory_id, "ids": memory_ids})
+            conn.execute(sql, {"ids": memory_ids})
             conn.commit()
+            logger.debug(f"Deleted {len(memory_ids)} merged memories")
     
     def consolidate(self, dry_run: bool = False) -> ConsolidationResult:
         """Run the full consolidation process.
@@ -449,7 +481,7 @@ Merged memory:"""
         # Process each cluster
         for cluster in clusters:
             try:
-                logger.debug(f"Processing cluster of {len(cluster)} memories (type={cluster.memories[0]['memory_type']})")
+                logger.debug(f"Processing cluster of {len(cluster)} memories (tags={cluster.combined_tags})")
                 
                 # Try LLM merge first, fall back to heuristic
                 merged_content = None
@@ -467,14 +499,14 @@ Merged memory:"""
                     # Create merged memory
                     new_id = self.create_merged_memory(merged_content, cluster)
                     
-                    # Supersede originals
-                    self.supersede_memories(cluster.memory_ids, new_id)
+                    # Delete the original memories
+                    self.delete_merged_memories(cluster.memory_ids)
                     
                     result.clusters_merged += 1
                     result.memories_consolidated += len(cluster)
                     result.new_memories_created += 1
                     
-                    logger.debug(f"Created merged memory {new_id}")
+                    logger.debug(f"Created merged memory {new_id}, deleted {len(cluster)} originals")
                     
             except Exception as e:
                 error_msg = f"Failed to process cluster: {e}"
