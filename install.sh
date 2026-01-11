@@ -11,6 +11,7 @@
 # Options:
 #   --with-llama    Install llama-cpp-python for local GGUF models
 #   --with-hf       Install HuggingFace transformers + torch
+#   --with-service  Install FastAPI service for background tasks & API
 #   --all           Install all optional dependencies
 #   --no-cuda       Skip CUDA support for llama-cpp-python
 #   --uninstall     Remove ask_llm
@@ -28,8 +29,10 @@ NC='\033[0m' # No Color
 # Defaults
 INSTALL_LLAMA=false
 INSTALL_HF=false
+INSTALL_SERVICE=false
 WITH_CUDA=true
 UNINSTALL=false
+EDITABLE=false
 REPO="git+https://github.com/zenoran/ask_llm.git"
 
 # Parse arguments
@@ -43,9 +46,14 @@ while [[ $# -gt 0 ]]; do
             INSTALL_HF=true
             shift
             ;;
+        --with-service)
+            INSTALL_SERVICE=true
+            shift
+            ;;
         --all)
             INSTALL_LLAMA=true
             INSTALL_HF=true
+            INSTALL_SERVICE=true
             shift
             ;;
         --no-cuda)
@@ -57,8 +65,9 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --local)
-            # For development: install from local path
+            # For development: install from local path (editable)
             REPO="$2"
+            EDITABLE=true
             shift 2
             ;;
         *)
@@ -111,7 +120,35 @@ echo -e "${GREEN}✓ pipx available${NC}"
 
 # Install ask_llm
 echo -e "${BLUE}Installing ask_llm...${NC}"
-pipx install --force "$REPO"
+
+# Build extras string based on flags
+EXTRAS=""
+if [ "$INSTALL_SERVICE" = true ]; then
+    EXTRAS="service"
+fi
+
+# Build pipx install flags
+PIPX_FLAGS="--force"
+if [ "$EDITABLE" = true ]; then
+    PIPX_FLAGS="$PIPX_FLAGS --editable"
+    echo -e "${YELLOW}  Installing in editable mode (changes to source will take effect immediately)${NC}"
+fi
+
+if [ -n "$EXTRAS" ]; then
+    # Install with extras - need to modify the package spec
+    if [[ "$REPO" == git+* ]]; then
+        # Git URL: append [extras] before the .git or at end
+        INSTALL_SPEC="${REPO%.git}[${EXTRAS}].git"
+        # Fallback: just install base then inject
+        pipx install $PIPX_FLAGS "$REPO"
+    else
+        # Local path
+        INSTALL_SPEC="${REPO}[${EXTRAS}]"
+        pipx install $PIPX_FLAGS "$INSTALL_SPEC"
+    fi
+else
+    pipx install $PIPX_FLAGS "$REPO"
+fi
 echo -e "${GREEN}✓ ask_llm installed${NC}"
 
 # Install optional dependencies
@@ -150,6 +187,14 @@ if [ "$INSTALL_HF" = true ]; then
     echo -e "${GREEN}✓ HuggingFace dependencies installed${NC}"
 fi
 
+if [ "$INSTALL_SERVICE" = true ]; then
+    echo -e "${BLUE}Installing FastAPI service dependencies...${NC}"
+    pipx runpip ask-llm install fastapi "uvicorn[standard]" httpx
+    # Reinstall to expose the llm-service entry point
+    pipx install $PIPX_FLAGS "$REPO"
+    echo -e "${GREEN}✓ FastAPI service dependencies installed${NC}"
+fi
+
 # Verify installation
 echo
 echo -e "${BLUE}Verifying installation...${NC}"
@@ -160,19 +205,34 @@ else
     echo -e "  ${YELLOW}export PATH=\"\$HOME/.local/bin:\$PATH\"${NC}"
 fi
 
+if [ "$INSTALL_SERVICE" = true ]; then
+    if command -v llm-service &> /dev/null; then
+        echo -e "${GREEN}✓ 'llm-service' command available${NC}"
+    fi
+fi
+
 echo
 echo -e "${GREEN}╭─────────────────────────────╮${NC}"
 echo -e "${GREEN}│   Installation Complete!    │${NC}"
 echo -e "${GREEN}╰─────────────────────────────╯${NC}"
 echo
 echo -e "Commands available:"
-echo -e "  ${BLUE}llm${NC}      - Query LLM models"
-echo -e "  ${BLUE}ask-llm${NC}  - Same as llm"
+echo -e "  ${BLUE}llm${NC}           - Query LLM models"
+echo -e "  ${BLUE}ask-llm${NC}       - Same as llm"
+if [ "$INSTALL_SERVICE" = true ]; then
+echo -e "  ${BLUE}llm-service${NC}   - Run background service/API"
+fi
 echo
 echo -e "Quick start:"
 echo -e "  ${BLUE}llm --status${NC}           - Check system status"
 echo -e "  ${BLUE}llm --list-models${NC}      - List available models"
 echo -e "  ${BLUE}llm \"Hello, world!\"${NC}    - Ask a question"
+if [ "$INSTALL_SERVICE" = true ]; then
+echo
+echo -e "Service:"
+echo -e "  ${BLUE}llm-service${NC}            - Start the background service"
+echo -e "  ${BLUE}llm-service --port 8080${NC} - Start on custom port"
+fi
 echo
 echo -e "Configuration: ${YELLOW}~/.config/ask-llm/.env${NC}"
 echo

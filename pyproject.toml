@@ -28,6 +28,9 @@ dev = [
     "pytest-cov>=5.0.0",
     "pytest-mock>=3.14.0",
 ]
+memory = [
+    "sentence-transformers>=2.2.0",
+]
 huggingface = [
     "transformers>=4.35.0",
     "bitsandbytes>=0.42.0",
@@ -42,10 +45,18 @@ llamacpp = [
     "llama-cpp-python",
 ]
 
+service = [
+    "fastapi>=0.109.0",
+    "uvicorn[standard]>=0.27.0",
+    "httpx>=0.26.0",
+]
+
 
 [project.scripts]
 ask-llm = "ask_llm.main:main"
 llm = "ask_llm.main:main"
+ask-llm-service = "ask_llm.service.server:main"
+llm-service = "ask_llm.service.server:main"
 
 [project.entry-points."ask_llm.memory"]
 postgresql = "ask_llm.memory.postgresql:PostgreSQLMemoryBackend"

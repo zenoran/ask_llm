@@ -1,5 +1,6 @@
 import importlib.util
 import pathlib
+import threading
 import time
 import uuid
 from difflib import SequenceMatcher
@@ -483,9 +484,86 @@ class AskLLM:
         logger.debug(f"Final context assembly: {len(final_messages_to_send)} total messages prepared.")
         return final_messages_to_send
 
+    def prepare_messages_for_query(self, prompt: str) -> list[Message]:
+        """
+        Prepare messages for a query, including history and memory context.
+        
+        This method runs stages 1-5 of the query pipeline without executing the LLM call.
+        Useful for external callers (like the service API) that need the prepared messages
+        to stream themselves.
+        
+        Args:
+            prompt: The user's prompt/question
+            
+        Returns:
+            List of Message objects ready to send to the LLM, including:
+            - System prompt
+            - Memory context (if available)
+            - Conversation history
+            - The current user prompt
+        """
+        # Stage 1: Prepare initial prompt and history
+        system_prompt_message, history_turns = self._prepare_initial_prompt_and_history(prompt)
+
+        # Stage 2: Retrieve and prepare memory
+        unique_memory_messages = self._retrieve_and_prepare_memory(prompt, history_turns)
+
+        # Stage 3: Combine memory and history
+        combined_turns, memory_delimiter_added = self._combine_memory_and_history(
+            unique_memory_messages, history_turns
+        )
+
+        # Stage 4: Truncate messages if needed
+        protected_turns = self.config.MEMORY_PROTECTED_RECENT_TURNS if self.memory_backend else 0
+        protected_messages = protected_turns * 2
+        
+        truncated_turns = self._truncate_messages_if_needed(
+            combined_turns, system_prompt_message, memory_delimiter_added, protected_messages
+        )
+
+        # Stage 5: Assemble final messages for LLM
+        final_messages_to_send = self._assemble_final_messages(
+            system_prompt_message, truncated_turns
+        )
+        
+        return final_messages_to_send
+
+    def finalize_response(self, prompt: str, response: str):
+        """
+        Finalize a response after streaming completes.
+        
+        This adds the assistant response to history and triggers memory extraction.
+        Should be called after prepare_messages_for_query() + streaming.
+        
+        Args:
+            prompt: The original user prompt
+            response: The complete assistant response
+        """
+        # Add to history
+        self.history_manager.add_message("assistant", response)
+        
+        # Trigger memory extraction in background
+        if self.memory_backend and response:
+            thread = threading.Thread(
+                target=self._add_conversation_to_memory,
+                args=(prompt, response),
+                daemon=False,
+            )
+            thread.start()
+            thread.join(timeout=0.5)
+
     def _execute_llm_query(self, final_messages_to_send: list[Message], plaintext_output: bool, stream: bool) -> str:
         """Executes the query against the LLM client and handles the response."""
         query_kwargs = {"messages": final_messages_to_send, "plaintext_output": plaintext_output}
+
+        # Debug: log what's being sent
+        if final_messages_to_send:
+            system_msg = next((m for m in final_messages_to_send if m.role == "system"), None)
+            if system_msg:
+                logger.debug(f"System prompt being sent ({len(system_msg.content)} chars): {system_msg.content[:100]}...")
+            else:
+                logger.warning("No system message in final messages!")
+            logger.debug(f"Total messages being sent: {len(final_messages_to_send)}")
 
         if hasattr(self.client, 'SUPPORTS_STREAMING') and self.client.SUPPORTS_STREAMING and stream:
             query_kwargs["stream"] = True
@@ -498,45 +576,72 @@ class AskLLM:
         return response_content
 
     def _add_conversation_to_memory(self, user_prompt: str, assistant_response: str):
-        """Adds the user prompt and assistant response to permanent storage and triggers memory extraction."""
+        """Triggers memory extraction from a conversation exchange.
+        
+        Attempts to use background service if available, otherwise falls back
+        to local extraction (heuristics for local models, LLM for API models).
+        
+        Note: Messages are already saved by history_manager.add_message() which uses
+        short_term_backend. This method only handles memory extraction.
+        """
         if not self.memory_backend or not assistant_response:
             return
         
         try:
+            # Generate message IDs for the extraction service
             user_msg_id = str(uuid.uuid4())
             assistant_msg_id = str(uuid.uuid4())
-            current_time = time.time()
-            
-            # Get session ID if available
-            session_id = None
-            if self.short_term_backend and hasattr(self.short_term_backend, 'session_id'):
-                session_id = self.short_term_backend.session_id
-            
-            # Store messages permanently
-            self.memory_backend.add_message(
-                message_id=user_msg_id,
-                role="user",
-                content=user_prompt,
-                timestamp=current_time,
-                session_id=session_id,
-            )
-            self.memory_backend.add_message(
-                message_id=assistant_msg_id,
-                role="assistant",
-                content=assistant_response,
-                timestamp=current_time + 0.001,
-                session_id=session_id,
-            )
-            logger.debug(f"Added messages to storage (IDs: {user_msg_id}, {assistant_msg_id})")
             
             # Trigger memory extraction if enabled
             if getattr(self.config, 'MEMORY_EXTRACTION_ENABLED', True):
+                # Try background service first
+                if self._submit_to_background_service(user_prompt, assistant_response, [user_msg_id, assistant_msg_id]):
+                    logger.debug("Memory extraction submitted to background service")
+                    return
+                
+                # Fall back to local extraction
                 self._extract_memories_from_exchange(
                     user_prompt, assistant_response,
                     [user_msg_id, assistant_msg_id]
                 )
         except Exception as e:
-            logger.exception(f"Failed to add messages to memory: {e}")
+            logger.exception(f"Failed to process memory extraction: {e}")
+    
+    def _submit_to_background_service(
+        self,
+        user_prompt: str,
+        assistant_response: str,
+        message_ids: list[str],
+    ) -> bool:
+        """
+        Try to submit extraction task to background service.
+        
+        Returns True if successfully submitted, False if service unavailable.
+        """
+        try:
+            from .service import ServiceClient
+            from .service.tasks import create_extraction_task
+            
+            client = ServiceClient()
+            if not client.is_available():
+                return False
+            
+            task = create_extraction_task(
+                user_message=user_prompt,
+                assistant_message=assistant_response,
+                bot_id=self.bot_id,
+                user_id=self.user_id,
+                message_ids=message_ids,
+            )
+            
+            return client.submit_task(task)
+            
+        except ImportError:
+            logger.debug("Service module not available")
+            return False
+        except Exception as e:
+            logger.debug(f"Failed to submit to background service: {e}")
+            return False
     
     def _extract_memories_from_exchange(
         self,
@@ -552,17 +657,25 @@ class AskLLM:
         try:
             from .memory.extraction import MemoryExtractionService
             
-            # Create extraction service (without LLM for now - uses heuristics)
-            # TODO: Pass LLM client for better extraction when available
-            extraction_service = MemoryExtractionService(llm_client=None)
+            # Check if we should use LLM or heuristics for extraction
+            # For local GGUF models with small context, use heuristics to avoid overflow
+            model_type = self.model_definition.get("type", "")
+            use_llm_extraction = model_type not in ("gguf", "ollama")
+            
+            if use_llm_extraction:
+                extraction_service = MemoryExtractionService(llm_client=self.client)
+            else:
+                # Use heuristics for local models to avoid context overflow
+                extraction_service = MemoryExtractionService(llm_client=None)
+                logger.debug("Using heuristic extraction for local model")
             
             messages = [
                 {"id": message_ids[0], "role": "user", "content": user_prompt},
                 {"id": message_ids[1], "role": "assistant", "content": assistant_response},
             ]
             
-            # Extract facts using heuristics (fast, no LLM call)
-            facts = extraction_service.extract_from_conversation(messages, use_llm=False)
+            # Extract facts (LLM or heuristics based on model type)
+            facts = extraction_service.extract_from_conversation(messages, use_llm=use_llm_extraction)
             
             if not facts:
                 logger.debug("No facts extracted from conversation exchange")
@@ -601,18 +714,30 @@ class AskLLM:
                         logger.debug(f"Added memory: {action.fact.content[:50]}... (importance: {action.fact.importance})")
                         
                 elif action.action == "UPDATE" and action.fact and action.target_memory_id:
-                    if hasattr(self.memory_backend, 'add_memory'):
-                        self.memory_backend.add_memory(
-                            memory_id=action.target_memory_id,
-                            content=action.fact.content,
-                            memory_type=action.fact.memory_type,
-                            importance=action.fact.importance,
-                            source_message_ids=action.fact.source_message_ids,
-                        )
-                        logger.debug(f"Updated memory {action.target_memory_id}")
+                    # Create new memory and supersede the old one (preserves history)
+                    new_memory_id = str(uuid.uuid4())
+                    self.memory_backend.add_memory(
+                        memory_id=new_memory_id,
+                        content=action.fact.content,
+                        memory_type=action.fact.memory_type,
+                        importance=action.fact.importance,
+                        source_message_ids=action.fact.source_message_ids,
+                    )
+                    # Mark old memory as superseded instead of overwriting
+                    if hasattr(self.memory_backend, 'supersede_memory'):
+                        self.memory_backend.supersede_memory(action.target_memory_id, new_memory_id)
+                        logger.debug(f"Memory {action.target_memory_id} superseded by {new_memory_id}")
+                    else:
+                        logger.debug(f"Added updated memory {new_memory_id} (old: {action.target_memory_id})")
                         
                 elif action.action == "DELETE" and action.target_memory_id:
-                    if hasattr(self.memory_backend, 'delete_memory'):
+                    # For explicit deletions, still use supersede if we have a replacement
+                    # Otherwise mark as superseded by a "tombstone" (null supersedes = soft delete)
+                    if hasattr(self.memory_backend, 'supersede_memory'):
+                        # Use special marker to indicate explicit deletion
+                        self.memory_backend.supersede_memory(action.target_memory_id, "DELETED")
+                        logger.debug(f"Soft-deleted memory {action.target_memory_id}")
+                    elif hasattr(self.memory_backend, 'delete_memory'):
                         self.memory_backend.delete_memory(action.target_memory_id)
                         logger.debug(f"Deleted memory {action.target_memory_id}")
                         
@@ -654,8 +779,17 @@ class AskLLM:
                 final_messages_to_send, plaintext_output, stream
             )
 
-            # Stage 7: Add conversation to memory (if enabled and successful)
-            self._add_conversation_to_memory(prompt, assistant_response)
+            # Stage 7: Add conversation to memory in background (non-blocking)
+            if self.memory_backend and assistant_response:
+                thread = threading.Thread(
+                    target=self._add_conversation_to_memory,
+                    args=(prompt, assistant_response),
+                    daemon=False,  # Non-daemon so it can complete before exit
+                )
+                thread.start()
+                # Give the thread a brief moment to submit to background service
+                # This allows quick HTTP requests to complete while still not blocking
+                thread.join(timeout=0.5)
 
             return assistant_response
 

@@ -9,7 +9,7 @@ import re
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Protocol
+from typing import Any, Protocol, TYPE_CHECKING
 
 from .prompts import (
     FACT_EXTRACTION_PROMPT,
@@ -20,13 +20,16 @@ from .prompts import (
     estimate_importance,
 )
 
+if TYPE_CHECKING:
+    from ...models.message import Message
+
 logger = logging.getLogger(__name__)
 
 
 class LLMClientProtocol(Protocol):
     """Protocol for LLM clients that can be used for extraction."""
     
-    def query(self, messages: list[dict], plaintext_output: bool = True, **kwargs) -> str:
+    def query(self, messages: list, plaintext_output: bool = True, **kwargs) -> str:
         """Query the LLM with messages."""
         ...
 
@@ -125,11 +128,15 @@ class MemoryExtractionService:
         message_ids: list[str],
     ) -> list[ExtractedFact]:
         """Use LLM to extract facts from the conversation."""
+        from ...models.message import Message
+        
         prompt = get_fact_extraction_prompt(conversation_text)
         
+        # Use stream=False to avoid any output printing
         response = self.llm_client.query(
-            messages=[{"role": "user", "content": prompt}],
+            messages=[Message(role="user", content=prompt)],
             plaintext_output=True,
+            stream=False,
         )
         
         # Parse JSON response
@@ -144,14 +151,25 @@ class MemoryExtractionService:
         """Parse the LLM response into ExtractedFact objects."""
         facts = []
         
-        # Try to extract JSON from the response
-        json_match = re.search(r'\{[\s\S]*\}', response)
-        if not json_match:
-            logger.warning("No JSON found in extraction response")
-            return facts
+        # Try to extract JSON from the response (look for code blocks first)
+        # Match ```json ... ``` or ``` ... ``` blocks
+        code_block_match = re.search(r'```(?:json)?\s*(\{[\s\S]*?\})\s*```', response)
+        if code_block_match:
+            json_str = code_block_match.group(1)
+        else:
+            # Fall back to finding raw JSON
+            json_match = re.search(r'\{[\s\S]*\}', response)
+            if not json_match:
+                logger.debug("No JSON found in extraction response")
+                return facts
+            json_str = json_match.group()
         
         try:
-            data = json.loads(json_match.group())
+            # Try to fix common LLM JSON issues
+            # 1. Replace single quotes with double quotes (but not in strings)
+            # 2. Add quotes around unquoted property names
+            fixed_json = self._fix_json(json_str)
+            data = json.loads(fixed_json)
             raw_facts = data.get("facts", [])
             
             for raw_fact in raw_facts:
@@ -174,11 +192,22 @@ class MemoryExtractionService:
                 ))
                 
         except json.JSONDecodeError as e:
-            logger.warning(f"Failed to parse extraction JSON: {e}")
+            logger.debug(f"Failed to parse extraction JSON: {e}")
         except Exception as e:
-            logger.warning(f"Error processing extraction response: {e}")
+            logger.debug(f"Error processing extraction response: {e}")
         
         return facts
+    
+    def _fix_json(self, json_str: str) -> str:
+        """Attempt to fix common JSON issues from LLM output."""
+        # Remove trailing commas before } or ]
+        fixed = re.sub(r',\s*([}\]])', r'\1', json_str)
+        
+        # Try to add quotes around unquoted property names
+        # Match word: at the start of a line or after { or ,
+        fixed = re.sub(r'([{,]\s*)([a-zA-Z_][a-zA-Z0-9_]*)\s*:', r'\1"\2":', fixed)
+        
+        return fixed
     
     def _extract_with_heuristics(
         self,
@@ -278,6 +307,8 @@ class MemoryExtractionService:
         existing_memories: list[dict],
     ) -> list[MemoryAction]:
         """Use LLM to determine memory actions."""
+        from ...models.message import Message
+        
         # Format memories and facts for the prompt
         existing_json = json.dumps([
             {"id": m.get("id"), "content": m.get("content"), "importance": m.get("importance", 0.5)}
@@ -288,9 +319,11 @@ class MemoryExtractionService:
         
         prompt = get_memory_update_prompt(existing_json, new_facts_json)
         
+        # Use stream=False to avoid any output printing
         response = self.llm_client.query(
-            messages=[{"role": "user", "content": prompt}],
+            messages=[Message(role="user", content=prompt)],
             plaintext_output=True,
+            stream=False,
         )
         
         return self._parse_action_response(response, new_facts)
@@ -303,14 +336,21 @@ class MemoryExtractionService:
         """Parse the LLM response into MemoryAction objects."""
         actions = []
         
-        json_match = re.search(r'\{[\s\S]*\}', response)
-        if not json_match:
-            logger.warning("No JSON found in action response")
-            # Default to adding all facts
-            return [MemoryAction(action="ADD", fact=f) for f in new_facts]
+        # Try to extract JSON from the response (look for code blocks first)
+        code_block_match = re.search(r'```(?:json)?\s*(\{[\s\S]*?\})\s*```', response)
+        if code_block_match:
+            json_str = code_block_match.group(1)
+        else:
+            json_match = re.search(r'\{[\s\S]*\}', response)
+            if not json_match:
+                logger.debug("No JSON found in action response")
+                # Default to adding all facts
+                return [MemoryAction(action="ADD", fact=f) for f in new_facts]
+            json_str = json_match.group()
         
         try:
-            data = json.loads(json_match.group())
+            fixed_json = self._fix_json(json_str)
+            data = json.loads(fixed_json)
             raw_actions = data.get("actions", [])
             
             for raw_action in raw_actions:
@@ -354,7 +394,7 @@ class MemoryExtractionService:
                 # NONE actions are ignored
                 
         except json.JSONDecodeError as e:
-            logger.warning(f"Failed to parse action JSON: {e}")
+            logger.debug(f"Failed to parse action JSON: {e}")
             return [MemoryAction(action="ADD", fact=f) for f in new_facts]
         
         return actions

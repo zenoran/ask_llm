@@ -173,6 +173,35 @@ class OpenAIClient(LLMClient):
         # Should not reach here
         return self.client.chat.completions.create(**payload)
 
+    def stream_raw(self, messages: List[Message], **kwargs) -> Iterator[str]:
+        """
+        Stream raw text chunks from OpenAI API without console formatting.
+        
+        Used by the API service for SSE streaming.
+        """
+        api_messages = self._prepare_api_messages(messages)
+        payload = {
+            "model": self.model,
+            "messages": api_messages,
+            "stream": True,
+        }
+        
+        if self._model_requires_max_completion_tokens():
+            payload["max_completion_tokens"] = self.config.MAX_TOKENS
+        else:
+            payload["max_tokens"] = self.config.MAX_TOKENS
+        
+        if self._model_supports_temperature_top_p():
+            payload["temperature"] = self.config.TEMPERATURE
+            payload["top_p"] = self.config.TOP_P
+        
+        try:
+            stream = self._chat_create_with_fallback(payload)
+            yield from self._iterate_openai_chunks(stream)
+        except Exception as e:
+            logger.error(f"Error during OpenAI streaming: {e}")
+            raise
+
     def query(self, messages: List[Message], plaintext_output: bool = False, stream: bool = True, **kwargs) -> str:
         """Query OpenAI API with full message history, using streaming by default.
 

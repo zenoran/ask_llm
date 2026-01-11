@@ -16,8 +16,141 @@ import logging
 from pathlib import Path
 from rich.table import Table
 from rich.panel import Panel
+from typing import Iterator
 
 console = Console()
+
+# Cache for service client
+_service_client = None
+
+def get_service_client():
+    """Get or create the service client singleton."""
+    global _service_client
+    if _service_client is None:
+        try:
+            from ask_llm.service import ServiceClient
+            _service_client = ServiceClient()
+        except ImportError:
+            _service_client = False  # Mark as unavailable
+    return _service_client if _service_client else None
+
+
+def query_via_service(
+    prompt: str,
+    model: str | None,
+    bot_id: str | None,
+    user_id: str | None,
+    plaintext_output: bool,
+    stream: bool,
+) -> bool:
+    """
+    Query via the background service if available.
+    
+    Returns True if query was handled by service, False if service unavailable.
+    """
+    from rich.panel import Panel
+    from rich.markdown import Markdown
+    from rich.align import Align
+    
+    client = get_service_client()
+    if not client or not client.is_available():
+        return False
+    
+    messages = [{"role": "user", "content": prompt}]
+    
+    # Get bot name for display
+    bot_manager = BotManager(Config())
+    bot = bot_manager.get_bot(bot_id) if bot_id else bot_manager.get_default_bot()
+    bot_name = bot.name if bot else (bot_id or "Assistant")
+    
+    # Determine panel style based on bot
+    panel_styles = {
+        "mira": ("magenta", "magenta"),
+        "nova": ("cyan", "cyan"),
+        "spark": ("yellow", "yellow"),
+    }
+    title_style, border_style = panel_styles.get(bot_id or "", ("green", "green"))
+    
+    try:
+        if stream:
+            # Stream response
+            full_response = ""
+            if plaintext_output:
+                for chunk in client.chat_completion(
+                    messages=messages,
+                    model=model,
+                    bot_id=bot_id,
+                    user_id=user_id,
+                    stream=True,
+                ):
+                    print(chunk, end="", flush=True)
+                    full_response += chunk
+                print()  # Final newline
+            else:
+                # Stream with Rich Live display for real-time updates
+                from rich.live import Live
+                
+                with Live(
+                    Panel(
+                        Markdown("▌"),
+                        title=f"[bold {title_style}]{bot_name}[/bold {title_style}]",
+                        border_style=border_style,
+                        padding=(1, 2),
+                    ),
+                    console=console,
+                    refresh_per_second=10,
+                    transient=True,
+                ) as live:
+                    for chunk in client.chat_completion(
+                        messages=messages,
+                        model=model,
+                        bot_id=bot_id,
+                        user_id=user_id,
+                        stream=True,
+                    ):
+                        full_response += chunk
+                        live.update(
+                            Panel(
+                                Markdown(full_response + "▌"),
+                                title=f"[bold {title_style}]{bot_name}[/bold {title_style}]",
+                                border_style=border_style,
+                                padding=(1, 2),
+                            )
+                        )
+                
+                # Final display without cursor
+                if full_response:
+                    panel = Panel(
+                        Markdown(full_response.strip()),
+                        title=f"[bold {title_style}]{bot_name}[/bold {title_style}]",
+                        border_style=border_style,
+                        padding=(1, 2),
+                    )
+                    console.print(Align(panel, align="left"))
+            return True
+        else:
+            response = client.chat_completion_full(
+                messages=messages,
+                model=model,
+                bot_id=bot_id,
+                user_id=user_id,
+            )
+            if response:
+                if plaintext_output:
+                    print(response)
+                else:
+                    panel = Panel(
+                        Markdown(response.strip()),
+                        title=f"[bold {title_style}]{bot_name}[/bold {title_style}]",
+                        border_style=border_style,
+                        padding=(1, 2),
+                    )
+                    console.print(Align(panel, align="left"))
+                return True
+    except Exception as e:
+        logging.debug(f"Service query failed: {e}")
+    
+    return False
 
 
 def show_status(config: Config, args: argparse.Namespace | None = None):
@@ -35,6 +168,45 @@ def show_status(config: Config, args: argparse.Namespace | None = None):
     table = Table(show_header=False, box=None, padding=(0, 2))
     table.add_column("Setting", style="cyan")
     table.add_column("Value")
+    
+    # --- Background Service Section ---
+    table.add_row("[bold]Background Service[/bold]", "")
+    try:
+        service_client = get_service_client()
+        if service_client and service_client.is_available(force_check=True):
+            # Get detailed status
+            status = service_client.get_status()
+            if status and status.available:
+                uptime_str = ""
+                if status.uptime_seconds:
+                    hours, remainder = divmod(int(status.uptime_seconds), 3600)
+                    minutes, seconds = divmod(remainder, 60)
+                    if hours > 0:
+                        uptime_str = f"{hours}h {minutes}m"
+                    elif minutes > 0:
+                        uptime_str = f"{minutes}m {seconds}s"
+                    else:
+                        uptime_str = f"{seconds}s"
+                
+                service_status = f"[green]✓ Running[/green]"
+                if uptime_str:
+                    service_status += f" [dim](uptime: {uptime_str})[/dim]"
+                table.add_row("  Status", service_status)
+                table.add_row("  URL", f"[dim]{service_client.http_url}[/dim]")
+                table.add_row("  Version", f"{status.version or 'unknown'}")
+                table.add_row("  Tasks Processed", f"{status.tasks_processed}")
+                table.add_row("  Tasks Pending", f"{status.tasks_pending}")
+                if status.models_loaded:
+                    table.add_row("  Models Loaded", ", ".join(status.models_loaded))
+            else:
+                table.add_row("  Status", "[yellow]⚠ Unhealthy response[/yellow]")
+        else:
+            table.add_row("  Status", "[dim]○ Not running[/dim]")
+            table.add_row("  ", "[dim]Start with: llm-service[/dim]")
+    except Exception as e:
+        table.add_row("  Status", f"[red]✗ Error checking: {e}[/red]")
+    
+    table.add_row("", "")
     
     # --- Current Session Section (based on args) ---
     if args:
@@ -252,9 +424,270 @@ def show_status(config: Config, args: argparse.Namespace | None = None):
     table.add_row("  Min Relevance", f"{config.MEMORY_MIN_RELEVANCE}")
     table.add_row("  History Duration", f"{config.HISTORY_DURATION}s ({config.HISTORY_DURATION // 60} min)")
     table.add_row("  History File (--local)", f"{config.HISTORY_FILE}")
+    table.add_row("", "")
     
+    # --- Pipeline Self-Checks Section ---
+    table.add_row("[bold]Pipeline Self-Checks[/bold]", "")
+    
+    # Check 1: Default model is valid and accessible
+    defined_models = config.defined_models.get("models", {})
+    if config.DEFAULT_MODEL_ALIAS:
+        if config.DEFAULT_MODEL_ALIAS in defined_models:
+            model_def = defined_models[config.DEFAULT_MODEL_ALIAS]
+            model_type = model_def.get("type", "unknown")
+            
+            # Check model-specific requirements
+            model_check = "[green]✓ Valid[/green]"
+            if model_type == "gguf":
+                if not is_llama_cpp_available():
+                    model_check = "[red]✗ llama-cpp-python not installed[/red]"
+                elif not hf_hub_available:
+                    model_check = "[yellow]⚠ huggingface-hub not installed (needed for downloads)[/yellow]"
+                else:
+                    # Check if model file exists
+                    source = model_def.get("source", "")
+                    if "/" in source:
+                        parts = source.split("/")
+                        if len(parts) >= 3:
+                            repo_id = "/".join(parts[:2])
+                            filename = "/".join(parts[2:])
+                            cache_path = os.path.join(config.MODEL_CACHE_DIR, repo_id, filename)
+                            if os.path.exists(cache_path):
+                                model_check = f"[green]✓ Cached[/green] [dim]({os.path.getsize(cache_path) / (1024**3):.1f}GB)[/dim]"
+                            else:
+                                model_check = "[yellow]⚠ Not cached (will download on first use)[/yellow]"
+            elif model_type == "ollama":
+                if ollama_status.startswith("[green]"):
+                    model_check = "[green]✓ Ollama available[/green]"
+                else:
+                    model_check = "[yellow]⚠ Ollama server not reachable[/yellow]"
+            elif model_type == "openai":
+                if openai_api_key:
+                    model_check = "[green]✓ API key set[/green]"
+                else:
+                    model_check = "[red]✗ No OPENAI_API_KEY[/red]"
+            elif model_type == "huggingface":
+                if not hf_available:
+                    model_check = "[red]✗ transformers/torch not installed[/red]"
+            
+            table.add_row("  Default Model", f"{model_check}")
+        else:
+            table.add_row("  Default Model", f"[red]✗ '{config.DEFAULT_MODEL_ALIAS}' not found in models.yaml[/red]")
+    else:
+        table.add_row("  Default Model", "[yellow]⚠ Not configured[/yellow]")
+    
+    # Check 2: Models config file exists and is valid
+    models_config_path = config.MODELS_CONFIG_PATH
+    if os.path.exists(models_config_path):
+        model_count = len(defined_models)
+        if model_count > 0:
+            table.add_row("  Models Config", f"[green]✓ {model_count} models defined[/green]")
+        else:
+            table.add_row("  Models Config", "[yellow]⚠ File exists but no models defined[/yellow]")
+    else:
+        table.add_row("  Models Config", f"[red]✗ File not found: {models_config_path}[/red]")
+    
+    # Check 3: Memory backend connectivity (already checked above)
+    if 'postgresql' in backends and db_status.startswith("[green]"):
+        # Test vector extension
+        try:
+            from pgvector.psycopg2 import register_vector
+            table.add_row("  Memory Backend", "[green]✓ PostgreSQL + pgvector[/green]")
+        except ImportError:
+            table.add_row("  Memory Backend", "[yellow]⚠ pgvector Python package not installed[/yellow]")
+    elif 'postgresql' in backends:
+        table.add_row("  Memory Backend", "[red]✗ PostgreSQL connection failed[/red]")
+    else:
+        table.add_row("  Memory Backend", "[dim]○ Not configured (--local mode only)[/dim]")
+    
+    # Check 4: History file location is writable
+    history_dir = os.path.dirname(config.HISTORY_FILE)
+    if os.path.exists(history_dir):
+        if os.access(history_dir, os.W_OK):
+            table.add_row("  History Storage", "[green]✓ Writable[/green]")
+        else:
+            table.add_row("  History Storage", f"[red]✗ Not writable: {history_dir}[/red]")
+    else:
+        # Check if we can create it
+        try:
+            os.makedirs(history_dir, exist_ok=True)
+            table.add_row("  History Storage", "[green]✓ Created[/green]")
+        except Exception as e:
+            table.add_row("  History Storage", f"[red]✗ Cannot create: {e}[/red]")
+    
+    # Check 5: Service mode readiness
+    service_client = get_service_client()
+    if service_client and service_client.is_available():
+        table.add_row("  Service Mode", "[green]✓ Ready (use --service)[/green]")
+    else:
+        table.add_row("  Service Mode", "[dim]○ Service not running[/dim]")
+
     console.print(table)
     console.print()
+
+
+def regenerate_embeddings(config: Config, args: argparse.Namespace | None = None):
+    """Regenerate embeddings for existing memories."""
+    console = Console()
+    
+    # Determine which bot to use
+    bot_id = getattr(args, 'bot', None) or config.DEFAULT_BOT
+    
+    console.print(f"\n[bold]Regenerating Embeddings for Bot: {bot_id}[/bold]\n")
+    
+    try:
+        from .memory.postgresql import PostgreSQLMemoryBackend
+        backend = PostgreSQLMemoryBackend(config, bot_id)
+        
+        # Show current stats
+        stats = backend.stats()
+        mem_stats = stats.get("memories", {})
+        total = mem_stats.get("total_count", 0)
+        
+        if total == 0:
+            console.print("[yellow]No memories found to process.[/yellow]")
+            return
+        
+        console.print(f"Found [bold]{total}[/bold] memories to process")
+        console.print(f"Using embedding model: [cyan]{backend.embedding_model}[/cyan]")
+        console.print()
+        
+        with console.status("[bold green]Generating embeddings..."):
+            result = backend.regenerate_embeddings()
+        
+        if "error" in result:
+            console.print(f"[red]Error: {result['error']}[/red]")
+            console.print("Install with: [cyan]uv pip install 'ask-llm[memory]'[/cyan]")
+        else:
+            console.print(f"[green]✓ Updated: {result['updated']}[/green]")
+            if result.get("failed", 0) > 0:
+                console.print(f"[yellow]! Failed: {result['failed']}[/yellow]")
+            console.print(f"  Embedding dimension: {result.get('embedding_dim', 'unknown')}")
+            
+    except ImportError as e:
+        console.print(f"[red]Memory backend not available: {e}[/red]")
+    except Exception as e:
+        console.print(f"[red]Error: {e}[/red]")
+        if config.VERBOSE:
+            import traceback
+            console.print(traceback.format_exc())
+
+
+def consolidate_memories(config: Config, args: argparse.Namespace | None = None):
+    """Find and merge redundant memories using local LLM."""
+    console = Console()
+    
+    # Determine which bot to use
+    bot_id = getattr(args, 'bot', None) or config.DEFAULT_BOT
+    dry_run = getattr(args, 'consolidate_dry_run', False)
+    
+    mode_str = "[yellow](DRY RUN)[/yellow] " if dry_run else ""
+    console.print(f"\n[bold]{mode_str}Memory Consolidation for Bot: {bot_id}[/bold]\n")
+    
+    try:
+        from .memory.postgresql import PostgreSQLMemoryBackend
+        from .memory.consolidation import MemoryConsolidator, get_local_llm_client
+        
+        backend = PostgreSQLMemoryBackend(config, bot_id)
+        
+        # Show current stats
+        stats = backend.stats()
+        mem_stats = stats.get("memories", {})
+        total = mem_stats.get("total_count", 0)
+        
+        if total < 2:
+            console.print("[yellow]Not enough memories to consolidate (need at least 2).[/yellow]")
+            return
+        
+        console.print(f"Found [bold]{total}[/bold] total memories")
+        console.print(f"Similarity threshold: [cyan]{config.MEMORY_CONSOLIDATION_THRESHOLD}[/cyan]")
+        
+        # Try to get a local LLM for intelligent merging
+        llm_client = None
+        if not dry_run:
+            with console.status("[bold green]Loading local LLM for merging..."):
+                llm_client = get_local_llm_client(config)
+        
+        if llm_client:
+            console.print(f"Using LLM: [green]✓ Local model loaded[/green]")
+        else:
+            console.print(f"Using LLM: [yellow]✗ None (will use heuristic merging)[/yellow]")
+        console.print()
+        
+        # Create consolidator and run
+        consolidator = MemoryConsolidator(
+            backend=backend,
+            llm_client=llm_client,
+            similarity_threshold=config.MEMORY_CONSOLIDATION_THRESHOLD,
+            config=config,
+        )
+        
+        with console.status("[bold green]Finding similar memory clusters..."):
+            memories = consolidator.get_all_active_memories_with_embeddings()
+            clusters = consolidator.find_clusters(memories)
+        
+        if not clusters:
+            console.print("[green]No redundant memory clusters found. Memories are already consolidated.[/green]")
+            return
+        
+        console.print(f"Found [bold]{len(clusters)}[/bold] clusters of similar memories:\n")
+        
+        # Show cluster details
+        table = Table(show_header=True, box=None, padding=(0, 2))
+        table.add_column("#", style="dim")
+        table.add_column("Size", justify="right")
+        table.add_column("Type", style="cyan")
+        table.add_column("Avg Similarity", justify="right")
+        table.add_column("Sample Content")
+        
+        for i, cluster in enumerate(clusters[:20], 1):  # Show first 20
+            sample = cluster.memories[0]["content"][:60] + "..." if len(cluster.memories[0]["content"]) > 60 else cluster.memories[0]["content"]
+            table.add_row(
+                str(i),
+                str(len(cluster)),
+                cluster.memories[0]["memory_type"],
+                f"{cluster.avg_similarity:.2f}",
+                sample,
+            )
+        
+        console.print(table)
+        
+        if len(clusters) > 20:
+            console.print(f"[dim]... and {len(clusters) - 20} more clusters[/dim]")
+        console.print()
+        
+        # Run consolidation
+        if dry_run:
+            console.print("[yellow]Dry run mode - no changes will be made.[/yellow]\n")
+        
+        with console.status("[bold green]Consolidating memories..."):
+            result = consolidator.consolidate(dry_run=dry_run)
+        
+        # Show results
+        console.print()
+        if dry_run:
+            console.print(f"[yellow]Would merge:[/yellow]")
+        else:
+            console.print(f"[green]Results:[/green]")
+        
+        console.print(f"  Clusters found: {result.clusters_found}")
+        console.print(f"  Clusters merged: {result.clusters_merged}")
+        console.print(f"  Memories consolidated: {result.memories_consolidated}")
+        if not dry_run:
+            console.print(f"  New memories created: {result.new_memories_created}")
+        
+        if result.errors:
+            console.print(f"\n[yellow]Errors ({len(result.errors)}):[/yellow]")
+            for err in result.errors[:5]:
+                console.print(f"  - {err}")
+                
+    except ImportError as e:
+        console.print(f"[red]Memory backend not available: {e}[/red]")
+    except Exception as e:
+        console.print(f"[red]Error: {e}[/red]")
+        if config.VERBOSE:
+            import traceback
+            console.print(traceback.format_exc())
 
 
 def show_bots(config: Config):
@@ -483,9 +916,13 @@ def parse_arguments(config_obj: Config) -> argparse.Namespace:
     parser.add_argument("--plain", action="store_true", help="Use plain text output")
     parser.add_argument("--no-stream", action="store_true", default=False, help="Disable streaming output")
     parser.add_argument("--local", action="store_true", help="Use local filesystem for history instead of database")
+    parser.add_argument("--service", action="store_true", help="Route queries through the background service (if running)")
     parser.add_argument("-b", "--bot", type=str, default=None, help="Bot to use (nova, spark, mira). Use --list-bots to see all.")
     parser.add_argument("--list-bots", action="store_true", help="List available bots and exit")
     parser.add_argument("--status", action="store_true", help="Show memory system status and configuration")
+    parser.add_argument("--regenerate-embeddings", action="store_true", help="Regenerate embeddings for existing memories (requires sentence-transformers)")
+    parser.add_argument("--consolidate-memories", action="store_true", help="Find and merge redundant memories using local LLM")
+    parser.add_argument("--consolidate-dry-run", action="store_true", help="Show what would be consolidated without making changes")
     parser.add_argument("--user", type=str, default=DEFAULT_USER_ID, help="User profile to use (creates if not exists)")
     parser.add_argument("--list-users", action="store_true", help="List all user profiles")
     parser.add_argument("--user-profile", action="store_true", help="Show current user profile")
@@ -564,6 +1001,14 @@ def main():
 
     elif getattr(args, 'status', False):
         show_status(config_obj, args)
+        sys.exit(0)
+
+    elif getattr(args, 'regenerate_embeddings', False):
+        regenerate_embeddings(config_obj, args)
+        sys.exit(0)
+
+    elif getattr(args, 'consolidate_memories', False) or getattr(args, 'consolidate_dry_run', False):
+        consolidate_memories(config_obj, args)
         sys.exit(0)
 
     elif getattr(args, 'list_bots', False):
@@ -736,24 +1181,35 @@ def run_app(args: argparse.Namespace, config_obj: Config, resolved_alias: str):
     if not args.local:
         user_profile = ensure_user_profile(config_obj, user_id)
     
-    try:
-        ask_llm = AskLLM(
-            resolved_model_alias=resolved_alias,
-            config=config_obj,
-            local_mode=args.local,
-            bot_id=bot_id,
-            user_id=user_id
-        )
-    except (ImportError, FileNotFoundError, ValueError, Exception) as e:
-         console.print(f"[bold red]Failed to initialize LLM client for '{resolved_alias}':[/bold red] {e}")
-         if config_obj.VERBOSE:
-             traceback.print_exc()
-         sys.exit(1) # Or re-raise the original error if preferred: raise e
+    # Check if we're using service mode - skip local AskLLM initialization
+    use_service = getattr(args, 'service', False)
+    ask_llm = None
+    
+    if not use_service:
+        try:
+            ask_llm = AskLLM(
+                resolved_model_alias=resolved_alias,
+                config=config_obj,
+                local_mode=args.local,
+                bot_id=bot_id,
+                user_id=user_id
+            )
+        except (ImportError, FileNotFoundError, ValueError, Exception) as e:
+             console.print(f"[bold red]Failed to initialize LLM client for '{resolved_alias}':[/bold red] {e}")
+             if config_obj.VERBOSE:
+                 traceback.print_exc()
+             sys.exit(1) # Or re-raise the original error if preferred: raise e
     if args.delete_history:
-        ask_llm.history_manager.clear_history()
-        console.print("[green]Chat history cleared.[/green]")
+        if ask_llm:
+            ask_llm.history_manager.clear_history()
+            console.print("[green]Chat history cleared.[/green]")
+        else:
+            console.print("[yellow]History operations require local mode (not --service)[/yellow]")
     if args.print_history is not None:
-        ask_llm.history_manager.print_history(args.print_history)
+        if ask_llm:
+            ask_llm.history_manager.print_history(args.print_history)
+        else:
+            console.print("[yellow]History operations require local mode (not --service)[/yellow]")
         if not args.question and not args.command:
              console.print()
              return
@@ -784,23 +1240,56 @@ def run_app(args: argparse.Namespace, config_obj: Config, resolved_alias: str):
         console.print()
     stream_flag = not config_obj.NO_STREAM
     plaintext_flag = config_obj.PLAIN_OUTPUT
+    # use_service already set above when deciding whether to init AskLLM
+    
+    def do_query(prompt: str):
+        """Execute query via service or local client."""
+        nonlocal ask_llm
+        if use_service:
+            if query_via_service(
+                prompt,
+                model=resolved_alias,  # Use resolved model, not raw args
+                bot_id=bot_id,  # Use resolved bot_id
+                user_id=user_id,  # Use resolved user_id
+                plaintext_output=plaintext_flag,
+                stream=stream_flag,
+            ):
+                return
+            # Service unavailable, fall back to local - need to initialize AskLLM now
+            console.print("[dim]Service unavailable, using local client[/dim]")
+            if ask_llm is None:
+                try:
+                    ask_llm = AskLLM(
+                        resolved_model_alias=resolved_alias,
+                        config=config_obj,
+                        local_mode=args.local,
+                        bot_id=bot_id,
+                        user_id=user_id
+                    )
+                except Exception as e:
+                    console.print(f"[bold red]Failed to initialize LLM client:[/bold red] {e}")
+                    return
+        if ask_llm:
+            ask_llm.query(prompt, plaintext_output=plaintext_flag, stream=stream_flag)
 
     if args.question:
         question_text = command_output_str + " ".join(args.question)
-        ask_llm.query(question_text.strip(), plaintext_output=plaintext_flag, stream=stream_flag)
+        do_query(question_text.strip())
     elif command_output_str:
         if config_obj.VERBOSE:
             console.print("Command output captured, querying LLM with it...", highlight=False)
-        ask_llm.query(command_output_str.strip(), plaintext_output=plaintext_flag, stream=stream_flag)
+        do_query(command_output_str.strip())
     elif not sys.stdin.isatty():
         # Handle piped input - read once and exit
         piped_input = sys.stdin.read().strip()
         if piped_input:
-            ask_llm.query(piped_input, plaintext_output=plaintext_flag, stream=stream_flag)
+            do_query(piped_input)
     else:
         console.print("[bold green]Entering interactive mode. Type 'exit' or 'quit' to leave.[/bold green]", highlight=False)
         console.print("[bold green]Type '>' at the beginning of a line for multiline input mode (end with Ctrl+D or Ctrl+Z).[/bold green]", highlight=False)
-        handler_console = ask_llm.client.console if hasattr(ask_llm.client, 'console') and ask_llm.client.console else console
+        handler_console = console
+        if ask_llm and hasattr(ask_llm.client, 'console') and ask_llm.client.console:
+            handler_console = ask_llm.client.console
         input_handler = MultilineInputHandler(console=handler_console)
         while True:
             try:
@@ -814,7 +1303,7 @@ def run_app(args: argparse.Namespace, config_obj: Config, resolved_alias: str):
                     continue
                 console.print()
                 if prompt_text.strip():
-                    ask_llm.query(prompt_text, plaintext_output=plaintext_flag, stream=stream_flag)
+                    do_query(prompt_text)
                 console.print()
             except (KeyboardInterrupt, EOFError):
                 console.print("[bold red]Exiting interactive mode.[/bold red]", highlight=False)

@@ -60,9 +60,9 @@ class Config(BaseSettings):
     DEFAULT_USER: str = Field(default="default", description="Default user profile to use if --user is not specified")
 
     # --- Memory Settings --- #
-    MEMORY_N_RESULTS: int = Field(default=5, description="Number of relevant memories to retrieve during search (Set via ASK_LLM_MEMORY_N_RESULTS)")
+    MEMORY_N_RESULTS: int = Field(default=10, description="Number of relevant memories to retrieve during search (Set via ASK_LLM_MEMORY_N_RESULTS)")
     MEMORY_PROTECTED_RECENT_TURNS: int = Field(default=3, description="Number of recent conversation turns to always include regardless of token limits (Set via ASK_LLM_MEMORY_PROTECTED_RECENT_TURNS)")
-    MEMORY_MIN_RELEVANCE: float = Field(default=0.1, description="Minimum relevance score (0.0-1.0) for memories to be included (Set via ASK_LLM_MEMORY_MIN_RELEVANCE)")
+    MEMORY_MIN_RELEVANCE: float = Field(default=0.01, description="Minimum relevance score (0.0-1.0) for memories to be included (Set via ASK_LLM_MEMORY_MIN_RELEVANCE)")
     MEMORY_MAX_TOKEN_PERCENT: int = Field(default=30, description="Maximum percentage of context window to use for memories (Set via ASK_LLM_MEMORY_MAX_TOKEN_PERCENT)")
     MEMORY_DEDUP_SIMILARITY: float = Field(default=0.85, description="Similarity threshold (0.0-1.0) for fuzzy deduplication of memories against history (Set via ASK_LLM_MEMORY_DEDUP_SIMILARITY)")
 
@@ -76,13 +76,30 @@ class Config(BaseSettings):
     # --- Memory Extraction Settings --- #
     MEMORY_EXTRACTION_ENABLED: bool = Field(default=True, description="Enable LLM-based memory extraction from conversations")
     MEMORY_EXTRACTION_MIN_IMPORTANCE: float = Field(default=0.3, description="Minimum importance score for extracted memories to be stored")
-    MEMORY_EMBEDDING_DIM: int = Field(default=1536, description="Dimension of embedding vectors for semantic search")
+    MEMORY_EMBEDDING_DIM: int = Field(default=384, description="Dimension of embedding vectors for semantic search (384 for all-MiniLM-L6-v2)")
+    MEMORY_EMBEDDING_MODEL: str = Field(default="all-MiniLM-L6-v2", description="Sentence-transformers model for local embeddings")
+    EXTRACTION_MODEL: Optional[str] = Field(default=None, description="Model alias to use for memory extraction (defaults to first available)")
+    
+    # --- Memory Decay Settings --- #
+    MEMORY_DECAY_ENABLED: bool = Field(default=True, description="Enable temporal decay for memory relevance scoring")
+    MEMORY_DECAY_HALF_LIFE_DAYS: float = Field(default=90.0, description="Half-life in days for memory decay (90 = memory at 50% weight after 90 days)")
+    MEMORY_ACCESS_BOOST_FACTOR: float = Field(default=0.15, description="How much to boost frequently accessed memories (0.15 = +15% per log(access_count))")
+    MEMORY_RECENCY_WEIGHT: float = Field(default=0.3, description="Weight given to recency vs base importance (0.3 = 30% recency, 70% base)")
+    MEMORY_DIVERSITY_ENABLED: bool = Field(default=True, description="Enable diversity sampling to avoid echo chambers in retrieval")
+    
+    # --- Memory Consolidation Settings --- #
+    MEMORY_CONSOLIDATION_THRESHOLD: float = Field(default=0.75, description="Cosine similarity threshold for clustering similar memories (0.0-1.0)")
+
+    # --- Service Settings --- #
+    SERVICE_MODEL: Optional[str] = Field(default=None, description="Default model alias for the background service API")
+    SERVICE_HOST: str = Field(default="127.0.0.1", description="Host for the background service to bind to")
+    SERVICE_PORT: int = Field(default=8642, description="Port for the background service to listen on")
 
     # --- LLM Generation Settings --- #
     MAX_TOKENS: int = Field(default=1024*4, description="Default maximum tokens to generate")
     TEMPERATURE: float = Field(default=0.8, description="Default generation temperature")
     TOP_P: float = Field(default=0.95, description="Default nucleus sampling top-p")
-    LLAMA_CPP_N_CTX: int = Field(default=4096, description="Context size for Llama.cpp models")
+    LLAMA_CPP_N_CTX: int = Field(default=8192, description="Context size for Llama.cpp models")
     LLAMA_CPP_N_GPU_LAYERS: int = Field(default=-1, description="Number of layers to offload to GPU (-1 for all possible layers)")
 
     # --- UI/Interaction Settings --- #

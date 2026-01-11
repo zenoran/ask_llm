@@ -113,6 +113,49 @@ class HuggingFaceClient(LLMClient):
             self.console.print(f"[yellow]Compilation skipped:[/yellow] {str(e)}")
             return model # Return original model on failure
 
+    def stream_raw(self, messages: List[Message], **kwargs) -> Iterator[str]:
+        """
+        Stream raw text chunks from HuggingFace model without console formatting.
+        
+        Used by the API service for SSE streaming.
+        """
+        if not self.tokenizer or not self.model:
+            raise RuntimeError("Model or Tokenizer not properly initialized.")
+        
+        formatted_prompt = self._prepare_prompt(messages)
+        if formatted_prompt is None:
+            raise RuntimeError("Could not format prompt.")
+        
+        inputs = self.tokenizer(formatted_prompt, return_tensors="pt").to(self.model.device)
+        
+        generation_kwargs = {
+            "max_new_tokens": self.config.MAX_TOKENS,
+            "temperature": self.config.TEMPERATURE,
+            "top_p": self.config.TOP_P,
+            "do_sample": True,
+            "pad_token_id": self.tokenizer.pad_token_id,
+            "eos_token_id": self.tokenizer.eos_token_id,
+            "use_cache": True,
+            "input_ids": inputs.input_ids,
+            "attention_mask": inputs.attention_mask,
+        }
+        
+        streamer = TextIteratorStreamer(
+            self.tokenizer, skip_prompt=True, skip_special_tokens=True
+        )
+        generation_kwargs["streamer"] = streamer
+        
+        thread = Thread(target=self.model.generate, kwargs=generation_kwargs)
+        thread.start()
+        
+        try:
+            for chunk in streamer:
+                if chunk:
+                    yield chunk
+        finally:
+            thread.join()
+            torch.cuda.empty_cache()
+
     def query(self, messages: List[Message], plaintext_output: bool = False, stream: bool = True, **kwargs) -> str:
         """Query the local Hugging Face model.
 

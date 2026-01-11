@@ -35,6 +35,51 @@ class OllamaClient(LLMClient):
             response = self._get_full_response(api_messages, plaintext_output)
         return response
 
+    def stream_raw(self, messages: List[Message], **kwargs) -> Iterator[str]:
+        """
+        Stream raw text chunks from Ollama without console formatting.
+        
+        Used by the API service for SSE streaming.
+        """
+        api_messages = self._prepare_api_messages(messages)
+        payload = {
+            "model": self.model,
+            "messages": api_messages,
+            "stream": True,
+            "options": {
+                "temperature": self.config.TEMPERATURE,
+                "num_predict": self.config.MAX_TOKENS,
+                "top_p": self.config.TOP_P
+            }
+        }
+        
+        response = requests.post(
+            f"{self.config.OLLAMA_URL}/api/chat",
+            json=payload,
+            stream=True,
+            timeout=120
+        )
+        response.raise_for_status()
+        
+        try:
+            for line in response.iter_lines():
+                if not line:
+                    continue
+                try:
+                    chunk = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                
+                if "error" in chunk:
+                    raise RuntimeError(chunk["error"])
+                
+                if "message" in chunk and "content" in chunk["message"]:
+                    content = chunk["message"]["content"]
+                    if content:
+                        yield content
+        finally:
+            response.close()
+
     def _prepare_api_messages(self, messages: List[Message]) -> List[dict]:
         api_messages = []
         has_system_message = False

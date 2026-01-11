@@ -73,6 +73,27 @@ class LlamaCppClient(LLMClient):
             self.console.print("Ensure model path is correct and `llama-cpp-python` is installed with appropriate hardware acceleration (e.g., BLAS, CUDA). Check library docs.")
             raise
 
+    def stream_raw(self, messages: List[Message], **kwargs: Any) -> Iterator[str]:
+        """
+        Stream raw text chunks from llama.cpp without console formatting.
+        
+        Used by the API service for SSE streaming.
+        """
+        if not self.model:
+            raise RuntimeError("Llama.cpp model not properly initialized.")
+        
+        api_messages = [msg.to_api_format() for msg in messages]
+        generation_params = {
+            "messages": api_messages,
+            "max_tokens": self.config.MAX_TOKENS,
+            "temperature": self.config.TEMPERATURE,
+            "top_p": self.config.TOP_P,
+            "stream": True,
+        }
+        
+        raw_stream = self.model.create_chat_completion(**generation_params)
+        yield from self._iterate_llama_cpp_chunks(raw_stream)
+
     def query(self, messages: List[Message], plaintext_output: bool = False, stream: bool = True, **kwargs: Any) -> str:
         """Query the loaded GGUF model.
 

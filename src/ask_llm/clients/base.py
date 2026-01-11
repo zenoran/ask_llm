@@ -70,6 +70,24 @@ class LLMClient(ABC):
         """Return the specific panel title and border style for this client."""
         pass
 
+    def stream_raw(self, messages: List[Message], **kwargs: Any) -> Iterator[str]:
+        """
+        Stream raw text chunks from the LLM without console formatting.
+        
+        This method is used by the API service for SSE streaming.
+        Default implementation falls back to non-streaming query.
+        
+        Args:
+            messages: List of Message objects for conversation history.
+            **kwargs: Client-specific arguments.
+            
+        Yields:
+            Text chunks as they're generated.
+        """
+        # Default fallback: yield the entire response as one chunk
+        response = self.query(messages, plaintext_output=True, stream=False, **kwargs)
+        yield response
+
     def _handle_streaming_output(
         self,
         stream_iterator: Iterator[str],
