@@ -229,36 +229,60 @@ class LLMClient(ABC):
     ) -> str:
         """Windows-specific streaming handler.
         
-        Uses simple approach: collect full response, then render cleanly.
-        Shows a spinner/cursor during streaming to indicate activity.
+        Shows panel immediately after first paragraph, then streams the rest
+        as plain text (avoiding Rich Live which causes display issues on Windows).
+        Final markdown is rendered after streaming completes.
         """
         total_response = ""
         split_marker = "\n\n"
+        first_part_buffer = ""
+        first_part_printed = False
+        remainder_buffer = ""
+        cursor = "▌"
         
         try:
-            # Collect full response while showing activity
-            spinner_chars = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
-            spinner_idx = 0
-            
             for content in stream_iterator:
                 if not content:
                     continue
                 total_response += content
-                # Show spinning cursor
-                print(f"\r{spinner_chars[spinner_idx % len(spinner_chars)]} Streaming...", end='', flush=True)
-                spinner_idx += 1
+                
+                if not first_part_printed:
+                    first_part_buffer += content
+                    if split_marker in first_part_buffer:
+                        # Found the split - print panel immediately
+                        first_part, remainder = first_part_buffer.split(split_marker, 1)
+                        self._print_assistant_message(first_part, panel_title=panel_title, panel_border_style=panel_border_style)
+                        first_part_printed = True
+                        remainder_buffer = remainder
+                        # Start streaming the remainder
+                        if remainder:
+                            print(remainder + cursor, end='', flush=True)
+                else:
+                    # Stream remainder as plain text
+                    remainder_buffer += content
+                    # Clear cursor, print new content, add cursor back
+                    print(f"\b \b{content}{cursor}", end='', flush=True)
             
-            # Clear the spinner line
-            print("\r                    \r", end='', flush=True)
-            
-            # Now render the complete response properly
-            if split_marker in total_response:
-                first_part, remainder = total_response.split(split_marker, 1)
-                self._print_assistant_message(first_part, panel_title=panel_title, panel_border_style=panel_border_style)
-                if remainder.strip():
-                    self.console.print(Align(Markdown(remainder.strip()), align="left", pad=False))
+            # Finalize output
+            if not first_part_printed:
+                # Never found split marker - everything goes in panel
+                self._print_assistant_message(first_part_buffer, panel_title=panel_title, panel_border_style=panel_border_style)
             else:
-                self._print_assistant_message(total_response, panel_title=panel_title, panel_border_style=panel_border_style)
+                # Clear the streaming cursor
+                print("\b \b", end='', flush=True)
+                if remainder_buffer.strip():
+                    # Clear the streamed text and render as proper markdown
+                    # Move cursor to start of line and clear
+                    line_count = remainder_buffer.count('\n')
+                    if line_count > 0:
+                        # Multi-line: need to clear multiple lines
+                        print(f"\r\033[{line_count}A\033[J", end='', flush=True)
+                    else:
+                        # Single line: just clear this line
+                        print("\r\033[K", end='', flush=True)
+                    self.console.print(Align(Markdown(remainder_buffer.strip()), align="left", pad=False))
+                else:
+                    print(flush=True)
                 
         except KeyboardInterrupt:
             print()
