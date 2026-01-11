@@ -68,11 +68,35 @@ class ConsolidationResult:
     dry_run: bool = False
 
 
+def _normalize_text(text: str) -> str:
+    """Normalize text for comparison (lowercase, strip, normalize whitespace)."""
+    import re
+    text = text.lower().strip()
+    text = re.sub(r'\s+', ' ', text)
+    # Normalize common variations
+    text = re.sub(r'\bthe user\b', 'user', text)
+    text = re.sub(r'\bnick\b', 'user', text)  # User's name -> generic
+    text = re.sub(r"user's", 'user', text)
+    return text
+
+
+def _text_similarity(text1: str, text2: str) -> float:
+    """Calculate similarity ratio between two normalized strings."""
+    from difflib import SequenceMatcher
+    norm1 = _normalize_text(text1)
+    norm2 = _normalize_text(text2)
+    return SequenceMatcher(None, norm1, norm2).ratio()
+
+
 class MemoryConsolidator:
     """Consolidates redundant memories using embedding similarity and LLM merging."""
     
     # Default similarity threshold for clustering (0.75 = fairly similar)
     DEFAULT_SIMILARITY_THRESHOLD = 0.75
+    # High similarity threshold for cross-type clustering
+    CROSS_TYPE_SIMILARITY_THRESHOLD = 0.90
+    # Text similarity threshold for near-identical memories
+    TEXT_SIMILARITY_THRESHOLD = 0.85
     # Minimum cluster size to consider for merging
     MIN_CLUSTER_SIZE = 2
     # Maximum memories to merge in one LLM call
@@ -158,8 +182,13 @@ class MemoryConsolidator:
         
         Uses a simple greedy approach:
         1. For each memory, find all others above similarity threshold
-        2. Group connected memories (same type only)
+        2. Group connected memories (prefers same type, but allows cross-type for very similar)
         3. Filter to clusters with 2+ memories
+        
+        Clustering rules:
+        - Same type + embedding similarity >= threshold: cluster together
+        - Different type + embedding similarity >= CROSS_TYPE threshold: cluster together
+        - Text similarity >= TEXT_SIMILARITY threshold (after normalization): cluster together
         """
         if len(memories) < 2:
             return []
@@ -178,18 +207,33 @@ class MemoryConsolidator:
             mem_i = memories[i]
             cluster_indices = [i]
             
-            # Find all similar memories of the same type
+            # Find all similar memories
             for j in range(i + 1, n):
                 if j in assigned:
                     continue
                 
                 mem_j = memories[j]
+                same_type = mem_i["memory_type"] == mem_j["memory_type"]
+                embedding_sim = similarity_matrix[i, j]
                 
-                # Only cluster same-type memories
-                if mem_i["memory_type"] != mem_j["memory_type"]:
-                    continue
+                # Determine if should cluster (ordered by speed - fastest checks first)
+                should_cluster = False
                 
-                if similarity_matrix[i, j] >= self.threshold:
+                if same_type and embedding_sim >= self.threshold:
+                    # Same type, meets basic threshold
+                    should_cluster = True
+                elif embedding_sim >= self.CROSS_TYPE_SIMILARITY_THRESHOLD:
+                    # Very high embedding similarity, allow cross-type
+                    should_cluster = True
+                elif embedding_sim >= 0.4:
+                    # Only check expensive text similarity if embeddings are somewhat similar
+                    # This avoids O(n²) string comparisons for unrelated memories
+                    text_sim = _text_similarity(mem_i["content"], mem_j["content"])
+                    if text_sim >= self.TEXT_SIMILARITY_THRESHOLD:
+                        # Text is nearly identical (after normalization)
+                        should_cluster = True
+                
+                if should_cluster:
                     cluster_indices.append(j)
             
             # Only create cluster if we have multiple memories

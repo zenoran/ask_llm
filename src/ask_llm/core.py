@@ -330,7 +330,7 @@ class AskLLM:
         # Truncation removes from index 0, so least relevant should be first
         sorted_memories = sorted(retrieved_memories_raw, key=lambda x: x.get('relevance', 0.0))
         memory_messages = [
-            Message(role=mem.get('metadata', {}).get('role', 'assistant'), content=mem.get('document', ''))
+            Message(role='system', content=f"[Memory] {mem.get('document', '')}")
             for mem in sorted_memories if mem.get('document')
         ]
 
@@ -360,7 +360,7 @@ class AskLLM:
 
         if unique_memory_messages:
             logger.debug(f"Adding {len(unique_memory_messages)} unique memories to context.")
-            memory_delimiter = Message(role="system", content="--- Relevant Past Conversation Snippets (older history or related topics) ---")
+            memory_delimiter = Message(role="system", content="--- Things you remember about the user (from past conversations) ---")
             final_combined_turns = unique_memory_messages + [memory_delimiter] + final_combined_turns
             memory_delimiter_added = True
         else:

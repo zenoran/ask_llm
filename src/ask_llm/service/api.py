@@ -22,7 +22,7 @@ from typing import Any, AsyncIterator, Literal
 
 from pydantic import BaseModel, Field
 
-from ..utils.config import Config, has_database_credentials
+from ..utils.config import Config
 from .tasks import Task, TaskResult, TaskStatus, TaskType
 
 logger = logging.getLogger(__name__)
@@ -147,42 +147,6 @@ class HealthResponse(BaseModel):
     status: str = "ok"
 
 
-class MemorySearchRequest(BaseModel):
-    """Request for semantic memory search."""
-    query: str
-    bot_id: str = "nova"
-    n_results: int = Field(default=5, ge=1, le=50)
-    min_relevance: float = Field(default=0.0, ge=0.0, le=1.0)
-
-
-class MemorySearchResult(BaseModel):
-    """A single memory search result."""
-    id: str
-    content: str
-    memory_type: str
-    importance: float
-    relevance: float
-    source_message_ids: list[str] = []
-
-
-class MemorySearchResponse(BaseModel):
-    """Response for memory search."""
-    results: list[MemorySearchResult]
-    search_type: str = "embedding"  # "embedding" or "text"
-
-
-class GenerateEmbeddingRequest(BaseModel):
-    """Request to generate an embedding."""
-    text: str
-
-
-class GenerateEmbeddingResponse(BaseModel):
-    """Response with generated embedding."""
-    embedding: list[float]
-    dimension: int
-    model: str
-
-
 # =============================================================================
 # Background Service
 # =============================================================================
@@ -253,20 +217,15 @@ class BackgroundService:
     def get_memory_backend(self, bot_id: str):
         """Get or create memory backend for a bot."""
         if bot_id not in self._memory_backends:
-            # Check credentials before attempting connection
-            if not has_database_credentials(self.config):
-                logger.debug(f"Database credentials not configured - memory backend unavailable for {bot_id}")
+            try:
+                from ..memory.postgresql import PostgreSQLMemoryBackend
+                self._memory_backends[bot_id] = PostgreSQLMemoryBackend(
+                    config=self.config,
+                    bot_id=bot_id,
+                )
+            except Exception as e:
+                logger.warning(f"Memory backend unavailable for {bot_id}: {e}")
                 self._memory_backends[bot_id] = None
-            else:
-                try:
-                    from ..memory.postgresql import PostgreSQLMemoryBackend
-                    self._memory_backends[bot_id] = PostgreSQLMemoryBackend(
-                        config=self.config,
-                        bot_id=bot_id,
-                    )
-                except Exception as e:
-                    logger.warning(f"Memory backend unavailable for {bot_id}: {e}")
-                    self._memory_backends[bot_id] = None
         return self._memory_backends.get(bot_id)
     
     def _get_ask_llm(self, model_alias: str, bot_id: str, user_id: str, local_mode: bool = False):
@@ -845,94 +804,6 @@ try:
             )
         else:
             return TaskStatusResponse(task_id=task_id, status="pending")
-
-    # -------------------------------------------------------------------------
-    # Memory Endpoints
-    # -------------------------------------------------------------------------
-
-    @app.post("/v1/memory/search", response_model=MemorySearchResponse, tags=["Memory"])
-    async def search_memories(request: MemorySearchRequest):
-        """
-        Search memories using semantic embedding search.
-        
-        The service keeps the embedding model loaded, so this is fast after
-        the first request. Use this instead of local search to avoid loading
-        the model in the CLI process.
-        """
-        service = get_service()
-        backend = service.get_memory_backend(request.bot_id)
-        
-        if not backend:
-            raise HTTPException(
-                status_code=503,
-                detail=f"Memory backend not available for bot: {request.bot_id}"
-            )
-        
-        try:
-            from ..memory.embeddings import generate_embedding
-            query_embedding = generate_embedding(request.query, backend.embedding_model)
-            
-            if query_embedding:
-                results = backend.search_memories_by_embedding(
-                    query_embedding,
-                    n_results=request.n_results,
-                    min_importance=request.min_relevance,
-                )
-                search_type = "embedding"
-            else:
-                # Fall back to text search if embedding fails
-                results = backend.search_memories_by_text(
-                    request.query,
-                    n_results=request.n_results,
-                    min_importance=request.min_relevance,
-                )
-                search_type = "text"
-            
-            return MemorySearchResponse(
-                results=[
-                    MemorySearchResult(
-                        id=r["id"],
-                        content=r["content"],
-                        memory_type=r.get("memory_type", "misc"),
-                        importance=r.get("importance", 0.5),
-                        relevance=r.get("similarity", r.get("relevance", 0.0)),
-                        source_message_ids=r.get("source_message_ids", []),
-                    )
-                    for r in results
-                ] if results else [],
-                search_type=search_type,
-            )
-        except Exception as e:
-            logger.exception(f"Memory search failed: {e}")
-            raise HTTPException(status_code=500, detail=str(e))
-
-    @app.post("/v1/memory/embedding", response_model=GenerateEmbeddingResponse, tags=["Memory"])
-    async def generate_embedding_endpoint(request: GenerateEmbeddingRequest):
-        """
-        Generate an embedding for the given text.
-        
-        Uses the service's loaded embedding model (no model loading delay).
-        """
-        try:
-            from ..memory.embeddings import generate_embedding, get_embedding_model
-            
-            model_name = get_service().config.MEMORY_EMBEDDING_MODEL
-            embedding = generate_embedding(request.text, model_name)
-            
-            if not embedding:
-                raise HTTPException(
-                    status_code=500,
-                    detail="Failed to generate embedding"
-                )
-            
-            return GenerateEmbeddingResponse(
-                embedding=embedding,
-                dimension=len(embedding),
-                model=model_name,
-            )
-        except Exception as e:
-            logger.exception(f"Embedding generation failed: {e}")
-            raise HTTPException(status_code=500, detail=str(e))
 
 except ImportError:
     # FastAPI not installed - create stub

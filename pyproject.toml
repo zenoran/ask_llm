@@ -57,6 +57,7 @@ ask-llm = "ask_llm.main:main"
 llm = "ask_llm.main:main"
 ask-llm-service = "ask_llm.service.server:main"
 llm-service = "ask_llm.service.server:main"
+llm-memory = "ask_llm.memory_debug:main"
 
 [project.entry-points."ask_llm.memory"]
 postgresql = "ask_llm.memory.postgresql:PostgreSQLMemoryBackend"

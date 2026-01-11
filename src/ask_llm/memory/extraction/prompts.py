@@ -117,7 +117,7 @@ Output only valid JSON:"""
 
 def get_fact_extraction_prompt(conversation: str) -> str:
     """Get the fact extraction prompt with the conversation filled in."""
-    return FACT_EXTRACTION_PROMPT_TEMPLATE + "\n\n" + conversation + "\n\nOutput only valid JSON:"
+    return FACT_EXTRACTION_PROMPT_TEMPLATE.format(conversation=conversation)
 
 
 MEMORY_UPDATE_PROMPT_TEMPLATE = """You are a memory management assistant. Your task is to compare newly extracted facts against existing memories and determine the appropriate action for each new fact.

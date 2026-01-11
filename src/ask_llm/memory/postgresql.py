@@ -77,6 +77,39 @@ def get_message_table_pg(bot_id: str) -> Table:
     return table
 
 
+# Cache for forgotten message tables
+_forgotten_table_cache: dict[str, Table] = {}
+
+
+def get_forgotten_table_pg(bot_id: str) -> Table:
+    """Get or create a forgotten messages Table for a specific bot (PostgreSQL version).
+    
+    This table stores messages that have been 'forgotten' (soft-deleted).
+    They can be restored later if needed.
+    """
+    table_name = f"{_sanitize_table_name(bot_id)}_forgotten_messages"
+    
+    if table_name in _forgotten_table_cache:
+        return _forgotten_table_cache[table_name]
+    
+    table = Table(
+        table_name,
+        metadata,
+        Column("id", String(36), primary_key=True),  # UUID
+        Column("role", String(20), nullable=False),
+        Column("content", Text, nullable=False),
+        Column("timestamp", Float, nullable=False),
+        Column("session_id", String(36), nullable=True),
+        Column("processed", Boolean, default=False),
+        Column("created_at", DateTime, default=datetime.utcnow),
+        Column("forgotten_at", DateTime, default=datetime.utcnow),  # When it was forgotten
+        extend_existing=True
+    )
+    
+    _forgotten_table_cache[table_name] = table
+    return table
+
+
 def get_memory_table_pg(bot_id: str) -> Table:
     """Get or create a memory Table for a specific bot (PostgreSQL version)."""
     table_name = f"{_sanitize_table_name(bot_id)}_memories"
@@ -144,11 +177,13 @@ class PostgreSQLMemoryBackend(MemoryBackend):
         self.bot_id_sanitized = _sanitize_table_name(bot_id)
         self._messages_table_name = f"{self.bot_id_sanitized}_messages"
         self._memories_table_name = f"{self.bot_id_sanitized}_memories"
+        self._forgotten_table_name = f"{self.bot_id_sanitized}_forgotten_messages"
         self.embedding_dim = embedding_dim
         
         # Get table definitions
         self.messages_table = get_message_table_pg(bot_id)
         self.memories_table = get_memory_table_pg(bot_id)
+        self.forgotten_table = get_forgotten_table_pg(bot_id)
         
         # Build connection URL for PostgreSQL
         encoded_password = quote_plus(password)
@@ -188,6 +223,20 @@ class PostgreSQLMemoryBackend(MemoryBackend):
                 )
             """)
             
+            # Create forgotten messages table (for soft-deleted messages)
+            forgotten_sql = text(f"""
+                CREATE TABLE IF NOT EXISTS {self._forgotten_table_name} (
+                    id VARCHAR(36) PRIMARY KEY,
+                    role VARCHAR(20) NOT NULL,
+                    content TEXT NOT NULL,
+                    timestamp DOUBLE PRECISION NOT NULL,
+                    session_id VARCHAR(36),
+                    processed BOOLEAN DEFAULT FALSE,
+                    created_at TIMESTAMP,
+                    forgotten_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            
             # Create memories table with vector column
             memories_sql = text(f"""
                 CREATE TABLE IF NOT EXISTS {self._memories_table_name} (
@@ -213,8 +262,9 @@ class PostgreSQLMemoryBackend(MemoryBackend):
             
             try:
                 conn.execute(messages_sql)
+                conn.execute(forgotten_sql)
                 conn.execute(memories_sql)
-                # Run migration for existing tables
+                # Run migrations for existing tables
                 try:
                     conn.execute(add_superseded_sql)
                 except Exception:
@@ -956,29 +1006,73 @@ class PostgreSQLMemoryBackend(MemoryBackend):
     def search(self, query: str, n_results: int = 5, min_relevance: float = 0.0) -> list[dict] | None:
         """Search for relevant memories (implements MemoryBackend interface).
         
-        Uses text-based search for memory retrieval. Semantic embedding search
-        is only available when running through the background service (--service mode).
+        Search strategy:
+        1. Text search on memories (fast, keyword matching) - if good matches found, use them
+        2. Embedding search + high-importance blend - semantic search combined with important facts
+        3. Raw messages fallback (last resort)
+        
+        For most queries, we blend embedding search results with high-importance core facts
+        (like user's name) to ensure both relevance and foundational context.
         """
-        # Use text search (fast, no model loading required)
+        # Minimum relevance threshold for text search to be considered "good"
+        TEXT_SEARCH_MIN_RELEVANCE = 0.1
+        
+        def format_memory_result(r: dict) -> dict:
+            return {
+                "id": r["id"],
+                "document": r["content"],
+                "metadata": {
+                    "memory_type": r["memory_type"],
+                    "importance": r["importance"],
+                    "source_message_ids": r.get("source_message_ids", []),
+                },
+                "relevance": r.get("similarity", r.get("relevance", r["importance"])),
+            }
+        
+        # 1. Try text search on memories - but only accept high-quality matches
         text_results = self.search_memories_by_text(query, n_results, min_importance=min_relevance)
         if text_results:
-            logger.debug(f"Found {len(text_results)} memories via text search")
-            return [
-                {
-                    "id": r["id"],
-                    "document": r["content"],
-                    "metadata": {
-                        "memory_type": r["memory_type"],
-                        "importance": r["importance"],
-                        "source_message_ids": r["source_message_ids"],
-                    },
-                    "relevance": r.get("similarity", r.get("relevance", r["importance"])),
-                }
-                for r in text_results
-            ]
+            # Check if any result has good relevance (not just keyword matching noise)
+            best_relevance = max(r.get("relevance", 0) for r in text_results)
+            if best_relevance >= TEXT_SEARCH_MIN_RELEVANCE:
+                logger.debug(f"Found {len(text_results)} memories via text search (best relevance: {best_relevance:.3f})")
+                return [format_memory_result(r) for r in text_results]
+            else:
+                logger.debug(f"Text search results too weak (best: {best_relevance:.3f}), trying other methods")
         
-        # Fallback: search raw messages if no memories exist
-        # Exclude messages from the last 10 seconds to avoid finding the current query
+        # 2. Blend embedding search with high-importance core facts
+        combined_results = []
+        seen_ids = set()
+        
+        # Get embedding search results (query-relevant)
+        if self.embedding_model:
+            try:
+                from .embeddings import generate_embedding
+                query_embedding = generate_embedding(query, self.embedding_model)
+                if query_embedding:
+                    embedding_results = self.search_memories_by_embedding(query_embedding, n_results, min_importance=min_relevance)
+                    if embedding_results:
+                        logger.debug(f"Found {len(embedding_results)} memories via embedding search")
+                        for r in embedding_results:
+                            if r["id"] not in seen_ids:
+                                combined_results.append(format_memory_result(r))
+                                seen_ids.add(r["id"])
+            except Exception as e:
+                logger.debug(f"Embedding search failed: {e}")
+        
+        # Add high-importance core facts (limit to a few to avoid overwhelming)
+        # These are foundational facts like name, profession that should always be included
+        high_importance_results = self.get_high_importance_memories(3, min_importance=0.9)
+        for r in high_importance_results:
+            if r["id"] not in seen_ids:
+                combined_results.append(format_memory_result(r))
+                seen_ids.add(r["id"])
+        
+        if combined_results:
+            logger.debug(f"Returning {len(combined_results)} blended results (embedding + core facts)")
+            return combined_results[:n_results]
+        
+        # 3. Last resort: search raw messages
         message_results = self.search_messages_by_text(query, n_results, exclude_recent_seconds=10.0)
         
         if not message_results:
@@ -1000,6 +1094,43 @@ class PostgreSQLMemoryBackend(MemoryBackend):
             for r in message_results
         ]
     
+    def get_high_importance_memories(self, n_results: int = 10, min_importance: float = 0.7) -> list[dict]:
+        """Get the most important memories, regardless of query matching.
+        
+        Useful as a fallback for general queries like "what do you know about me?"
+        """
+        with self.engine.connect() as conn:
+            try:
+                sql = text(f"""
+                    SELECT id, content, memory_type, importance, source_message_ids,
+                           access_count, last_accessed, created_at
+                    FROM {self._memories_table_name}
+                    WHERE importance >= :min_importance
+                    ORDER BY importance DESC, access_count DESC, created_at DESC
+                    LIMIT :limit
+                """)
+                
+                rows = conn.execute(sql, {
+                    "min_importance": min_importance,
+                    "limit": n_results,
+                }).fetchall()
+                
+                return [
+                    {
+                        "id": row.id,
+                        "content": row.content,
+                        "memory_type": row.memory_type,
+                        "importance": row.importance,
+                        "source_message_ids": row.source_message_ids or [],
+                        "relevance": row.importance,  # Use importance as relevance for fallback
+                    }
+                    for row in rows
+                ]
+                
+            except Exception as e:
+                logger.error(f"Failed to get high-importance memories: {e}")
+                return []
+    
     def clear(self) -> bool:
         """Clear all memories (NOT messages - those are permanent)."""
         with Session(self.engine) as session:
@@ -1014,6 +1145,246 @@ class PostgreSQLMemoryBackend(MemoryBackend):
                 logger.error(f"Failed to clear memories: {e}")
                 return False
     
+    def ignore_recent_messages(self, count: int) -> int:
+        """Move the last N messages to the forgotten table.
+        
+        Returns the number of messages actually forgotten.
+        """
+        with self.engine.connect() as conn:
+            try:
+                # Get IDs of last N messages
+                select_sql = text(f"""
+                    SELECT id, role, content, timestamp, session_id, processed, created_at
+                    FROM {self._messages_table_name}
+                    ORDER BY timestamp DESC
+                    LIMIT :count
+                """)
+                rows = conn.execute(select_sql, {"count": count}).fetchall()
+                
+                if not rows:
+                    return 0
+                
+                ids_to_forget = [row.id for row in rows]
+                
+                # Insert into forgotten table
+                for row in rows:
+                    insert_sql = text(f"""
+                        INSERT INTO {self._forgotten_table_name} 
+                        (id, role, content, timestamp, session_id, processed, created_at, forgotten_at)
+                        VALUES (:id, :role, :content, :timestamp, :session_id, :processed, :created_at, CURRENT_TIMESTAMP)
+                        ON CONFLICT (id) DO NOTHING
+                    """)
+                    conn.execute(insert_sql, {
+                        "id": row.id,
+                        "role": row.role,
+                        "content": row.content,
+                        "timestamp": row.timestamp,
+                        "session_id": row.session_id,
+                        "processed": row.processed,
+                        "created_at": row.created_at,
+                    })
+                
+                # Delete from messages table
+                delete_sql = text(f"""
+                    DELETE FROM {self._messages_table_name}
+                    WHERE id = ANY(:ids)
+                """)
+                conn.execute(delete_sql, {"ids": ids_to_forget})
+                conn.commit()
+                
+                logger.info(f"Forgot {len(ids_to_forget)} messages")
+                return len(ids_to_forget)
+            except Exception as e:
+                conn.rollback()
+                logger.error(f"Failed to forget messages: {e}")
+                return 0
+    
+    def ignore_messages_since_minutes(self, minutes: int) -> int:
+        """Move all messages from the last N minutes to the forgotten table.
+        
+        Returns the number of messages actually forgotten.
+        """
+        cutoff = time.time() - (minutes * 60)
+        with self.engine.connect() as conn:
+            try:
+                # Get messages to forget
+                select_sql = text(f"""
+                    SELECT id, role, content, timestamp, session_id, processed, created_at
+                    FROM {self._messages_table_name}
+                    WHERE timestamp >= :cutoff
+                    ORDER BY timestamp ASC
+                """)
+                rows = conn.execute(select_sql, {"cutoff": cutoff}).fetchall()
+                
+                if not rows:
+                    return 0
+                
+                ids_to_forget = [row.id for row in rows]
+                
+                # Insert into forgotten table
+                for row in rows:
+                    insert_sql = text(f"""
+                        INSERT INTO {self._forgotten_table_name} 
+                        (id, role, content, timestamp, session_id, processed, created_at, forgotten_at)
+                        VALUES (:id, :role, :content, :timestamp, :session_id, :processed, :created_at, CURRENT_TIMESTAMP)
+                        ON CONFLICT (id) DO NOTHING
+                    """)
+                    conn.execute(insert_sql, {
+                        "id": row.id,
+                        "role": row.role,
+                        "content": row.content,
+                        "timestamp": row.timestamp,
+                        "session_id": row.session_id,
+                        "processed": row.processed,
+                        "created_at": row.created_at,
+                    })
+                
+                # Delete from messages table
+                delete_sql = text(f"""
+                    DELETE FROM {self._messages_table_name}
+                    WHERE id = ANY(:ids)
+                """)
+                conn.execute(delete_sql, {"ids": ids_to_forget})
+                conn.commit()
+                
+                logger.info(f"Forgot {len(ids_to_forget)} messages from last {minutes} minutes")
+                return len(ids_to_forget)
+            except Exception as e:
+                conn.rollback()
+                logger.error(f"Failed to forget messages: {e}")
+                return 0
+    
+    def restore_ignored_messages(self) -> int:
+        """Restore all forgotten messages back to the messages table.
+        
+        Returns the number of messages restored.
+        """
+        with self.engine.connect() as conn:
+            try:
+                # Get all forgotten messages
+                select_sql = text(f"""
+                    SELECT id, role, content, timestamp, session_id, processed, created_at
+                    FROM {self._forgotten_table_name}
+                    ORDER BY timestamp ASC
+                """)
+                rows = conn.execute(select_sql).fetchall()
+                
+                if not rows:
+                    return 0
+                
+                ids_to_restore = [row.id for row in rows]
+                
+                # Insert back into messages table
+                for row in rows:
+                    insert_sql = text(f"""
+                        INSERT INTO {self._messages_table_name} 
+                        (id, role, content, timestamp, session_id, processed, created_at)
+                        VALUES (:id, :role, :content, :timestamp, :session_id, :processed, :created_at)
+                        ON CONFLICT (id) DO NOTHING
+                    """)
+                    conn.execute(insert_sql, {
+                        "id": row.id,
+                        "role": row.role,
+                        "content": row.content,
+                        "timestamp": row.timestamp,
+                        "session_id": row.session_id,
+                        "processed": row.processed,
+                        "created_at": row.created_at,
+                    })
+                
+                # Delete from forgotten table
+                delete_sql = text(f"""
+                    DELETE FROM {self._forgotten_table_name}
+                    WHERE id = ANY(:ids)
+                """)
+                conn.execute(delete_sql, {"ids": ids_to_restore})
+                conn.commit()
+                
+                logger.info(f"Restored {len(ids_to_restore)} forgotten messages")
+                return len(ids_to_restore)
+            except Exception as e:
+                conn.rollback()
+                logger.error(f"Failed to restore messages: {e}")
+                return 0
+    
+    def get_ignored_count(self) -> int:
+        """Get the count of currently forgotten messages."""
+        with self.engine.connect() as conn:
+            result = conn.execute(text(f"SELECT COUNT(*) FROM {self._forgotten_table_name}"))
+            return result.scalar() or 0
+
+    def preview_recent_messages(self, count: int) -> list[dict]:
+        """Preview the last N messages (for confirmation before forget).
+        
+        Returns list of message dicts with id, role, content, timestamp.
+        """
+        with self.engine.connect() as conn:
+            sql = text(f"""
+                SELECT id, role, content, timestamp
+                FROM {self._messages_table_name}
+                ORDER BY timestamp DESC
+                LIMIT :count
+            """)
+            rows = conn.execute(sql, {"count": count}).fetchall()
+            
+            return [
+                {
+                    "id": row.id,
+                    "role": row.role,
+                    "content": row.content,
+                    "timestamp": row.timestamp,
+                }
+                for row in reversed(rows)  # Return in chronological order
+            ]
+    
+    def preview_messages_since_minutes(self, minutes: int) -> list[dict]:
+        """Preview messages from the last N minutes (for confirmation before forget).
+        
+        Returns list of message dicts with id, role, content, timestamp.
+        """
+        cutoff = time.time() - (minutes * 60)
+        with self.engine.connect() as conn:
+            sql = text(f"""
+                SELECT id, role, content, timestamp
+                FROM {self._messages_table_name}
+                WHERE timestamp >= :cutoff
+                ORDER BY timestamp ASC
+            """)
+            rows = conn.execute(sql, {"cutoff": cutoff}).fetchall()
+            
+            return [
+                {
+                    "id": row.id,
+                    "role": row.role,
+                    "content": row.content,
+                    "timestamp": row.timestamp,
+                }
+                for row in rows
+            ]
+    
+    def preview_ignored_messages(self) -> list[dict]:
+        """Preview all currently forgotten messages (for confirmation before restore).
+        
+        Returns list of message dicts with id, role, content, timestamp.
+        """
+        with self.engine.connect() as conn:
+            sql = text(f"""
+                SELECT id, role, content, timestamp
+                FROM {self._forgotten_table_name}
+                ORDER BY timestamp ASC
+            """)
+            rows = conn.execute(sql).fetchall()
+            
+            return [
+                {
+                    "id": row.id,
+                    "role": row.role,
+                    "content": row.content,
+                    "timestamp": row.timestamp,
+                }
+                for row in rows
+            ]
+
     def list_recent(self, n: int = 10) -> list[dict]:
         """List the most recent memories."""
         with Session(self.engine) as session:
@@ -1064,6 +1435,14 @@ class PostgreSQLMemoryBackend(MemoryBackend):
                 """)
                 msg_row = conn.execute(msg_stats_sql).first()
                 
+                # Forgotten message count
+                forgotten_count = 0
+                try:
+                    forgotten_sql = text(f"SELECT COUNT(*) FROM {self._forgotten_table_name}")
+                    forgotten_count = conn.execute(forgotten_sql).scalar() or 0
+                except Exception:
+                    pass  # Table may not exist yet
+                
                 return {
                     "memories": {
                         "total_count": mem_row.total if mem_row else 0,
@@ -1075,6 +1454,7 @@ class PostgreSQLMemoryBackend(MemoryBackend):
                     "messages": {
                         "total_count": msg_row.total if msg_row else 0,
                         "processed_count": msg_row.processed if msg_row else 0,
+                        "forgotten_count": forgotten_count,
                         "oldest_timestamp": msg_row.oldest.isoformat() if msg_row and msg_row.oldest else None,
                         "newest_timestamp": msg_row.newest.isoformat() if msg_row and msg_row.newest else None,
                     },
@@ -1299,8 +1679,9 @@ class PostgreSQLShortTermManager:
         from ..models.message import Message
         
         with Session(self._backend.engine) as session:
-            stmt = select(self._backend.messages_table).order_by(
-                self._backend.messages_table.c.timestamp.asc()
+            stmt = (
+                select(self._backend.messages_table)
+                .order_by(self._backend.messages_table.c.timestamp.asc())
             )
             
             if since_minutes is not None:

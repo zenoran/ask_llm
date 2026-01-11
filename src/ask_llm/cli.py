@@ -493,182 +493,6 @@ def show_status(config: Config, args: argparse.Namespace | None = None):
     console.print()
 
 
-def regenerate_embeddings(config: Config, args: argparse.Namespace | None = None):
-    """Regenerate embeddings for existing memories."""
-    console = Console()
-    
-    # Determine which bot to use
-    bot_id = getattr(args, 'bot', None) or config.DEFAULT_BOT
-    
-    console.print(f"\n[bold]Regenerating Embeddings for Bot: {bot_id}[/bold]\n")
-    
-    # Check for database credentials
-    if not has_database_credentials(config):
-        console.print("[red]Database credentials not configured.[/red]")
-        console.print("[dim]Set ASK_LLM_POSTGRES_PASSWORD in ~/.config/ask-llm/.env[/dim]")
-        return
-    
-    try:
-        from .memory.postgresql import PostgreSQLMemoryBackend
-        backend = PostgreSQLMemoryBackend(config, bot_id)
-        
-        # Show current stats
-        stats = backend.stats()
-        mem_stats = stats.get("memories", {})
-        total = mem_stats.get("total_count", 0)
-        
-        if total == 0:
-            console.print("[yellow]No memories found to process.[/yellow]")
-            return
-        
-        console.print(f"Found [bold]{total}[/bold] memories to process")
-        console.print(f"Using embedding model: [cyan]{backend.embedding_model}[/cyan]")
-        console.print()
-        
-        with console.status("[bold green]Generating embeddings..."):
-            result = backend.regenerate_embeddings()
-        
-        if "error" in result:
-            console.print(f"[red]Error: {result['error']}[/red]")
-            console.print("Install with: [cyan]uv pip install 'ask-llm[memory]'[/cyan]")
-        else:
-            console.print(f"[green]✓ Updated: {result['updated']}[/green]")
-            if result.get("failed", 0) > 0:
-                console.print(f"[yellow]! Failed: {result['failed']}[/yellow]")
-            console.print(f"  Embedding dimension: {result.get('embedding_dim', 'unknown')}")
-            
-    except ImportError as e:
-        console.print(f"[red]Memory backend not available: {e}[/red]")
-    except Exception as e:
-        console.print(f"[red]Error: {e}[/red]")
-        if config.VERBOSE:
-            import traceback
-            console.print(traceback.format_exc())
-
-
-def consolidate_memories(config: Config, args: argparse.Namespace | None = None):
-    """Find and merge redundant memories using local LLM."""
-    console = Console()
-    
-    # Determine which bot to use
-    bot_id = getattr(args, 'bot', None) or config.DEFAULT_BOT
-    dry_run = getattr(args, 'consolidate_dry_run', False)
-    
-    mode_str = "[yellow](DRY RUN)[/yellow] " if dry_run else ""
-    console.print(f"\n[bold]{mode_str}Memory Consolidation for Bot: {bot_id}[/bold]\n")
-    
-    # Check for database credentials
-    if not has_database_credentials(config):
-        console.print("[red]Database credentials not configured.[/red]")
-        console.print("[dim]Set ASK_LLM_POSTGRES_PASSWORD in ~/.config/ask-llm/.env[/dim]")
-        return
-    
-    try:
-        from .memory.postgresql import PostgreSQLMemoryBackend
-        from .memory.consolidation import MemoryConsolidator, get_local_llm_client
-        
-        backend = PostgreSQLMemoryBackend(config, bot_id)
-        
-        # Show current stats
-        stats = backend.stats()
-        mem_stats = stats.get("memories", {})
-        total = mem_stats.get("total_count", 0)
-        
-        if total < 2:
-            console.print("[yellow]Not enough memories to consolidate (need at least 2).[/yellow]")
-            return
-        
-        console.print(f"Found [bold]{total}[/bold] total memories")
-        console.print(f"Similarity threshold: [cyan]{config.MEMORY_CONSOLIDATION_THRESHOLD}[/cyan]")
-        
-        # Try to get a local LLM for intelligent merging
-        llm_client = None
-        if not dry_run:
-            with console.status("[bold green]Loading local LLM for merging..."):
-                llm_client = get_local_llm_client(config)
-        
-        if llm_client:
-            console.print(f"Using LLM: [green]✓ Local model loaded[/green]")
-        else:
-            console.print(f"Using LLM: [yellow]✗ None (will use heuristic merging)[/yellow]")
-        console.print()
-        
-        # Create consolidator and run
-        consolidator = MemoryConsolidator(
-            backend=backend,
-            llm_client=llm_client,
-            similarity_threshold=config.MEMORY_CONSOLIDATION_THRESHOLD,
-            config=config,
-        )
-        
-        with console.status("[bold green]Finding similar memory clusters..."):
-            memories = consolidator.get_all_active_memories_with_embeddings()
-            clusters = consolidator.find_clusters(memories)
-        
-        if not clusters:
-            console.print("[green]No redundant memory clusters found. Memories are already consolidated.[/green]")
-            return
-        
-        console.print(f"Found [bold]{len(clusters)}[/bold] clusters of similar memories:\n")
-        
-        # Show cluster details
-        table = Table(show_header=True, box=None, padding=(0, 2))
-        table.add_column("#", style="dim")
-        table.add_column("Size", justify="right")
-        table.add_column("Type", style="cyan")
-        table.add_column("Avg Similarity", justify="right")
-        table.add_column("Sample Content")
-        
-        for i, cluster in enumerate(clusters[:20], 1):  # Show first 20
-            sample = cluster.memories[0]["content"][:60] + "..." if len(cluster.memories[0]["content"]) > 60 else cluster.memories[0]["content"]
-            table.add_row(
-                str(i),
-                str(len(cluster)),
-                cluster.memories[0]["memory_type"],
-                f"{cluster.avg_similarity:.2f}",
-                sample,
-            )
-        
-        console.print(table)
-        
-        if len(clusters) > 20:
-            console.print(f"[dim]... and {len(clusters) - 20} more clusters[/dim]")
-        console.print()
-        
-        # Run consolidation
-        if dry_run:
-            console.print("[yellow]Dry run mode - no changes will be made.[/yellow]\n")
-        
-        with console.status("[bold green]Consolidating memories..."):
-            result = consolidator.consolidate(dry_run=dry_run)
-        
-        # Show results
-        console.print()
-        if dry_run:
-            console.print(f"[yellow]Would merge:[/yellow]")
-        else:
-            console.print(f"[green]Results:[/green]")
-        
-        console.print(f"  Clusters found: {result.clusters_found}")
-        console.print(f"  Clusters merged: {result.clusters_merged}")
-        console.print(f"  Memories consolidated: {result.memories_consolidated}")
-        if not dry_run:
-            console.print(f"  New memories created: {result.new_memories_created}")
-        
-        if result.errors:
-            console.print(f"\n[yellow]Errors ({len(result.errors)}):[/yellow]")
-            for err in result.errors[:5]:
-                console.print(f"  - {err}")
-                
-    except ImportError as e:
-        console.print(f"[red]Memory backend not available: {e}[/red]")
-    except Exception as e:
-        console.print(f"[red]Error: {e}[/red]")
-        if config.VERBOSE:
-            import traceback
-            console.print(traceback.format_exc())
-
-
 def show_bots(config: Config):
     """Display available bots."""
     bot_manager = BotManager(config)
@@ -918,9 +742,6 @@ def parse_arguments(config_obj: Config) -> argparse.Namespace:
     parser.add_argument("-b", "--bot", type=str, default=None, help="Bot to use (nova, spark, mira). Use --list-bots to see all.")
     parser.add_argument("--list-bots", action="store_true", help="List available bots and exit")
     parser.add_argument("--status", action="store_true", help="Show memory system status and configuration")
-    parser.add_argument("--regenerate-embeddings", action="store_true", help="Regenerate embeddings for existing memories (requires sentence-transformers)")
-    parser.add_argument("--consolidate-memories", action="store_true", help="Find and merge redundant memories using local LLM")
-    parser.add_argument("--consolidate-dry-run", action="store_true", help="Show what would be consolidated without making changes")
     parser.add_argument("--user", type=str, default=DEFAULT_USER_ID, help="User profile to use (creates if not exists)")
     parser.add_argument("--list-users", action="store_true", help="List all user profiles")
     parser.add_argument("--user-profile", action="store_true", help="Show current user profile")
@@ -1042,14 +863,6 @@ def main():
 
     elif getattr(args, 'status', False):
         show_status(config_obj, args)
-        sys.exit(0)
-
-    elif getattr(args, 'regenerate_embeddings', False):
-        regenerate_embeddings(config_obj, args)
-        sys.exit(0)
-
-    elif getattr(args, 'consolidate_memories', False) or getattr(args, 'consolidate_dry_run', False):
-        consolidate_memories(config_obj, args)
         sys.exit(0)
 
     elif getattr(args, 'list_bots', False):
@@ -1237,6 +1050,7 @@ def run_app(args: argparse.Namespace, config_obj: Config, resolved_alias: str):
         use_service = True
     
     ask_llm = None
+    memory_backend = None
     
     if not use_service:
         try:
@@ -1247,6 +1061,7 @@ def run_app(args: argparse.Namespace, config_obj: Config, resolved_alias: str):
                 bot_id=bot_id,
                 user_id=user_id
             )
+            memory_backend = ask_llm.memory_backend
         except (ImportError, FileNotFoundError, ValueError, Exception) as e:
              console.print(f"[bold red]Failed to initialize LLM client for '{resolved_alias}':[/bold red] {e}")
              if config_obj.VERBOSE:
@@ -1258,6 +1073,7 @@ def run_app(args: argparse.Namespace, config_obj: Config, resolved_alias: str):
             console.print("[green]Chat history cleared.[/green]")
         else:
             console.print("[yellow]History operations require local mode (not --service)[/yellow]")
+    
     if args.print_history is not None:
         if ask_llm:
             ask_llm.history_manager.print_history(args.print_history)

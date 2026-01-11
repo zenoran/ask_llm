@@ -160,25 +160,31 @@ class MemoryExtractionService:
         facts = []
         
         # Try to extract JSON from the response (look for code blocks first)
-        # Match ```json ... ``` or ``` ... ``` blocks
-        code_block_match = re.search(r'```(?:json)?\s*(\{[\s\S]*?\})\s*```', response)
+        # Match ```json ... ``` or ``` ... ``` blocks - handle both {} and []
+        code_block_match = re.search(r'```(?:json)?\s*([\[{][\s\S]*?[\]}])\s*```', response)
         if code_block_match:
             json_str = code_block_match.group(1)
         else:
-            # Fall back to finding raw JSON
+            # Fall back to finding raw JSON - try object first, then array
             json_match = re.search(r'\{[\s\S]*\}', response)
             if not json_match:
-                logger.debug("No JSON found in extraction response")
+                # Maybe it's an array?
+                json_match = re.search(r'\[[\s\S]*\]', response)
+            if not json_match:
+                logger.debug(f"No JSON found in extraction response. Response was: {response[:200]}...")
                 return facts
             json_str = json_match.group()
         
         try:
             # Try to fix common LLM JSON issues
-            # 1. Replace single quotes with double quotes (but not in strings)
-            # 2. Add quotes around unquoted property names
             fixed_json = self._fix_json(json_str)
             data = json.loads(fixed_json)
-            raw_facts = data.get("facts", [])
+            
+            # Handle both {"facts": [...]} and direct [...] array
+            if isinstance(data, list):
+                raw_facts = data
+            else:
+                raw_facts = data.get("facts", [])
             
             for raw_fact in raw_facts:
                 content = raw_fact.get("content", "").strip()
@@ -200,9 +206,11 @@ class MemoryExtractionService:
                 ))
                 
         except json.JSONDecodeError as e:
-            logger.debug(f"Failed to parse extraction JSON: {e}")
+            logger.warning(f"Failed to parse extraction JSON: {e}")
+            logger.debug(f"JSON string was: {json_str[:500] if json_str else 'empty'}...")
+            logger.debug(f"Fixed JSON was: {fixed_json[:500] if fixed_json else 'empty'}...")
         except Exception as e:
-            logger.debug(f"Error processing extraction response: {e}")
+            logger.warning(f"Error processing extraction response: {e}")
         
         return facts
     
@@ -214,6 +222,14 @@ class MemoryExtractionService:
         # Try to add quotes around unquoted property names
         # Match word: at the start of a line or after { or ,
         fixed = re.sub(r'([{,]\s*)([a-zA-Z_][a-zA-Z0-9_]*)\s*:', r'\1"\2":', fixed)
+        
+        # Replace single quotes with double quotes for property names
+        # This is a simplified approach - matches 'key': patterns
+        fixed = re.sub(r"'([a-zA-Z_][a-zA-Z0-9_]*)'\s*:", r'"\1":', fixed)
+        
+        # Replace single-quoted string values with double quotes
+        # This is tricky - we try to match ': 'value' patterns
+        fixed = re.sub(r":\s*'([^']*)'", r': "\1"', fixed)
         
         return fixed
     
