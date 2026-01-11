@@ -144,8 +144,8 @@ class LLMClient(ABC):
                     Align(Markdown(f"{visible_text}{cursor}" if visible_text else cursor), align="left", pad=False),
                     console=self.console,
                     refresh_per_second=15,
-                    vertical_overflow="crop",
-                    transient=False,
+                    vertical_overflow="visible",
+                    transient=True,
                     auto_refresh=False,
                 )
                 live_display.start(refresh=True)
@@ -200,9 +200,10 @@ class LLMClient(ABC):
                 total_response += f"\nERROR: {e}"
             finally:
                 if live_display:
-                    _update_live(add_cursor=False)
                     live_display.stop()
-                    if overflow_buffer.strip():
-                        self.console.print(Align(Markdown(overflow_buffer), align="left", pad=False))
+                    # Print final content (transient=True clears the Live area)
+                    final_content = visible_text + overflow_buffer
+                    if final_content.strip():
+                        self.console.print(Align(Markdown(final_content.strip()), align="left", pad=False))
         
         return total_response
