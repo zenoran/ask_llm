@@ -229,56 +229,36 @@ class LLMClient(ABC):
     ) -> str:
         """Windows-specific streaming handler.
         
-        Uses simple print-based streaming to avoid Rich Live display issues
-        on Windows terminals. Collects full response, then renders with markdown.
+        Uses simple approach: collect full response, then render cleanly.
+        Shows a spinner/cursor during streaming to indicate activity.
         """
         total_response = ""
         split_marker = "\n\n"
-        first_part_buffer = ""
-        first_part_printed = False
-        remainder_buffer = ""
         
         try:
-            # Show a simple cursor while streaming
-            print("▌ ", end='', flush=True)
+            # Collect full response while showing activity
+            spinner_chars = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+            spinner_idx = 0
             
             for content in stream_iterator:
                 if not content:
                     continue
                 total_response += content
-                
-                if not first_part_printed:
-                    first_part_buffer += content
-                    if split_marker in first_part_buffer:
-                        first_part, remainder = first_part_buffer.split(split_marker, 1)
-                        # Clear the cursor line and print panel
-                        print("\r\033[K", end='', flush=True)
-                        self._print_assistant_message(first_part, panel_title=panel_title, panel_border_style=panel_border_style)
-                        first_part_printed = True
-                        remainder_buffer = remainder
-                        # Show streaming indicator for remainder
-                        if remainder:
-                            print(remainder, end='', flush=True)
-                else:
-                    remainder_buffer += content
-                    print(content, end='', flush=True)
+                # Show spinning cursor
+                print(f"\r{spinner_chars[spinner_idx % len(spinner_chars)]} Streaming...", end='', flush=True)
+                spinner_idx += 1
             
-            # Finalize output
-            if not first_part_printed:
-                # Never found split marker, print everything in panel
-                print("\r\033[K", end='', flush=True)
-                self._print_assistant_message(first_part_buffer, panel_title=panel_title, panel_border_style=panel_border_style)
-            elif remainder_buffer.strip():
-                # Clear streaming text, render final markdown
-                print("\r\033[K", end='')
-                # Move up to clear streamed lines
-                line_count = remainder_buffer.count('\n') + 1
-                for _ in range(line_count):
-                    print("\033[A\033[K", end='')
-                print(flush=True)
-                self.console.print(Align(Markdown(remainder_buffer.strip()), align="left", pad=False))
+            # Clear the spinner line
+            print("\r                    \r", end='', flush=True)
+            
+            # Now render the complete response properly
+            if split_marker in total_response:
+                first_part, remainder = total_response.split(split_marker, 1)
+                self._print_assistant_message(first_part, panel_title=panel_title, panel_border_style=panel_border_style)
+                if remainder.strip():
+                    self.console.print(Align(Markdown(remainder.strip()), align="left", pad=False))
             else:
-                print(flush=True)
+                self._print_assistant_message(total_response, panel_title=panel_title, panel_border_style=panel_border_style)
                 
         except KeyboardInterrupt:
             print()
