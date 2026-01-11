@@ -1019,19 +1019,62 @@ def main():
             sys.exit(1)
     # Handle listing config values
     elif getattr(args, 'config_list', False):
-        console.print(f"[bold magenta]Current Configuration Settings:[/bold magenta]")
-        console.print(f"(Sources: Defaults, Environment Variables, {config_obj.model_config.get('env_file', 'unknown')})\n")
+        env_file_path = config_obj.model_config.get('env_file', 'unknown')
+        console.print(f"[bold magenta]Current Configuration Settings[/bold magenta]")
+        console.print(f"[dim]Config file: {env_file_path}[/dim]\n")
+        
+        # Define which settings are important and should be set by the user
+        # Format: field_name -> (is_secret, is_required, description)
+        important_settings = {
+            'OPENAI_API_KEY': (True, False, "Required for OpenAI/compatible APIs"),
+            'DEFAULT_MODEL_ALIAS': (False, False, "Default model to use"),
+            'DEFAULT_BOT': (False, False, "Default bot personality"),
+            'DEFAULT_USER': (False, False, "Default user profile"),
+            'POSTGRES_PASSWORD': (True, True, "Required for memory features"),
+            'POSTGRES_HOST': (False, False, "PostgreSQL server hostname"),
+            'OLLAMA_URL': (False, False, "Ollama server URL"),
+        }
+        
+        # Check for missing important settings
+        missing_settings = []
+        for field_name, (is_secret, is_required, desc) in important_settings.items():
+            value = getattr(config_obj, field_name, None)
+            if not value or (isinstance(value, str) and not value.strip()):
+                if is_required:
+                    missing_settings.append((field_name, desc))
+        
+        if missing_settings:
+            console.print("[yellow]⚠ Missing recommended settings:[/yellow]")
+            for field_name, desc in missing_settings:
+                env_var = f"ASK_LLM_{field_name}"
+                console.print(f"  [red]✗[/red] {env_var} - {desc}")
+            console.print()
+        
+        # Show all settings grouped by category
         exclude_fields = {'defined_models', 'available_ollama_models', 'ollama_checked', 'model_config', 'SYSTEM_MESSAGE'}
+        secret_fields = {'OPENAI_API_KEY', 'POSTGRES_PASSWORD', 'ANTHROPIC_API_KEY', 'GOOGLE_API_KEY'}
+        
+        console.print("[bold]All Settings:[/bold]")
         for field_name, field_info in sorted(config_obj.model_fields.items()):
             if field_name not in exclude_fields:
                 current_value = getattr(config_obj, field_name)
                 if isinstance(current_value, Path):
                     current_value_str = str(current_value)
+                elif field_name in secret_fields and current_value:
+                    # Mask secrets
+                    current_value_str = "[green]****[/green] (set)"
+                elif field_name in secret_fields:
+                    current_value_str = "[dim]not set[/dim]"
+                elif current_value is None or (isinstance(current_value, str) and not current_value.strip()):
+                    current_value_str = "[dim]not set[/dim]"
                 else:
                     current_value_str = repr(current_value)
 
                 console.print(f"  [cyan]{field_name}[/cyan]: {current_value_str}")
+        
         console.print(f"\n  [dim]SYSTEM_MESSAGE: (set by bot config in bots.yaml)[/dim]")
+        console.print(f"\n[dim]To set a value: llm --config-set KEY value[/dim]")
+        console.print(f"[dim]Or edit: {env_file_path}[/dim]")
         sys.exit(0)
 
     elif getattr(args, 'status', False):
