@@ -144,7 +144,7 @@ def display_messages_preview(messages: list[dict], max_content_length: int = 80)
 
 
 def handle_forget_recent(backend, count: int, skip_confirm: bool):
-    """Ignore the last N messages."""
+    """Ignore the last N messages and delete associated long-term memories."""
     messages = backend.preview_recent_messages(count)
     if not messages:
         console.print("[yellow]No messages to ignore[/yellow]")
@@ -154,6 +154,12 @@ def handle_forget_recent(backend, count: int, skip_confirm: bool):
     display_messages_preview(messages)
     
     if skip_confirm or console.input("\n[bold yellow]Ignore these messages? (y/N):[/bold yellow] ").strip().lower() in ('y', 'yes'):
+        # Get message IDs and delete associated memories first
+        message_ids = [msg["id"] for msg in messages]
+        deleted_memories = backend.delete_memories_by_source_message_ids(message_ids)
+        if deleted_memories > 0:
+            console.print(f"[yellow]Deleted {deleted_memories} associated long-term memories[/yellow]")
+        
         ignored = backend.ignore_recent_messages(count)
         console.print(f"[green]Ignored {ignored} messages (use --restore to undo)[/green]")
     else:
@@ -161,7 +167,7 @@ def handle_forget_recent(backend, count: int, skip_confirm: bool):
 
 
 def handle_forget_minutes(backend, minutes: int, skip_confirm: bool):
-    """Ignore messages from the last N minutes."""
+    """Ignore messages from the last N minutes and delete associated long-term memories."""
     messages = backend.preview_messages_since_minutes(minutes)
     if not messages:
         console.print("[yellow]No messages in that time range[/yellow]")
@@ -171,6 +177,12 @@ def handle_forget_minutes(backend, minutes: int, skip_confirm: bool):
     display_messages_preview(messages)
     
     if skip_confirm or console.input("\n[bold yellow]Ignore these messages? (y/N):[/bold yellow] ").strip().lower() in ('y', 'yes'):
+        # Get message IDs and delete associated memories first
+        message_ids = [msg["id"] for msg in messages]
+        deleted_memories = backend.delete_memories_by_source_message_ids(message_ids)
+        if deleted_memories > 0:
+            console.print(f"[yellow]Deleted {deleted_memories} associated long-term memories[/yellow]")
+        
         ignored = backend.ignore_messages_since_minutes(minutes)
         console.print(f"[green]Ignored {ignored} messages (use --restore to undo)[/green]")
     else:

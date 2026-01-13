@@ -14,10 +14,13 @@ Run the service:
     python -m ask_llm.service
     # or
     llm-service --port 8642
+    llm-service --verbose  # Show request/response details
+    llm-service --debug    # Low-level DEBUG logging
 """
 
 from .client import ServiceClient, ServiceStatus
 from .tasks import TaskType, Task, TaskResult
+from .logging import ServiceLogger, get_service_logger, setup_service_logging
 
 __all__ = [
     "ServiceClient",
@@ -25,4 +28,7 @@ __all__ = [
     "TaskType",
     "Task",
     "TaskResult",
+    "ServiceLogger",
+    "get_service_logger",
+    "setup_service_logging",
 ]

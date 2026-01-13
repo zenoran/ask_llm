@@ -98,6 +98,7 @@ class Config(BaseSettings):
 
     # --- LLM Generation Settings --- #
     MAX_TOKENS: int = Field(default=1024*4, description="Default maximum tokens to generate")
+    MAX_CONTEXT_TOKENS: int = Field(default=0, description="Maximum context tokens for input (0 = use LLAMA_CPP_N_CTX - MAX_TOKENS)")
     TEMPERATURE: float = Field(default=0.8, description="Default generation temperature")
     TOP_P: float = Field(default=0.95, description="Default nucleus sampling top-p")
     LLAMA_CPP_N_CTX: int = Field(default=8192, description="Context size for Llama.cpp models")

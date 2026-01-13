@@ -12,6 +12,7 @@ Or: uvicorn ask_llm.service.server:app --host 0.0.0.0 --port 8642
 
 import asyncio
 import logging
+import threading
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -23,9 +24,17 @@ from typing import Any, AsyncIterator, Literal
 from pydantic import BaseModel, Field
 
 from ..utils.config import Config
+from ..bots import get_bot, strip_emotes, StreamingEmoteFilter
 from .tasks import Task, TaskResult, TaskStatus, TaskType
+from .logging import (
+    ServiceLogger,
+    RequestContext,
+    setup_service_logging,
+    generate_request_id,
+    get_service_logger,
+)
 
-logger = logging.getLogger(__name__)
+log = get_service_logger(__name__)
 
 # Configuration
 DEFAULT_HTTP_PORT = 8642
@@ -112,7 +121,7 @@ class TaskSubmitRequest(BaseModel):
     """Request to submit a background task."""
     task_type: str
     payload: dict[str, Any]
-    bot_id: str = "nova"
+    bot_id: str | None = None  # Will use config DEFAULT_BOT if not specified
     user_id: str = "default"
     priority: int = 0
 
@@ -170,45 +179,92 @@ class BackgroundService:
         self._ask_llm_cache: dict[tuple[str, str, str], Any] = {}
         self._cache_lock = asyncio.Lock()
         
+        # Cached LLM clients keyed by model_alias only
+        # This prevents loading the same model (especially GGUF) multiple times
+        # when different bot contexts need the same underlying model
+        self._client_cache: dict[str, Any] = {}
+        
+        # Lock to serialize LLM calls - prevents CUDA crashes from concurrent access
+        # llama-cpp-python is NOT thread-safe for concurrent inference
+        self._llm_lock = asyncio.Lock()
+        
+        # Single-threaded executor for LLM calls - ensures only one runs at a time
+        from concurrent.futures import ThreadPoolExecutor
+        self._llm_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="llm")
+        
+        # Cancellation support: when a new request comes in, cancel the current one
+        # This handles the case where UI sends partial transcriptions that build up
+        self._current_generation_cancel: threading.Event | None = None
+        self._generation_done: threading.Event | None = None  # Signals when generation finishes
+        self._cancel_lock = threading.Lock()
+        
         # Memory backend cache keyed by bot_id
         self._memory_backends: dict[str, Any] = {}
         
         # Model configuration
         self._available_models: list[str] = []
         self._default_model: str | None = None
-        self._extraction_model: str | None = None
+        self._default_bot: str = config.DEFAULT_BOT or "nova"
         self._load_available_models()
     
     def _load_available_models(self):
         """Load list of available models from config."""
         models = self.config.defined_models.get("models", {})
         self._available_models = list(models.keys())
-        logger.info(f"Loaded {len(self._available_models)} models: {', '.join(self._available_models)}")
+        log.debug(f"Loaded {len(self._available_models)} models from config")
         
         # Set default model from config or use first available
         self._default_model = self.config.SERVICE_MODEL
         if not self._default_model and self._available_models:
             self._default_model = self._available_models[0]
+    
+    def _start_generation(self) -> tuple[threading.Event, threading.Event]:
+        """Start a new generation, cancelling and waiting for any in-progress one.
         
-        # Set extraction model from config, or prefer a local model for privacy
-        # Memory extraction should use local models to avoid sending personal data externally
-        self._extraction_model = self.config.EXTRACTION_MODEL
-        if not self._extraction_model:
-            # Try to find a local model (gguf, ollama, huggingface) for extraction
-            for model_alias, model_def in models.items():
-                model_type = model_def.get("type", "")
-                if model_type in ("gguf", "ollama", "huggingface"):
-                    self._extraction_model = model_alias
-                    logger.info(f"Using local model '{model_alias}' for memory extraction (privacy)")
-                    break
-            # Fall back to default if no local model found
-            if not self._extraction_model:
-                self._extraction_model = self._default_model
-                if self._extraction_model:
-                    logger.warning(
-                        f"No local model found for extraction, using '{self._extraction_model}'. "
-                        "Set EXTRACTION_MODEL in config to use a specific local model."
-                    )
+        Returns:
+            tuple of (cancel_event, done_event):
+            - cancel_event: The generation should check this periodically and abort if set
+            - done_event: The generation MUST set this when complete (in finally block)
+        
+        This ensures only one generation runs at a time by:
+        1. Signalling the previous generation to cancel
+        2. Waiting for it to actually finish (up to 5 seconds)
+        3. Then allowing the new generation to start
+        """
+        with self._cancel_lock:
+            # Cancel any existing generation and wait for it to finish
+            if self._current_generation_cancel is not None:
+                log.info("New request received - cancelling previous generation")
+                self._current_generation_cancel.set()
+                
+                # Wait for the previous generation to signal it's done
+                if self._generation_done is not None:
+                    # Release lock while waiting to avoid deadlock
+                    done_event = self._generation_done
+                    self._cancel_lock.release()
+                    try:
+                        # Wait up to 5 seconds for previous generation to stop
+                        done_event.wait(timeout=5.0)
+                    finally:
+                        self._cancel_lock.acquire()
+            
+            # Create new events for this generation
+            cancel_event = threading.Event()
+            done_event = threading.Event()
+            self._current_generation_cancel = cancel_event
+            self._generation_done = done_event
+            return cancel_event, done_event
+    
+    def _end_generation(self, cancel_event: threading.Event, done_event: threading.Event):
+        """Mark a generation as complete."""
+        # Signal that we're done FIRST (before acquiring lock)
+        done_event.set()
+        
+        with self._cancel_lock:
+            # Only clear if this is still the current generation
+            if self._current_generation_cancel is cancel_event:
+                self._current_generation_cancel = None
+                self._generation_done = None
     
     @property
     def uptime_seconds(self) -> float:
@@ -223,8 +279,9 @@ class BackgroundService:
                     config=self.config,
                     bot_id=bot_id,
                 )
+                log.memory_operation("backend_init", bot_id, details="PostgreSQL connected")
             except Exception as e:
-                logger.warning(f"Memory backend unavailable for {bot_id}: {e}")
+                log.warning(f"Memory backend unavailable for {bot_id}: {e}")
                 self._memory_backends[bot_id] = None
         return self._memory_backends.get(bot_id)
     
@@ -234,35 +291,79 @@ class BackgroundService:
         
         cache_key = (model_alias, bot_id, user_id)
         
-        if cache_key not in self._ask_llm_cache:
-            logger.info(f"Initializing AskLLM for model={model_alias}, bot={bot_id}, user={user_id}")
-            try:
-                # Create a copy of config for each AskLLM instance
-                # This is necessary because AskLLM modifies config.SYSTEM_MESSAGE
-                # based on the bot's system prompt
-                instance_config = self.config.model_copy(deep=True)
-                ask_llm = AskLLM(
-                    resolved_model_alias=model_alias,
-                    config=instance_config,
-                    local_mode=local_mode,
-                    bot_id=bot_id,
-                    user_id=user_id,
-                )
-                self._ask_llm_cache[cache_key] = ask_llm
-            except Exception as e:
-                logger.exception(f"Failed to initialize AskLLM: {e}")
-                raise
+        if cache_key in self._ask_llm_cache:
+            log.cache_hit("ask_llm", f"{model_alias}/{bot_id}/{user_id}")
+            return self._ask_llm_cache[cache_key]
+        
+        log.cache_miss("ask_llm", f"{model_alias}/{bot_id}/{user_id}")
+        
+        # Check if we already have a client for this model in the client cache
+        # If so, we can potentially reuse it (though AskLLM still needs its own instance)
+        existing_client = self._client_cache.get(model_alias)
+        
+        # Get model type for logging
+        model_def = self.config.defined_models.get("models", {}).get(model_alias, {})
+        model_type = model_def.get("type", "unknown")
+        
+        # Only log model loading if we don't have the client cached
+        if not existing_client:
+            log.model_loading(model_alias, model_type, cached=False)
+        else:
+            log.model_loading(model_alias, model_type, cached=True)
+        load_start = time.time()
+        
+        try:
+            # Create a copy of config for each AskLLM instance
+            # This is necessary because AskLLM modifies config.SYSTEM_MESSAGE
+            # based on the bot's system prompt
+            instance_config = self.config.model_copy(deep=True)
+            ask_llm = AskLLM(
+                resolved_model_alias=model_alias,
+                config=instance_config,
+                local_mode=local_mode,
+                bot_id=bot_id,
+                user_id=user_id,
+            )
+            self._ask_llm_cache[cache_key] = ask_llm
+            
+            # Also cache the client for future reuse by extraction tasks
+            if model_alias not in self._client_cache:
+                self._client_cache[model_alias] = ask_llm.client
+            
+            load_time_ms = (time.time() - load_start) * 1000
+            log.model_loaded(model_alias, model_type, load_time_ms)
+            
+        except Exception as e:
+            log.model_error(model_alias, str(e))
+            raise
         
         return self._ask_llm_cache[cache_key]
     
     def get_client(self, model_alias: str):
         """Get LLM client for a given model (for extraction tasks).
         
-        Uses 'spark' bot context since we only need the client,
-        not the bot's personality or memory. Spark is the lightweight
-        bot designed for no-memory operations.
+        Uses a dedicated client cache to avoid reloading models.
+        GGUF models especially are expensive to load into VRAM,
+        so we cache the client independently from AskLLM instances.
         """
+        if model_alias in self._client_cache:
+            log.cache_hit("llm_client", model_alias)
+            return self._client_cache[model_alias]
+        
+        log.cache_miss("llm_client", model_alias)
+        
+        # Check if we already have an AskLLM instance with this model
+        # and can reuse its client
+        for (cached_model, _, _), ask_llm in self._ask_llm_cache.items():
+            if cached_model == model_alias:
+                log.debug(f"Reusing client from existing AskLLM instance for '{model_alias}'")
+                self._client_cache[model_alias] = ask_llm.client
+                return ask_llm.client
+        
+        # Need to create a new client - use spark bot (no memory overhead)
+        log.debug(f"Creating new client for model '{model_alias}' (extraction context)")
         ask_llm = self._get_ask_llm(model_alias, "spark", "system", local_mode=True)
+        self._client_cache[model_alias] = ask_llm.client
         return ask_llm.client
     
     async def chat_completion(
@@ -273,12 +374,26 @@ class BackgroundService:
         Handle an OpenAI-compatible chat completion request.
         
         This is the main entry point for the API. It:
-        1. Uses cached AskLLM instances for efficiency
-        2. Optionally augments messages with memory context
+        1. Uses ask_llm's internal history + memory for context
+        2. Augments with bot system prompt and memory context (if enabled)
         3. Runs blocking LLM calls in a thread pool
-        4. Optionally extracts memories from the response
+        4. Stores messages and extracts memories for future use
         """
         from ..models.message import Message
+        
+        # Create request context for logging
+        ctx = RequestContext(
+            request_id=generate_request_id(),
+            method="POST",
+            path="/v1/chat/completions",
+            model=request.model,
+            bot_id=request.bot_id,
+            user_id=request.user,
+            stream=False,
+        )
+        
+        # Log incoming request (verbose mode will show the full payload)
+        log.api_request(ctx, request.model_dump(exclude_none=True))
         
         # Resolve model - use default if not specified or not found
         model_alias: str | None = request.model
@@ -288,14 +403,22 @@ class BackgroundService:
                 model_alias = self._default_model
             elif self._default_model:
                 if model_alias:
-                    logger.warning(f"Model '{request.model}' not found, using default: {self._default_model}")
+                    log.warning(f"Model '{request.model}' not found, using default: {self._default_model}")
                 model_alias = self._default_model
             else:
+                log.api_error(ctx, f"Model '{request.model}' not found", 400)
                 raise ValueError(f"Model '{request.model}' not found. Available: {', '.join(self._available_models)}")
         
-        bot_id = request.bot_id or "nova"
+        ctx.model = model_alias
+        bot_id = request.bot_id or self._default_bot
         user_id = request.user or "default"
         local_mode = not request.augment_memory
+        
+        # Debug: Show memory settings
+        log.debug(
+            f"Memory settings: augment_memory={request.augment_memory}, "
+            f"local_mode={local_mode}, bot={bot_id}, user={user_id}"
+        )
         
         # Get cached AskLLM instance
         ask_llm = self._get_ask_llm(model_alias, bot_id, user_id, local_mode)
@@ -310,22 +433,82 @@ class BackgroundService:
         if not user_prompt:
             raise ValueError("No user message found in request")
         
-        # Run the blocking query in a thread pool
-        loop = asyncio.get_event_loop()
+        # Start new generation (cancels and waits for any previous one)
+        cancel_event, done_event = self._start_generation()
         
-        def _do_query():
-            return ask_llm.query(
-                prompt=user_prompt,
-                plaintext_output=True,
-                stream=False,
-            )
+        try:
+            # Run the blocking query in single-thread executor
+            loop = asyncio.get_event_loop()
+            llm_start_time = time.time()
+            cancelled = False
+            
+            def _do_query():
+                nonlocal cancelled
+                # Check if already cancelled before starting
+                if cancel_event.is_set():
+                    cancelled = True
+                    return ""
+                
+                # Prepare messages with history and memory context
+                prepared_messages = ask_llm.prepare_messages_for_query(user_prompt)
+                
+                # Log what we're sending to the LLM (verbose mode)
+                log.llm_context(prepared_messages)
+                
+                # Execute the query with prepared messages
+                response = ask_llm._execute_llm_query(
+                    prepared_messages,
+                    plaintext_output=True,
+                    stream=False,
+                )
+                
+                # Check if cancelled during generation
+                if cancel_event.is_set():
+                    log.info("Generation cancelled - newer request received")
+                    cancelled = True
+                    return ""
+                
+                # Finalize (add to history, trigger memory extraction)
+                ask_llm.finalize_response(user_prompt, response)
+                
+                return response
+            
+            response_text = await loop.run_in_executor(self._llm_executor, _do_query)
+            llm_elapsed_ms = (time.time() - llm_start_time) * 1000
+            
+            # If cancelled, return empty response (the new request will handle it)
+            if cancelled:
+                return ChatCompletionResponse(
+                    model=model_alias,
+                    choices=[
+                        ChatCompletionChoice(
+                            index=0,
+                            message=ChatMessage(role="assistant", content=""),
+                            finish_reason="cancelled",
+                        )
+                    ],
+                    usage=UsageInfo(prompt_tokens=0, completion_tokens=0, total_tokens=0),
+                )
+        finally:
+            self._end_generation(cancel_event, done_event)
         
-        response_text = await loop.run_in_executor(None, _do_query)
+        # Post-process for voice_optimized bots (strip emotes for TTS)
+        bot = get_bot(bot_id)
+        if bot and bot.voice_optimized:
+            original_len = len(response_text)
+            response_text = strip_emotes(response_text)
+            if len(response_text) != original_len:
+                log.debug(f"Stripped emotes for TTS: {original_len} -> {len(response_text)} chars")
         
         # Estimate token counts (rough approximation: 1 token ≈ 4 characters)
         prompt_text = " ".join(m.content or "" for m in request.messages)
         prompt_tokens = len(prompt_text) // 4
         completion_tokens = len(response_text) // 4
+        total_tokens = prompt_tokens + completion_tokens
+        
+        # Log response (verbose shows content summary with tokens/sec)
+        log.llm_response(response_text, tokens=completion_tokens, elapsed_ms=llm_elapsed_ms)
+        log.api_response(ctx, status=200, tokens=total_tokens)
         
         # Build response
         response = ChatCompletionResponse(
@@ -340,12 +523,12 @@ class BackgroundService:
             usage=UsageInfo(
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
-                total_tokens=prompt_tokens + completion_tokens,
+                total_tokens=total_tokens,
             ),
         )
         
         return response
-    
+
     async def chat_completion_stream(
         self,
         request: ChatCompletionRequest,
@@ -353,10 +536,25 @@ class BackgroundService:
         """
         Handle a streaming chat completion request.
         
+        Uses ask_llm's internal history + memory for context.
         Yields Server-Sent Events (SSE) formatted chunks.
         """
         import json
         from ..models.message import Message
+        
+        # Create request context for logging
+        ctx = RequestContext(
+            request_id=generate_request_id(),
+            method="POST",
+            path="/v1/chat/completions",
+            model=request.model,
+            bot_id=request.bot_id,
+            user_id=request.user,
+            stream=True,
+        )
+        
+        # Log incoming request (verbose mode will show the full payload)
+        log.api_request(ctx, request.model_dump(exclude_none=True))
         
         # Resolve model - use default if not specified or not found
         model_alias: str | None = request.model
@@ -366,12 +564,13 @@ class BackgroundService:
                 model_alias = self._default_model
             elif self._default_model:
                 if model_alias:
-                    logger.warning(f"Model '{request.model}' not found, using default: {self._default_model}")
+                    log.warning(f"Model '{request.model}' not found, using default: {self._default_model}")
                 model_alias = self._default_model
             else:
+                log.api_error(ctx, f"Model '{request.model}' not found", 400)
                 raise ValueError(f"Model '{request.model}' not found.")
         
-        bot_id = request.bot_id or "nova"
+        bot_id = request.bot_id or self._default_bot
         user_id = request.user or "default"
         local_mode = not request.augment_memory
         
@@ -391,73 +590,131 @@ class BackgroundService:
         response_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
         created = int(time.time())
         
-        # For streaming, we use ask_llm.prepare_messages_for_query to get properly
-        # contextualized messages (with history, memory, system prompt)
         chunk_queue: asyncio.Queue = asyncio.Queue()
         full_response_holder = [""]  # Use list to allow mutation in nested function
+        timing_holder = [0.0, 0.0]  # [start_time, end_time]
+        cancelled_holder = [False]  # Track if we were cancelled
         
         # Capture the event loop before entering the thread
         loop = asyncio.get_running_loop()
         
+        # Start new generation (cancels and waits for any previous one)
+        cancel_event, done_event = self._start_generation()
+        
         def _stream_to_queue():
             """Run streaming in a thread and push chunks to the async queue."""
             try:
+                # Check if already cancelled before starting
+                if cancel_event.is_set():
+                    cancelled_holder[0] = True
+                    return
+                
                 # Use ask_llm.prepare_messages_for_query to get full context
+                # (history from DB + memory + system prompt)
                 messages = ask_llm.prepare_messages_for_query(user_prompt)
-                logger.debug(f"Streaming: Prepared {len(messages)} messages with memory/history context")
+                
+                # Log what we're sending to the LLM (verbose mode)
+                log.llm_context(messages)
+                
+                # Track when first token arrives
+                timing_holder[0] = time.time()
                 
                 # Use the client's stream_raw method for raw text chunks
                 for chunk in ask_llm.client.stream_raw(messages):
+                    # Check for cancellation - new request came in
+                    if cancel_event.is_set():
+                        log.info("Generation cancelled - newer request received")
+                        cancelled_holder[0] = True
+                        return
+                    
                     full_response_holder[0] += chunk
                     # Put chunk in queue - use call_soon_threadsafe with captured loop
                     loop.call_soon_threadsafe(chunk_queue.put_nowait, chunk)
                 
+                timing_holder[1] = time.time()
+                
                 # Finalize: add response to history and trigger memory extraction
-                if full_response_holder[0]:
+                # Only if we weren't cancelled
+                if full_response_holder[0] and not cancel_event.is_set():
+                    # Calculate elapsed time and log with tokens/sec
+                    elapsed_ms = (timing_holder[1] - timing_holder[0]) * 1000
+                    log.llm_response(full_response_holder[0], elapsed_ms=elapsed_ms)
                     ask_llm.finalize_response(user_prompt, full_response_holder[0])
                     
             except Exception as e:
-                loop.call_soon_threadsafe(chunk_queue.put_nowait, e)
+                if not cancel_event.is_set():
+                    loop.call_soon_threadsafe(chunk_queue.put_nowait, e)
             finally:
                 loop.call_soon_threadsafe(chunk_queue.put_nowait, None)  # Sentinel
         
-        # Start streaming in background thread
-        loop.run_in_executor(None, _stream_to_queue)
-        
-        # Yield SSE chunks
-        while True:
-            chunk = await chunk_queue.get()
+        try:
+            # Check if this bot needs emote filtering for TTS
+            bot = get_bot(bot_id)
+            emote_filter = StreamingEmoteFilter() if (bot and bot.voice_optimized) else None
             
-            if chunk is None:
-                # Stream complete - send final chunk
+            # Start streaming in single-thread executor
+            loop.run_in_executor(self._llm_executor, _stream_to_queue)
+            
+            # Yield SSE chunks
+            while True:
+                chunk = await chunk_queue.get()
+                
+                if chunk is None:
+                    # Stream complete - flush any buffered content from emote filter
+                    if emote_filter:
+                        final_chunk = emote_filter.flush()
+                        if final_chunk:
+                            data = {
+                                "id": response_id,
+                                "object": "chat.completion.chunk",
+                                "created": created,
+                                "model": model_alias,
+                                "choices": [{"index": 0, "delta": {"content": final_chunk}, "finish_reason": None}],
+                            }
+                            yield f"data: {json.dumps(data)}\n\n"
+                    
+                    # Send final chunk
+                    data = {
+                        "id": response_id,
+                        "object": "chat.completion.chunk",
+                        "created": created,
+                        "model": model_alias,
+                        "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+                    }
+                    yield f"data: {json.dumps(data)}\n\n"
+                    yield "data: [DONE]\n\n"
+                    break
+                
+                if isinstance(chunk, Exception):
+                    # Error occurred
+                    raise chunk
+                
+                # Apply emote filter for voice_optimized bots
+                if emote_filter:
+                    chunk = emote_filter.process(chunk)
+                    if not chunk:
+                        # Chunk was filtered out or buffered
+                        continue
+                
+                # Normal chunk
                 data = {
                     "id": response_id,
                     "object": "chat.completion.chunk",
                     "created": created,
                     "model": model_alias,
-                    "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+                    "choices": [{"index": 0, "delta": {"content": chunk}, "finish_reason": None}],
                 }
                 yield f"data: {json.dumps(data)}\n\n"
-                yield "data: [DONE]\n\n"
-                break
-            
-            if isinstance(chunk, Exception):
-                # Error occurred
-                raise chunk
-            
-            # Normal chunk
-            data = {
-                "id": response_id,
-                "object": "chat.completion.chunk",
-                "created": created,
-                "model": model_alias,
-                "choices": [{"index": 0, "delta": {"content": chunk}, "finish_reason": None}],
-            }
-            yield f"data: {json.dumps(data)}\n\n"
-    
+        finally:
+            # Mark generation as complete
+            self._end_generation(cancel_event, done_event)
+
     async def process_task(self, task: Task) -> TaskResult:
         """Process a single background task."""
         start_time = time.time()
+        task_type_str = task.task_type.value
+        
+        log.debug(f"Processing task {task.task_id[:8]} ({task_type_str})")
         
         try:
             if task.task_type == TaskType.MEMORY_EXTRACTION:
@@ -473,45 +730,88 @@ class BackgroundService:
             else:
                 raise ValueError(f"Unknown task type: {task.task_type}")
             
+            elapsed_ms = (time.time() - start_time) * 1000
+            log.task_completed(task.task_id, task_type_str, elapsed_ms, result)
+            
             return TaskResult(
                 task_id=task.task_id,
                 status=TaskStatus.COMPLETED,
                 result=result,
-                processing_time_ms=(time.time() - start_time) * 1000,
+                processing_time_ms=elapsed_ms,
             )
             
         except Exception as e:
-            logger.exception(f"Task {task.task_id} failed: {e}")
+            elapsed_ms = (time.time() - start_time) * 1000
+            log.task_failed(task.task_id, task_type_str, str(e), elapsed_ms)
             return TaskResult(
                 task_id=task.task_id,
                 status=TaskStatus.FAILED,
                 error=str(e),
-                processing_time_ms=(time.time() - start_time) * 1000,
+                processing_time_ms=elapsed_ms,
             )
     
     async def _process_extraction(self, task: Task) -> dict:
-        """Process a memory extraction task."""
+        """Process a memory extraction task.
+        
+        Uses the same model that was used for the chat to avoid loading
+        multiple models into VRAM. The model is passed in the task payload.
+        """
         from ..memory.extraction import MemoryExtractionService
         
         messages = task.payload.get("messages", [])
         bot_id = task.bot_id
         
-        # Try to get an extraction client if we have a configured model
-        extraction_client = None
-        if self._extraction_model:
-            try:
-                extraction_client = self.get_client(self._extraction_model)
-            except Exception as e:
-                logger.warning(f"Could not load extraction client: {e}")
+        # Get the model from task payload (passed from chat request)
+        # This ensures we use the same model that handled the chat
+        model_to_use = task.payload.get("model")
         
-        extraction_service = MemoryExtractionService(llm_client=extraction_client)
-        use_llm = extraction_client is not None
+        if not model_to_use:
+            # Fallback: no model specified in task, skip LLM extraction
+            log.debug("No model specified in extraction task - using non-LLM extraction")
+            extraction_service = MemoryExtractionService(llm_client=None)
+            use_llm = False
+        else:
+            # Get client from cache - should already be loaded from chat
+            extraction_client = None
+            if model_to_use in self._client_cache:
+                extraction_client = self._client_cache[model_to_use]
+                log.debug(f"Reusing cached client for extraction: {model_to_use}")
+            else:
+                # Check if any AskLLM instance has this model loaded
+                for (cached_model, _, _), ask_llm in self._ask_llm_cache.items():
+                    if cached_model == model_to_use:
+                        extraction_client = ask_llm.client
+                        self._client_cache[model_to_use] = extraction_client
+                        log.debug(f"Reusing client from AskLLM instance for extraction: {model_to_use}")
+                        break
+            
+            if not extraction_client:
+                log.warning(f"Model '{model_to_use}' not in cache - skipping LLM extraction to avoid reload")
+                extraction_client = None
+            
+            extraction_service = MemoryExtractionService(llm_client=extraction_client)
+            use_llm = extraction_client is not None
         
+        # Run extraction in the SAME single-threaded executor as chat completions
+        # This ensures extraction waits for any in-flight chat to complete
+        # The executor has max_workers=1, so operations are serialized
         loop = asyncio.get_event_loop()
-        facts = await loop.run_in_executor(
-            None,
-            lambda: extraction_service.extract_from_conversation(messages, use_llm=use_llm)
-        )
+        
+        try:
+            facts = await loop.run_in_executor(
+                self._llm_executor,  # Use the single-threaded LLM executor
+                lambda: extraction_service.extract_from_conversation(messages, use_llm=use_llm)
+            )
+        except Exception as e:
+            # Catch any llama.cpp state corruption errors
+            log.warning(f"Extraction failed (will retry without LLM): {e}")
+            # Fallback to non-LLM extraction
+            extraction_service_fallback = MemoryExtractionService(llm_client=None)
+            facts = await loop.run_in_executor(
+                self._llm_executor,
+                lambda: extraction_service_fallback.extract_from_conversation(messages, use_llm=False)
+            )
+            use_llm = False
         
         if not facts:
             return {"facts_extracted": 0, "facts_stored": 0, "llm_used": use_llm}
@@ -538,8 +838,9 @@ class BackgroundService:
                         )
                         stored_count += 1
                     except Exception as e:
-                        logger.warning(f"Failed to store memory: {e}")
+                        log.warning(f"Failed to store memory: {e}")
         
+        log.memory_operation("extraction", bot_id, count=stored_count, details=f"extracted={len(facts)}, llm={use_llm}")
         return {"facts_extracted": len(facts), "facts_stored": stored_count, "llm_used": use_llm}
     
     async def _process_compaction(self, task: Task) -> dict:
@@ -582,7 +883,11 @@ class BackgroundService:
         return {"updated": success, "memory_id": memory_id}
 
     async def _process_maintenance(self, task: Task) -> dict:
-        """Process a unified memory maintenance task."""
+        """Process a unified memory maintenance task.
+        
+        Uses a cached LLM client if available, otherwise runs without LLM.
+        Will NOT load a new model to avoid VRAM conflicts.
+        """
         from ..memory.maintenance import MemoryMaintenance
 
         bot_id = task.bot_id
@@ -592,13 +897,15 @@ class BackgroundService:
         if not memory_backend:
             return {"error": "Memory backend unavailable"}
 
-        # Get local LLM client for consolidation
+        # Try to get a cached LLM client - do NOT load a new model
         llm_client = None
-        if self._extraction_model:
-            try:
-                llm_client = self.get_client(self._extraction_model)
-            except Exception as e:
-                logger.warning(f"Could not load LLM for maintenance: {e}")
+        if self._client_cache:
+            # Use any available cached client
+            model_to_use = next(iter(self._client_cache.keys()))
+            llm_client = self._client_cache[model_to_use]
+            log.debug(f"Using cached client '{model_to_use}' for maintenance")
+        else:
+            log.debug("No cached LLM client available - running maintenance without LLM")
 
         maint = MemoryMaintenance(
             backend=memory_backend,
@@ -656,7 +963,7 @@ class BackgroundService:
     
     async def worker_loop(self):
         """Main worker loop that processes tasks from the queue."""
-        logger.info("Background worker started")
+        log.info("Background task worker started")
         
         while not self._shutdown_event.is_set():
             try:
@@ -669,7 +976,7 @@ class BackgroundService:
                     continue
                 
                 task = prioritized.task
-                logger.debug(f"Processing task {task.task_id}")
+                log.task_submitted(task.task_id, task.task_type.value, task.bot_id)
                 
                 result = await self.process_task(task)
                 self._results[task.task_id] = result
@@ -686,10 +993,10 @@ class BackgroundService:
                         self._result_events.pop(key, None)
                 
             except Exception as e:
-                logger.exception(f"Worker loop error: {e}")
+                log.exception(f"Worker loop error: {e}")
                 await asyncio.sleep(1)
         
-        logger.info("Background worker stopped")
+        log.info("Background task worker stopped")
     
     def start_worker(self):
         """Start the background worker task."""
@@ -698,7 +1005,7 @@ class BackgroundService:
     
     async def shutdown(self):
         """Gracefully shutdown the service."""
-        logger.info("Shutting down background service...")
+        log.shutdown()
         self._shutdown_event.set()
         if self._worker_task:
             self._worker_task.cancel()
@@ -738,13 +1045,20 @@ async def lifespan(app):
     config = Config()
     _service = BackgroundService(config)
     _service.start_worker()
-    logger.info(f"ask_llm service v{SERVICE_VERSION} started")
+    
+    # Log startup with rich formatting
+    log.startup(
+        version=SERVICE_VERSION,
+        host=config.SERVICE_HOST,
+        port=config.SERVICE_PORT,
+        models=_service._available_models,
+        default_model=_service._default_model,
+    )
     
     yield
     
     # Shutdown
     await _service.shutdown()
-    logger.info("ask_llm service stopped")
 
 
 # Create FastAPI app
@@ -815,7 +1129,7 @@ try:
             except ValueError as e:
                 raise HTTPException(status_code=400, detail=str(e))
             except Exception as e:
-                logger.exception("Streaming chat completion failed")
+                log.exception("Streaming chat completion failed")
                 raise HTTPException(status_code=500, detail=str(e))
         
         try:
@@ -824,7 +1138,7 @@ try:
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
         except Exception as e:
-            logger.exception("Chat completion failed")
+            log.exception("Chat completion failed")
             raise HTTPException(status_code=500, detail=str(e))
     
     # -------------------------------------------------------------------------
@@ -847,7 +1161,7 @@ try:
         task = Task(
             task_type=task_type,
             payload=request.payload,
-            bot_id=request.bot_id,
+            bot_id=request.bot_id or service._default_bot,
             user_id=request.user_id,
             priority=request.priority,
         )
@@ -883,7 +1197,7 @@ try:
 except ImportError:
     # FastAPI not installed - create stub
     app = None
-    logger.warning("FastAPI not installed. Install with: pip install fastapi uvicorn")
+    log.warning("FastAPI not installed. Install with: pip install fastapi uvicorn")
 
 
 # =============================================================================
@@ -963,18 +1277,19 @@ def main():
     parser = argparse.ArgumentParser(description="ask_llm background service")
     parser.add_argument("--host", default=config.SERVICE_HOST, help="Host to bind to")
     parser.add_argument("--port", type=int, default=config.SERVICE_PORT, help="Port to listen on")
-    parser.add_argument("--verbose", "-v", action="store_true", help="Verbose logging")
+    parser.add_argument("--verbose", "-v", action="store_true", help="Show additional detail (payloads, timing)")
+    parser.add_argument("--debug", action="store_true", help="Enable low-level DEBUG messages (unformatted)")
     parser.add_argument("--reload", action="store_true", help="Enable auto-reload (dev mode)")
     parser.add_argument("--restart", action="store_true", help="Kill existing service and start a new one")
     parser.add_argument("--stop", action="store_true", help="Stop the running service and exit")
     args = parser.parse_args()
     
-    # Setup logging
-    log_level = logging.DEBUG if args.verbose else logging.INFO
-    logging.basicConfig(
-        level=log_level,
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    )
+    # Setup logging with the new rich-formatted logger
+    # Note: --verbose enables payload logging, --debug enables low-level DEBUG
+    setup_service_logging(verbose=args.verbose, debug=args.debug)
+    
+    # Also update config.VERBOSE so BackgroundService can use it
+    config.VERBOSE = args.verbose
     
     # Handle --stop: kill the service and exit
     if args.stop:
@@ -1010,12 +1325,17 @@ def main():
     
     try:
         import uvicorn
+        
+        # Configure uvicorn log level
+        # When using our rich logging, set uvicorn to warning to reduce noise
+        uvicorn_log_level = "debug" if args.debug else "warning"
+        
         uvicorn.run(
             "ask_llm.service.server:app",
             host=args.host,
             port=args.port,
             reload=args.reload,
-            log_level="debug" if args.verbose else "info",
+            log_level=uvicorn_log_level,
         )
     except ImportError:
         print("Error: uvicorn not installed. Install with: pip install uvicorn")

@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 class LlamaCppClient(LLMClient):
     """Client for running GGUF models using llama-cpp-python."""
 
-    def __init__(self, model_path: str, config: Config):
+    def __init__(self, model_path: str, config: Config, chat_format: str | None = None):
         if not _llama_cpp_available:
             raise ImportError(
                 "`llama-cpp-python` not found. Install it following instructions: "
@@ -34,6 +34,7 @@ class LlamaCppClient(LLMClient):
         super().__init__(model_path, config) # Pass config to base class
         self.model_path = model_path
         self.model = None
+        self._chat_format = chat_format  # None means auto-detect from model metadata
         self._load_model()
 
     def _load_model(self):
@@ -47,10 +48,16 @@ class LlamaCppClient(LLMClient):
             "model_path": self.model_path,
             "n_gpu_layers": n_gpu_layers,
             "n_ctx": n_ctx,
-            "chat_format": "chatml",
             "verbose": False, # Disable llama-cpp's library-level verbose logging
         }
-        final_chat_format = model_load_params["chat_format"]
+        
+        # Use explicit chat_format if provided, otherwise let llama.cpp auto-detect from model metadata
+        if self._chat_format:
+            model_load_params["chat_format"] = self._chat_format
+            final_chat_format = self._chat_format
+        else:
+            # Let llama.cpp auto-detect from GGUF metadata (works for most modern models)
+            final_chat_format = "auto-detect"
         if self.config.VERBOSE:
             log_params = {k: v for k, v in model_load_params.items() if k != 'model_path'}
             logger.debug(f"Final chat_format passed to Llama(): {final_chat_format!r}")

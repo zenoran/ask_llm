@@ -527,7 +527,40 @@ class PostgreSQLMemoryBackend(MemoryBackend):
         
         with self.engine.connect() as conn:
             try:
-                # Check if exists
+                # Check for duplicate/similar content BEFORE inserting
+                # Use embedding similarity if available, otherwise exact content match
+                # Threshold from config (default 0.85) - catches semantic duplicates
+                dedup_threshold = getattr(self.config, 'MEMORY_DEDUP_SIMILARITY', 0.85)
+                
+                if embedding:
+                    # Vector similarity check - find most similar existing memory
+                    dedup_sql = text(f"""
+                        SELECT id, content, 1 - (embedding <=> :embedding) AS similarity
+                        FROM {self._memories_table_name}
+                        WHERE embedding IS NOT NULL
+                        ORDER BY embedding <=> :embedding
+                        LIMIT 1
+                    """)
+                    similar = conn.execute(dedup_sql, {
+                        "embedding": f"[{','.join(str(x) for x in embedding)}]",
+                    }).first()
+                    
+                    if similar and similar.similarity > dedup_threshold:
+                        logger.debug(f"Skipping duplicate memory (similarity={similar.similarity:.2%} > {dedup_threshold:.2%}): '{content[:50]}...' similar to '{similar.content[:50]}...'")
+                        return
+                else:
+                    # Exact content match fallback
+                    exact_sql = text(f"""
+                        SELECT id FROM {self._memories_table_name} 
+                        WHERE LOWER(content) = LOWER(:content)
+                        LIMIT 1
+                    """)
+                    exact_match = conn.execute(exact_sql, {"content": content}).first()
+                    if exact_match:
+                        logger.debug(f"Skipping exact duplicate memory: '{content[:50]}...'")
+                        return
+                
+                # Check if this specific ID exists (for updates)
                 check_sql = text(f"""
                     SELECT id FROM {self._memories_table_name} WHERE id = :id
                 """)
@@ -609,6 +642,38 @@ class PostgreSQLMemoryBackend(MemoryBackend):
                 session.rollback()
                 logger.error(f"Failed to delete memory {memory_id}: {e}")
                 return False
+
+    def delete_memories_by_source_message_ids(self, message_ids: list[str]) -> int:
+        """Delete all memories whose source_message_ids contain any of the given message IDs.
+        
+        Args:
+            message_ids: List of message UUIDs to match against source_message_ids.
+            
+        Returns:
+            Number of memories deleted.
+        """
+        if not message_ids:
+            return 0
+            
+        with self.engine.connect() as conn:
+            try:
+                # Use JSONB containment: source_message_ids ?| array[...] checks if any element matches
+                sql = text(f"""
+                    DELETE FROM {self._memories_table_name}
+                    WHERE source_message_ids ?| :ids
+                    RETURNING id
+                """)
+                result = conn.execute(sql, {"ids": message_ids})
+                deleted_ids = [row.id for row in result.fetchall()]
+                conn.commit()
+                
+                if deleted_ids:
+                    logger.info(f"Deleted {len(deleted_ids)} memories associated with forgotten messages")
+                return len(deleted_ids)
+            except Exception as e:
+                conn.rollback()
+                logger.error(f"Failed to delete memories by source message IDs: {e}")
+                return 0
     
     def update_memory_access(self, memory_id: str) -> None:
         """Update access tracking for a memory (reinforcement)."""

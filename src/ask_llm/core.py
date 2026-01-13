@@ -270,7 +270,12 @@ class AskLLM:
                 raise
 
         try:
-            client = LlamaCppClient(model_path=model_path_to_load, config=config)
+            # Get chat_format from model config if specified
+            chat_format = model_def.get("chat_format") if model_def else None
+            if chat_format:
+                logger.debug(f"Using explicit chat_format from config: {chat_format}")
+            
+            client = LlamaCppClient(model_path=model_path_to_load, config=config, chat_format=chat_format)
             return client
         except ImportError:
              console.print("[bold red]Error:[/bold red] Failed to initialize LlamaCppClient. Is `llama-cpp-python` installed correctly?")
@@ -408,14 +413,23 @@ class AskLLM:
                     encoding, TOKENS_PER_MESSAGE_OVERHEAD
                 ) + SYSTEM_PROMPT_EXTRA_OVERHEAD
 
-            max_tokens_for_turns = self.config.MAX_TOKENS - system_prompt_tokens
+            # Calculate max context for input: use explicit setting, or derive from context window
+            # Context window = system prompt + input context + generation output
+            if self.config.MAX_CONTEXT_TOKENS > 0:
+                max_context = self.config.MAX_CONTEXT_TOKENS
+            else:
+                # Use context window size minus space for generation
+                context_window = getattr(self.config, 'LLAMA_CPP_N_CTX', 8192)
+                max_context = context_window - self.config.MAX_TOKENS
+            
+            max_tokens_for_turns = max_context - system_prompt_tokens
             if max_tokens_for_turns < 0: max_tokens_for_turns = 0
 
             initial_token_count_turns = sum(
                 msg.get_token_count(encoding, TOKENS_PER_MESSAGE_OVERHEAD) for msg in messages_to_truncate
             )
             logger.debug(f"Combined memory/history turns: {len(messages_to_truncate)} messages, ~{initial_token_count_turns} tokens. System prompt: ~{system_prompt_tokens} tokens.")
-            logger.debug(f"Max tokens for turns: {max_tokens_for_turns} (Total limit: {self.config.MAX_TOKENS})")
+            logger.debug(f"Max tokens for turns: {max_tokens_for_turns} (Context window: {max_context + system_prompt_tokens}, Generation: {self.config.MAX_TOKENS})")
 
             if initial_token_count_turns <= max_tokens_for_turns:
                 logger.debug(f"Turns context is within token limits ({initial_token_count_turns} <= {max_tokens_for_turns}). No truncation needed.")
@@ -650,6 +664,7 @@ class AskLLM:
                 bot_id=self.bot_id,
                 user_id=self.user_id,
                 message_ids=message_ids,
+                model=self.resolved_model_alias,
             )
             
             return client.submit_task(task)

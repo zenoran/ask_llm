@@ -33,11 +33,35 @@ def get_embedding_model(model_name: str = "all-MiniLM-L6-v2"):
         return _model
     
     try:
+        # Suppress noisy logging from sentence-transformers and transformers
+        import warnings
         from sentence_transformers import SentenceTransformer
         
-        logger.debug(f"Loading embedding model: {model_name}")
-        _model = SentenceTransformer(model_name)
-        _model_name = model_name
+        # Temporarily suppress warnings and elevate log levels during model load
+        noisy_loggers = [
+            "sentence_transformers",
+            "transformers",
+            "transformers.modeling_utils", 
+            "torch.distributed",
+        ]
+        old_levels = {}
+        for name in noisy_loggers:
+            lg = logging.getLogger(name)
+            old_levels[name] = lg.level
+            lg.setLevel(logging.ERROR)
+        
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message=".*layers were not sharded.*")
+            warnings.filterwarnings("ignore", category=FutureWarning)
+            
+            logger.debug(f"Loading embedding model: {model_name}")
+            _model = SentenceTransformer(model_name)
+            _model_name = model_name
+        
+        # Restore log levels
+        for name, level in old_levels.items():
+            logging.getLogger(name).setLevel(level)
+            
         logger.debug(f"Loaded embedding model with dimension: {_model.get_sentence_embedding_dimension()}")
         return _model
         
@@ -70,8 +94,8 @@ def generate_embedding(text: str, model_name: str = "all-MiniLM-L6-v2") -> list[
         return None
     
     try:
-        # Generate embedding (returns numpy array)
-        embedding = model.encode(text, convert_to_numpy=True)
+        # Generate embedding (returns numpy array, disable progress bar)
+        embedding = model.encode(text, convert_to_numpy=True, show_progress_bar=False)
         return embedding.tolist()
     except Exception as e:
         logger.error(f"Failed to generate embedding: {e}")
@@ -107,8 +131,8 @@ def generate_embeddings_batch(texts: list[str], model_name: str = "all-MiniLM-L6
         if not valid_texts:
             return [None] * len(texts)
         
-        # Batch encode for efficiency
-        embeddings = model.encode(valid_texts, convert_to_numpy=True)
+        # Batch encode for efficiency (disable progress bar)
+        embeddings = model.encode(valid_texts, convert_to_numpy=True, show_progress_bar=False)
         
         # Reconstruct result list with None for invalid entries
         result = [None] * len(texts)

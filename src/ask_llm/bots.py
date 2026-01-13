@@ -5,6 +5,7 @@ Bot definitions are loaded from bots.yaml in this package directory.
 """
 
 import logging
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -193,3 +194,119 @@ def get_bot_system_prompt(slug: str) -> str | None:
     """
     bot = get_bot(slug)
     return bot.system_prompt if bot else None
+
+
+def strip_emotes(text: str) -> str:
+    """Strip roleplay emotes/actions from text for TTS output.
+    
+    RP-tuned models often include *action* text despite prompt instructions.
+    This function removes them for clean TTS output.
+    
+    Patterns removed:
+    - *action text* (asterisk-wrapped actions)
+    - ::action:: (colon-wrapped actions)
+    - (action) when on its own line or at sentence boundaries
+    - Multiple consecutive whitespace normalized
+    
+    Args:
+        text: The raw LLM response text
+        
+    Returns:
+        Clean text suitable for TTS
+    """
+    if not text:
+        return text
+    
+    # Remove *action* patterns (asterisk-wrapped)
+    # Matches: *smiles warmly*, *pauses*, etc.
+    text = re.sub(r'\*[^*]+\*', '', text)
+    
+    # Remove ::action:: patterns (colon-wrapped, less common)
+    text = re.sub(r'::[^:]+::', '', text)
+    
+    # Remove standalone (action) patterns (parentheses on their own)
+    # Only remove if it's the whole line or at sentence boundaries
+    # Be careful not to remove legitimate parenthetical content
+    text = re.sub(r'^\s*\([^)]+\)\s*$', '', text, flags=re.MULTILINE)
+    
+    # Normalize multiple spaces/newlines
+    text = re.sub(r'[ \t]+', ' ', text)
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    
+    # Strip leading/trailing whitespace
+    text = text.strip()
+    
+    return text
+
+
+class StreamingEmoteFilter:
+    """Buffer-based filter for stripping *emotes* from streaming text.
+    
+    Handles cases where emote markers span chunk boundaries by buffering
+    text between asterisks until we know if it's an emote or not.
+    
+    Usage:
+        filter = StreamingEmoteFilter()
+        for chunk in stream:
+            filtered = filter.process(chunk)
+            if filtered:
+                yield filtered
+        # Flush any remaining buffered content
+        final = filter.flush()
+        if final:
+            yield final
+    """
+    
+    def __init__(self):
+        self.buffer = ""
+        self.in_emote = False
+    
+    def process(self, chunk: str) -> str:
+        """Process a chunk and return filtered text.
+        
+        Returns text that is safe to emit. May buffer text that could
+        be part of an emote until we know for sure.
+        """
+        result = []
+        
+        for char in chunk:
+            if char == '*':
+                if self.in_emote:
+                    # End of emote - discard buffered content
+                    self.buffer = ""
+                    self.in_emote = False
+                else:
+                    # Start of potential emote
+                    # First, emit any buffered content
+                    if self.buffer:
+                        result.append(self.buffer)
+                        self.buffer = ""
+                    self.in_emote = True
+            elif self.in_emote:
+                # Inside potential emote - buffer it
+                self.buffer += char
+                # If the emote gets too long (>100 chars) it's probably not an emote
+                if len(self.buffer) > 100:
+                    # Not an emote - emit the asterisk and buffer
+                    result.append('*')
+                    result.append(self.buffer)
+                    self.buffer = ""
+                    self.in_emote = False
+            else:
+                # Normal character outside emote
+                result.append(char)
+        
+        return ''.join(result)
+    
+    def flush(self) -> str:
+        """Flush any remaining buffered content.
+        
+        Call this when the stream ends to get any remaining text.
+        """
+        if self.in_emote and self.buffer:
+            # Stream ended mid-emote - emit what we have
+            result = '*' + self.buffer
+            self.buffer = ""
+            self.in_emote = False
+            return result
+        return ""

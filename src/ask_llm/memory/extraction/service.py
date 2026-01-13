@@ -9,7 +9,7 @@ import re
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Protocol, TYPE_CHECKING
+from typing import Any, Optional, Protocol, TYPE_CHECKING
 
 from .prompts import (
     FACT_EXTRACTION_PROMPT,
@@ -41,7 +41,7 @@ class ExtractedFact:
     tags: list[str]
     importance: float
     source_message_ids: list[str] = field(default_factory=list)
-    meaning: "MeaningAssociation" | None = None
+    meaning: Optional["MeaningAssociation"] = None
     
     def to_dict(self) -> dict:
         return {

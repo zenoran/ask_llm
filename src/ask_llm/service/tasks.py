@@ -93,8 +93,14 @@ def create_extraction_task(
     bot_id: str = "nova",
     user_id: str = "default",
     message_ids: list[str] | None = None,
+    model: str | None = None,
 ) -> Task:
-    """Create a memory extraction task."""
+    """Create a memory extraction task.
+    
+    Args:
+        model: The model alias to use for extraction. Should be the same model
+               used for the chat to avoid loading multiple models.
+    """
     return Task(
         task_type=TaskType.MEMORY_EXTRACTION,
         payload={
@@ -102,6 +108,7 @@ def create_extraction_task(
                 {"role": "user", "content": user_message, "id": message_ids[0] if message_ids else None},
                 {"role": "assistant", "content": assistant_message, "id": message_ids[1] if message_ids and len(message_ids) > 1 else None},
             ],
+            "model": model,
         },
         bot_id=bot_id,
         user_id=user_id,
