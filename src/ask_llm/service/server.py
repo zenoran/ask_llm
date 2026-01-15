@@ -12,6 +12,8 @@ from .api import (
     BackgroundService,
     app,
     main,
+)
+from .models import (
     DEFAULT_HTTP_PORT,
     SERVICE_VERSION,
 )

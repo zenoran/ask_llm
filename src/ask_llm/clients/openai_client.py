@@ -5,9 +5,10 @@ from typing import List, Iterator
 from rich.json import JSON
 from rich.rule import Rule
 from ..clients.base import LLMClient
-from ..utils.config import Config # Keep for type hinting
+from ..clients.utils import prepare_api_messages
+from ..utils.config import Config
 from ..models.message import Message
-import logging # Import logging
+import logging
 
 logger = logging.getLogger(__name__)
 
@@ -261,26 +262,14 @@ class OpenAIClient(LLMClient):
         return response
 
     def _prepare_api_messages(self, messages: List[Message]) -> list[dict]:
-        prepared = []
-        system_contents = []
-        system_message = self.config.SYSTEM_MESSAGE
-        
-        for msg in messages:
-            api_msg = msg.to_api_format()
-            if api_msg['role'] == 'system':
-                # Collect all system messages to merge
-                system_contents.append(api_msg['content'])
-            else:
-                prepared.append(api_msg)
-
-        # Merge all system content into a single system message
-        if system_contents:
-            merged_system = "\n\n".join(system_contents)
-            prepared.insert(0, {"role": "system", "content": merged_system})
-        elif system_message:
-            prepared.insert(0, {"role": "system", "content": system_message})
-
-        return prepared
+        """Prepare messages for OpenAI API using shared utility."""
+        return prepare_api_messages(
+            messages,
+            self.config,
+            merge_system_messages=True,  # OpenAI handles merged system messages well
+            dedupe_consecutive_roles=False,
+            filter_error_messages=False,
+        )
 
     def _stream_response(self, api_messages: List[dict], plaintext_output: bool, payload: dict) -> str:
         """Stream the response using the base class handler."""
