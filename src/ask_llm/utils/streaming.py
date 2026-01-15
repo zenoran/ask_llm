@@ -212,7 +212,7 @@ def _stream_rich_live(
             console=console,
             refresh_per_second=15,
             vertical_overflow="visible",
-            transient=True,
+            transient=False,
             auto_refresh=False,
         )
         live_display.start(refresh=True)
@@ -266,9 +266,7 @@ def _stream_rich_live(
         total_response += f"\nERROR: {e}"
     finally:
         if live_display:
+            _update_live(add_cursor=False)
             live_display.stop()
-            final_content = visible_text + overflow_buffer
-            if final_content.strip():
-                console.print(Align(Markdown(final_content.strip()), align="left", pad=False))
     
     return total_response

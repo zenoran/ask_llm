@@ -226,10 +226,12 @@ def show_status(config: Config, args: argparse.Namespace | None = None):
             user_display = f"[dim]N/A (--local mode)[/dim]"
         else:
             try:
-                profile_manager = UserProfileManager(config)
-                profile = profile_manager.get_profile(user_id)
-                if profile and profile.name:
-                    user_display = f"[bold cyan]{profile.name}[/bold cyan] ({user_id})"
+                from ask_llm.profiles import ProfileManager, EntityType
+                
+                manager = ProfileManager(config)
+                profile, _ = manager.get_or_create_profile(EntityType.USER, user_id)
+                if profile and profile.display_name:
+                    user_display = f"[bold cyan]{profile.display_name}[/bold cyan] ({user_id})"
                 else:
                     user_display = f"{user_id} [dim](no profile)[/dim]"
             except Exception:
@@ -525,15 +527,13 @@ def show_user_profile(config: Config, user_id: str = DEFAULT_USER_ID):
         return
     
     try:
-        manager = UserProfileManager(config)
-        profile = manager.get_profile(user_id)
+        from ask_llm.profiles import ProfileManager, EntityType
+        
+        manager = ProfileManager(config)
+        profile, _ = manager.get_or_create_profile(EntityType.USER, user_id)
+        attributes = manager.get_all_attributes(EntityType.USER, user_id)
     except Exception as e:
         console.print(f"[red]Could not load user profile: {e}[/red]")
-        return
-    
-    if not profile:
-        console.print(f"[yellow]No user profile found for '{user_id}'.[/yellow]")
-        console.print(f"[dim]Create one with: llm --user-profile-setup[/dim]")
         return
     
     console.print(Panel.fit(f"[bold cyan]User Profile: {user_id}[/bold cyan]", border_style="cyan"))
@@ -544,32 +544,29 @@ def show_user_profile(config: Config, user_id: str = DEFAULT_USER_ID):
     table.add_column("Value")
     
     table.add_row("[bold]Identity[/bold]", "")
-    table.add_row("  name", profile.name or "[dim]not set[/dim]")
-    table.add_row("  preferred_name", profile.preferred_name or "[dim]not set[/dim]")
+    table.add_row("  Display Name", profile.display_name or "[dim]not set[/dim]")
+    table.add_row("  Description", profile.description or "[dim]not set[/dim]")
     
-    # Preferences
-    prefs = profile.preferences or {}
-    if prefs:
-        table.add_row("", "")
-        table.add_row("[bold]Preferences[/bold]", "")
-        for key, value in prefs.items():
-            table.add_row(f"  preferences.{key}", str(value))
+    # Group attributes by category
+    by_category = {}
+    for attr in attributes:
+        if attr.category not in by_category:
+            by_category[attr.category] = []
+        by_category[attr.category].append(attr)
     
-    # Context
-    ctx = profile.context or {}
-    if ctx:
+    # Display attributes by category
+    category_names = {"preference": "Preferences", "fact": "Facts", "interest": "Interests", "communication": "Communication", "context": "Context"}
+    for category, attrs in sorted(by_category.items()):
         table.add_row("", "")
-        table.add_row("[bold]Context[/bold]", "")
-        for key, value in ctx.items():
-            if isinstance(value, list):
-                table.add_row(f"  context.{key}", ", ".join(str(v) for v in value))
-            else:
-                table.add_row(f"  context.{key}", str(value))
+        table.add_row(f"[bold]{category_names.get(category, category.title())}[/bold]", "")
+        for attr in sorted(attrs, key=lambda a: a.key):
+            value_str = str(attr.value) if not isinstance(attr.value, str) or len(str(attr.value)) < 60 else str(attr.value)[:57] + "..."
+            conf_str = f" [dim]({attr.confidence:.0%})[/dim]" if attr.confidence < 1.0 else ""
+            table.add_row(f"  {attr.key}", f"{value_str}{conf_str}")
     
     console.print(table)
     console.print()
-    console.print("[dim]Update with: llm --user-profile-set name=\"Your Name\"[/dim]")
-    console.print("[dim]Add context: llm --user-profile-set context.occupation=\"Developer\"[/dim]")
+    console.print("[dim]Add attributes: llm --user-profile-set category.key=value[/dim]")
     console.print()
 
 
@@ -581,8 +578,10 @@ def show_users(config: Config):
         return
     
     try:
-        manager = UserProfileManager(config)
-        profiles = manager.list_all_profiles()
+        from ask_llm.profiles import ProfileManager, EntityType
+        
+        manager = ProfileManager(config)
+        profiles = manager.list_all_profiles(EntityType.USER)
     except Exception as e:
         console.print(f"[red]Could not load users: {e}[/red]")
         return
@@ -597,17 +596,14 @@ def show_users(config: Config):
     
     table = Table(show_header=True, box=None, padding=(0, 2))
     table.add_column("User ID", style="cyan")
-    table.add_column("Name")
-    table.add_column("Preferred Name")
-    table.add_column("Occupation")
+    table.add_column("Display Name")
+    table.add_column("Description")
     
     for profile in profiles:
-        occupation = profile.context.get("occupation", "") if profile.context else ""
         table.add_row(
-            profile.user_id,
-            profile.name or "[dim]-[/dim]",
-            profile.preferred_name or "[dim]-[/dim]",
-            occupation or "[dim]-[/dim]"
+            profile.entity_id,
+            profile.display_name or "[dim]-[/dim]",
+            (profile.description[:50] + "..." if profile.description and len(profile.description) > 50 else profile.description) or "[dim]-[/dim]"
         )
     
     console.print(table)
@@ -630,47 +626,38 @@ def run_user_profile_setup(config: Config, user_id: str = DEFAULT_USER_ID) -> bo
     console.print()
     
     try:
-        manager = UserProfileManager(config)
-        existing = manager.get_profile(user_id)
+        from ask_llm.profiles import ProfileManager, EntityType, AttributeCategory
+        
+        manager = ProfileManager(config)
+        profile, _ = manager.get_or_create_profile(EntityType.USER, user_id)
+        
+        # Get existing attributes
+        existing_attrs = {attr.key: attr.value for attr in manager.get_all_attributes(EntityType.USER, user_id)}
         
         # Prompt for basic info
         name = Prompt.ask(
             "What's your name?",
-            default=existing.name if existing and existing.name else ""
-        )
-        
-        preferred_name = Prompt.ask(
-            "What should I call you? (nickname)",
-            default=existing.preferred_name if existing and existing.preferred_name else name
+            default=profile.display_name or existing_attrs.get("name", "")
         )
         
         occupation = Prompt.ask(
             "What do you do? (occupation)",
-            default=existing.context.get("occupation", "") if existing and existing.context else ""
+            default=existing_attrs.get("occupation", "")
         )
         
         console.print()
         
-        # Build profile
-        profile = UserProfile(
-            user_id=user_id,
-            name=name if name else None,
-            preferred_name=preferred_name if preferred_name else None,
-            preferences={},
-            context={}
-        )
+        # Save to new profile system
+        if name:
+            manager.update_profile(EntityType.USER, user_id, display_name=name)
+            manager.set_attribute(EntityType.USER, user_id, AttributeCategory.FACT, "name", name, source="explicit")
         
         if occupation:
-            profile.context["occupation"] = occupation
+            manager.set_attribute(EntityType.USER, user_id, AttributeCategory.FACT, "occupation", occupation, source="explicit")
         
-        # Save profile
-        if manager.save_profile(profile):
-            console.print(f"[green]✓ User profile saved for '{user_id}'[/green]")
-            console.print()
-            return True
-        else:
-            console.print(f"[red]Failed to save user profile.[/red]")
-            return False
+        console.print(f"[green]✓ User profile saved for '{user_id}'[/green]")
+        console.print()
+        return True
             
     except KeyboardInterrupt:
         console.print()
@@ -681,33 +668,32 @@ def run_user_profile_setup(config: Config, user_id: str = DEFAULT_USER_ID) -> bo
         return False
 
 
-def ensure_user_profile(config: Config, user_id: str = DEFAULT_USER_ID) -> UserProfile | None:
+def ensure_user_profile(config: Config, user_id: str = DEFAULT_USER_ID) -> bool:
     """Ensure user profile exists, prompting for setup if needed.
     
-    Returns the profile, or None if setup was cancelled/failed or database unavailable.
+    Returns True if profile exists or setup succeeded, False if setup was cancelled.
     """
     if not has_database_credentials(config):
         logging.getLogger(__name__).debug("Database credentials not configured - skipping user profile")
-        return None
+        return True  # Not an error, just no profile
     
     try:
-        manager = UserProfileManager(config)
-        profile, is_new = manager.get_or_create_profile(user_id)
+        from ask_llm.profiles import ProfileManager, EntityType
         
-        # If profile has no name set, run setup wizard
-        if not profile.name:
+        manager = ProfileManager(config)
+        profile, is_new = manager.get_or_create_profile(EntityType.USER, user_id)
+        
+        # If profile has no name, run setup wizard
+        if not profile.display_name:
             console.print()
             console.print(f"[yellow]Welcome! Let's set up your user profile.[/yellow]")
             console.print()
-            if run_user_profile_setup(config, user_id):
-                return manager.get_profile(user_id)
-            else:
-                # User cancelled - return empty profile (will work, just no personalization)
-                return profile
+            return run_user_profile_setup(config, user_id)
         
-        return profile
+        return True
     except Exception as e:
         logging.getLogger(__name__).warning(f"Could not ensure user profile: {e}")
+        return True  # Don't block on profile errors
         return None
 
 
@@ -867,17 +853,32 @@ def main():
             console.print("[dim]Set ASK_LLM_POSTGRES_PASSWORD in ~/.config/ask-llm/.env[/dim]")
             sys.exit(1)
         try:
+            from ask_llm.profiles import ProfileManager, EntityType, AttributeCategory
+            
             field, value = args.user_profile_set.split("=", 1)
             field = field.strip()
             value = value.strip().strip('"').strip("'")
-            manager = UserProfileManager(config_obj)
-            if manager.update_field(field, value, args.user):
-                console.print(f"[green]Updated {field} = {value}[/green]")
+            
+            manager = ProfileManager(config_obj)
+            
+            # Parse field: category.key or just key
+            if "." in field:
+                category_str, key = field.split(".", 1)
+                category_map = {"preference": AttributeCategory.PREFERENCE, "fact": AttributeCategory.FACT, "interest": AttributeCategory.INTEREST, "communication": AttributeCategory.COMMUNICATION, "context": AttributeCategory.CONTEXT}
+                category = category_map.get(category_str.lower())
+                if not category:
+                    console.print(f"[red]Invalid category: {category_str}[/red]")
+                    console.print("[dim]Valid categories: preference, fact, interest, communication, context[/dim]")
+                    sys.exit(1)
             else:
-                console.print(f"[red]Invalid field: {field}[/red]")
-                console.print("[dim]Valid fields: name, preferred_name, preferences.*, context.*[/dim]")
+                # Default to fact category
+                key = field
+                category = AttributeCategory.FACT
+            
+            manager.set_attribute(EntityType.USER, args.user, category, key, value, source="explicit")
+            console.print(f"[green]Set {category}.{key} = {value}[/green]")
         except ValueError:
-            console.print("[red]Use format: --user-profile-set field=value[/red]")
+            console.print("[red]Use format: --user-profile-set category.key=value[/red]")
         except Exception as e:
             console.print(f"[red]Error: {e}[/red]")
         sys.exit(0)

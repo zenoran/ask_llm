@@ -37,7 +37,7 @@ class ProfileAttribute(SQLModel, table=True):
     - History of attribute changes
     """
     
-    __tablename__ = "profile_attributes"  # type: ignore[assignment]
+    __tablename__ = "entity_profile_attributes"  # type: ignore[assignment]
     
     id: int | None = Field(default=None, primary_key=True)
     entity_type: EntityType = Field(index=True)
@@ -122,8 +122,8 @@ class ProfileManager:
         # Create composite index for efficient lookups
         with self.engine.connect() as conn:
             conn.execute(text("""
-                CREATE INDEX IF NOT EXISTS idx_profile_attr_entity 
-                ON profile_attributes (entity_type, entity_id, category)
+                CREATE INDEX IF NOT EXISTS idx_entity_profile_attr_entity 
+                ON entity_profile_attributes (entity_type, entity_id, category)
             """))
             conn.execute(text("""
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_entity_profile_unique 
@@ -263,7 +263,7 @@ class ProfileManager:
             session.commit()
             session.refresh(attr)
             
-            logger.debug(f"Set attribute {entity_type}/{entity_id}: {category}.{key} = {value}")
+            logger.info(f"Set attribute {entity_type}/{entity_id}: {category}.{key} = {value} (id={attr.id})")
             return attr
     
     def get_attribute(

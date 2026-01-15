@@ -14,7 +14,7 @@ from ..utils.history import HistoryManager, Message
 from ..clients import LLMClient
 from ..clients.openai_client import OpenAIClient
 from ..bots import Bot, BotManager, get_system_prompt
-from ..user_profile import UserProfileManager
+from ..profiles import ProfileManager, EntityType
 from ..memory_server.client import MemoryClient, get_memory_client
 from ..tools import get_tools_prompt, query_with_tools
 from .logging import get_service_logger
@@ -112,21 +112,37 @@ class ServiceAskLLM:
                     console.print(f"[bold yellow]Warning:[/bold yellow] Memory client failed: {e}")
                 self.memory = None
 
-        # Set system message with optional user profile
+        # Set system message with optional user profile and bot personality
+        system_prompt = self.bot.system_prompt
+        
         if self._db_available:
             try:
-                profile_manager = UserProfileManager(config)
-                self.user_profile, _ = profile_manager.get_or_create_profile(self.user_id)
-                profile_context = self.user_profile.to_context_string()
-                if profile_context:
-                    self.config.SYSTEM_MESSAGE = f"{profile_context}\n\n{self.bot.system_prompt}"
+                profile_manager = ProfileManager(config)
+                
+                # Get user profile summary for context injection
+                user_context = profile_manager.get_user_profile_summary(self.user_id)
+                
+                # Get bot personality traits (if any have developed)
+                bot_context = profile_manager.get_bot_profile_summary(self.bot_id)
+                
+                # Build system message with profile contexts
+                context_parts = []
+                if user_context:
+                    context_parts.append(f"## About the User\n{user_context}")
+                if bot_context:
+                    context_parts.append(f"## Your Developed Traits\n{bot_context}")
+                
+                if context_parts:
+                    profile_context = "\n\n".join(context_parts)
+                    self.config.SYSTEM_MESSAGE = f"{profile_context}\n\n{system_prompt}"
                 else:
-                    self.config.SYSTEM_MESSAGE = self.bot.system_prompt
+                    self.config.SYSTEM_MESSAGE = system_prompt
+                    
             except Exception as e:
-                logger.warning(f"Failed to load user profile: {e}")
-                self.config.SYSTEM_MESSAGE = self.bot.system_prompt
+                logger.warning(f"Failed to load profiles: {e}")
+                self.config.SYSTEM_MESSAGE = system_prompt
         else:
-            self.config.SYSTEM_MESSAGE = self.bot.system_prompt
+            self.config.SYSTEM_MESSAGE = system_prompt
 
         # Initialize history manager
         self.history_manager = HistoryManager(

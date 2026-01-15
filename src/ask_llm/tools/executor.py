@@ -258,6 +258,8 @@ class ToolExecutor:
         try:
             from ..profiles import EntityType
             
+            logger.info(f"Setting user attribute: {category}.{key} = {value} for user {self.user_id}")
+            
             self.profile_manager.set_attribute(
                 entity_type=EntityType.USER,
                 entity_id=self.user_id,
@@ -268,13 +270,15 @@ class ToolExecutor:
                 source="inferred",
             )
             
+            logger.info(f"Successfully saved user attribute: {category}.{key}")
+            
             return format_tool_result(
                 tool_call.name,
                 f"Saved user {category}: {key} = {value}"
             )
             
         except Exception as e:
-            logger.error(f"Set user attribute failed: {e}")
+            logger.exception(f"Set user attribute failed: {e}")
             return format_tool_result(tool_call.name, None, error=str(e))
 
     def _execute_get_user_profile(self, tool_call: ToolCall) -> str:

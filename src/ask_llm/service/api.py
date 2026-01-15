@@ -978,6 +978,9 @@ class BackgroundService:
         
         messages = task.payload.get("messages", [])
         bot_id = task.bot_id
+        user_id = task.user_id
+        
+        log.info(f"[Extraction] Processing task for bot={bot_id} user={user_id} with {len(messages)} messages")
         
         # Get the model from task payload (passed from chat request)
         # This ensures we use the same model that handled the chat
@@ -1032,16 +1035,21 @@ class BackgroundService:
             use_llm = False
         
         if not facts:
+            log.info(f"[Extraction] No facts extracted from messages")
             return {"facts_extracted": 0, "facts_stored": 0, "llm_used": use_llm}
         
-        memory_client = self.get_memory_client(bot_id)
+        log.info(f"[Extraction] Extracted {len(facts)} facts, storing...")
+        
+        memory_client = self.get_memory_client(bot_id, user_id)
         stored_count = 0
+        profile_count = 0
         
         if memory_client:
-                    min_importance = getattr(self.config, "MEMORY_EXTRACTION_MIN_IMPORTANCE", 0.3)
-                    profile_enabled = getattr(self.config, "MEMORY_PROFILE_ATTRIBUTE_ENABLED", True)
+            min_importance = getattr(self.config, "MEMORY_EXTRACTION_MIN_IMPORTANCE", 0.3)
+            profile_enabled = getattr(self.config, "MEMORY_PROFILE_ATTRIBUTE_ENABLED", True)
             
             for fact in facts:
+                log.debug(f"[Extraction] Fact: '{fact.content[:50]}...' importance={fact.importance:.2f} tags={fact.tags}")
                 if fact.importance >= min_importance:
                     try:
                         memory_client.add_memory(
@@ -1051,18 +1059,20 @@ class BackgroundService:
                             source_message_ids=fact.source_message_ids,
                         )
                         stored_count += 1
-                                if profile_enabled:
-                                    from ..memory_server.extraction import extract_profile_attributes_from_fact
-                                    extract_profile_attributes_from_fact(
-                                        fact=fact,
-                                        user_id=task.user_id,
-                                        config=self.config,
-                                    )
+                        if profile_enabled:
+                            from ..memory_server.extraction import extract_profile_attributes_from_fact
+                            if extract_profile_attributes_from_fact(
+                                fact=fact,
+                                user_id=user_id,
+                                config=self.config,
+                            ):
+                                profile_count += 1
                     except Exception as e:
                         log.warning(f"Failed to store memory: {e}")
         
-        log.memory_operation("extraction", bot_id, count=stored_count, details=f"extracted={len(facts)}, llm={use_llm}")
-        return {"facts_extracted": len(facts), "facts_stored": stored_count, "llm_used": use_llm}
+        log.info(f"[Extraction] Stored {stored_count} memories, {profile_count} profile attributes")
+        log.memory_operation("extraction", bot_id, count=stored_count, details=f"extracted={len(facts)}, profiles={profile_count}, llm={use_llm}")
+        return {"facts_extracted": len(facts), "facts_stored": stored_count, "profile_attrs": profile_count, "llm_used": use_llm}
     
     async def _process_compaction(self, task: Task) -> dict:
         """Process a context compaction task."""
