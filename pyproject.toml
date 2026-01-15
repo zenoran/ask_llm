@@ -51,6 +51,10 @@ service = [
     "httpx>=0.26.0",
 ]
 
+mcp = [
+    "mcp[cli]>=1.0.0",
+]
+
 
 [project.scripts]
 ask-llm = "ask_llm.main:main"
@@ -58,6 +62,7 @@ llm = "ask_llm.main:main"
 ask-llm-service = "ask_llm.service.server:main"
 llm-service = "ask_llm.service.server:main"
 llm-memory = "ask_llm.memory_debug:main"
+llm-mcp-server = "ask_llm.memory_server:run_server"
 
 [project.entry-points."ask_llm.memory"]
 postgresql = "ask_llm.memory.postgresql:PostgreSQLMemoryBackend"

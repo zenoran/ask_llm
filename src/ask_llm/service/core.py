@@ -1,18 +1,23 @@
-"""Core AskLLM class - simple OpenAI-compatible chat client with memory."""
+"""Service-side AskLLM class - supports loading local models (GGUF, etc.)
+
+This is separate from the CLI's core.py which only supports OpenAI API calls.
+The service runs on the server and can load models directly.
+"""
 
 import threading
 import time
 import uuid
 from difflib import SequenceMatcher
 from rich.console import Console
-from .utils.config import Config, has_database_credentials
-from .utils.history import HistoryManager, Message
-from .clients import LLMClient
-from .clients.openai_client import OpenAIClient
-from .bots import BotManager, get_system_prompt
-from .profiles import ProfileManager, EntityType
-from .memory_server.client import MemoryClient, get_memory_client
-from .tools import get_tools_prompt, query_with_tools
+from ..utils.config import Config, has_database_credentials, is_llama_cpp_available
+from ..utils.history import HistoryManager, Message
+from ..clients import LLMClient
+from ..clients.openai_client import OpenAIClient
+from ..bots import Bot, BotManager, get_system_prompt
+from ..user_profile import UserProfileManager
+from ..memory_server.client import MemoryClient, get_memory_client
+from ..tools import get_tools_prompt, query_with_tools
+from .logging import get_service_logger
 import logging
 
 try:
@@ -30,13 +35,16 @@ def _text_similarity(text1: str, text2: str) -> float:
 
 console = Console()
 logger = logging.getLogger(__name__)
+slog = get_service_logger(__name__)
 
 
-class AskLLM:
-    """Simple LLM client with optional memory augmentation.
+class ServiceAskLLM:
+    """Server-side LLM class that can load local models directly.
     
-    Uses OpenAI-compatible API. Memory features work when database is available,
-    otherwise falls back to filesystem-only mode.
+    Supports:
+    - OpenAI-compatible API
+    - GGUF models via llama-cpp-python
+    - Memory augmentation when database is available
     """
     
     def __init__(
@@ -54,86 +62,71 @@ class AskLLM:
         self.bot_id = bot_id
         self.user_id = user_id
         self.memory: MemoryClient | None = None
-        self.profile_manager: ProfileManager | None = None
+        self.user_profile = None
 
         if not self.model_definition:
             raise ValueError(f"Could not find model definition for resolved alias: '{resolved_model_alias}'")
 
-        # Initialize OpenAI-compatible client
+        # Initialize client based on model type
         self.client: LLMClient = self._initialize_client()
         
         # Load bot configuration
         bot_manager = BotManager(config)
-        self.bot = bot_manager.get_bot(bot_id)
-        if not self.bot:
-            logger.warning(f"Bot '{bot_id}' not found, falling back to Nova")
-            self.bot = bot_manager.get_default_bot()
-            self.bot_id = self.bot.slug
+        resolved_bot = bot_manager.get_bot(bot_id) or bot_manager.get_default_bot()
+        if not resolved_bot:
+            raise ValueError(f"No bot available for '{bot_id}' and no default bot found")
+        if resolved_bot.slug != bot_id:
+            logger.warning(f"Bot '{bot_id}' not found, falling back to {resolved_bot.slug}")
+        self.bot: Bot = resolved_bot
+        self.bot_id = self.bot.slug
         
         self.client.bot_name = self.bot.name
 
-        # Initialize memory if database is available
+        # Initialize memory
+        # - In MCP server mode, we allow memory even if DB creds aren't present locally.
+        # - In embedded mode, we require DB credentials.
         self._db_available = False
         if self.local_mode:
             logger.debug("Local mode enabled - using filesystem for history")
-        elif not has_database_credentials(config):
-            logger.debug("Database credentials not configured - using filesystem for history")
         else:
             try:
-                if self.bot.requires_memory:
+                memory_server_url = getattr(config, "MEMORY_SERVER_URL", None)
+                if self.bot.requires_memory and (memory_server_url or has_database_credentials(config)):
                     self.memory = get_memory_client(
                         config=config,
                         bot_id=self.bot_id,
                         user_id=self.user_id,
-                        server_url=getattr(config, "MEMORY_SERVER_URL", None),
+                        server_url=memory_server_url,
                     )
-                    logger.debug(f"Memory client initialized for bot: {self.bot_id}")
+                    logger.debug(
+                        "Memory client initialized for bot=%s mode=%s",
+                        self.bot_id,
+                        "mcp" if memory_server_url else "embedded",
+                    )
+                    self._db_available = True
                 else:
-                    logger.debug(f"Bot '{self.bot.name}' has requires_memory=false")
-                self._db_available = True
+                    logger.debug(f"Bot '{self.bot.name}' has requires_memory=false or memory unavailable")
             except Exception as e:
                 logger.exception(f"Failed to initialize memory client: {e}")
                 if self.config.VERBOSE:
                     console.print(f"[bold yellow]Warning:[/bold yellow] Memory client failed: {e}")
                 self.memory = None
 
-        # Set system message with optional user profile and tools
-        system_prompt = self.bot.system_prompt
-        
-        # Add tool instructions if bot uses tools
-        if self.bot.uses_tools and self.memory:
-            tools_prompt = get_tools_prompt()
-            system_prompt = f"{system_prompt}\n\n{tools_prompt}"
-            logger.debug(f"Bot '{self.bot.name}' has tool calling enabled")
-        
+        # Set system message with optional user profile
         if self._db_available:
             try:
-                self.profile_manager = ProfileManager(config)
-                
-                # Get user profile summary for context injection
-                user_context = self.profile_manager.get_user_profile_summary(self.user_id)
-                
-                # Get bot personality traits (if any have developed)
-                bot_context = self.profile_manager.get_bot_profile_summary(self.bot_id)
-                
-                # Build system message with profile contexts
-                context_parts = []
-                if user_context:
-                    context_parts.append(f"## About the User\n{user_context}")
-                if bot_context:
-                    context_parts.append(f"## Your Developed Traits\n{bot_context}")
-                
-                if context_parts:
-                    profile_context = "\n\n".join(context_parts)
-                    self.config.SYSTEM_MESSAGE = f"{profile_context}\n\n{system_prompt}"
+                profile_manager = UserProfileManager(config)
+                self.user_profile, _ = profile_manager.get_or_create_profile(self.user_id)
+                profile_context = self.user_profile.to_context_string()
+                if profile_context:
+                    self.config.SYSTEM_MESSAGE = f"{profile_context}\n\n{self.bot.system_prompt}"
                 else:
-                    self.config.SYSTEM_MESSAGE = system_prompt
-                    
+                    self.config.SYSTEM_MESSAGE = self.bot.system_prompt
             except Exception as e:
-                logger.warning(f"Failed to load profiles: {e}")
-                self.config.SYSTEM_MESSAGE = system_prompt
+                logger.warning(f"Failed to load user profile: {e}")
+                self.config.SYSTEM_MESSAGE = self.bot.system_prompt
         else:
-            self.config.SYSTEM_MESSAGE = system_prompt
+            self.config.SYSTEM_MESSAGE = self.bot.system_prompt
 
         # Initialize history manager
         self.history_manager = HistoryManager(
@@ -145,23 +138,55 @@ class AskLLM:
         self.load_history()
 
     def _initialize_client(self) -> LLMClient:
-        """Initialize OpenAI-compatible client."""
+        """Initialize client based on model type - supports local models."""
         model_type = self.model_definition.get("type")
         model_id = self.model_definition.get("model_id")
         
-        if model_type != "openai":
+        # Use ServiceLogger for deduped model loading messages
+        slog.model_loading(self.resolved_model_alias, model_type)
+        start_time = time.perf_counter()
+        
+        if model_type == "openai":
+            if not model_id:
+                raise ValueError(f"Missing 'model_id' in definition for '{self.resolved_model_alias}'")
+            base_url = self.model_definition.get("base_url")
+            api_key = self.model_definition.get("api_key")
+            client = OpenAIClient(model_id, config=self.config, base_url=base_url, api_key=api_key)
+            load_time_ms = (time.perf_counter() - start_time) * 1000
+            slog.model_loaded(self.resolved_model_alias, model_type, load_time_ms)
+            return client
+        
+        elif model_type == "gguf":
+            if not is_llama_cpp_available():
+                raise ImportError(
+                    "llama-cpp-python is required for GGUF models. "
+                    "Install with: pip install llama-cpp-python"
+                )
+            from ..clients.llama_cpp_client import LlamaCppClient
+            from ..gguf_handler import get_or_download_gguf_model
+            
+            repo_id = self.model_definition.get("repo_id")
+            filename = self.model_definition.get("filename")
+            if not repo_id or not filename:
+                raise ValueError(
+                    f"Missing 'repo_id' or 'filename' in GGUF definition for '{self.resolved_model_alias}'"
+                )
+            
+            # Download model if needed
+            model_path = get_or_download_gguf_model(repo_id, filename, self.config)
+            if not model_path:
+                raise FileNotFoundError(f"Could not download GGUF model: {repo_id}/{filename}")
+            
+            client = LlamaCppClient(model_path, config=self.config)
+            load_time_ms = (time.perf_counter() - start_time) * 1000
+            slog.model_loaded(self.resolved_model_alias, model_type, load_time_ms)
+            return client
+        
+        else:
             raise ValueError(
-                f"Only 'openai' model type is supported. Got '{model_type}'. "
-                "Use an OpenAI-compatible server for local models."
+                f"Unsupported model type: '{model_type}'. "
+                f"Supported types: openai, gguf"
             )
-        
-        if not model_id:
-            raise ValueError(f"Missing 'model_id' in definition for '{self.resolved_model_alias}'")
-        
-        base_url = self.model_definition.get("base_url")
-        api_key = self.model_definition.get("api_key")
-        
-        return OpenAIClient(model_id, config=self.config, base_url=base_url, api_key=api_key)
 
     def load_history(self, since_minutes: int | None = None) -> list[dict]:
         if since_minutes is None:
@@ -184,9 +209,6 @@ class AskLLM:
                     messages=context_messages,
                     query_fn=query_fn,
                     memory_client=self.memory,
-                    profile_manager=self.profile_manager,
-                    user_id=self.user_id,
-                    bot_id=self.bot_id,
                     stream=stream,
                 )
             else:
@@ -198,8 +220,7 @@ class AskLLM:
             
             if assistant_response:
                 self.history_manager.add_message("assistant", assistant_response)
-                # Memory extraction for non-tool bots (tool bots store via tools)
-                if self.memory and not self.bot.uses_tools:
+                if self.memory:
                     self._trigger_memory_extraction(prompt, assistant_response)
             
             return assistant_response
@@ -218,14 +239,15 @@ class AskLLM:
         """Build messages list with system prompt, memory context, and history."""
         messages = []
         
-        # Build system prompt parts
+        # Build system prompt
         system_parts = []
         if self.config.SYSTEM_MESSAGE:
             system_parts.append(self.config.SYSTEM_MESSAGE)
         
-        # Add tool instructions OR memory context (not both)
+        # Add tool instructions if bot uses tools
         if self.bot.uses_tools and self.memory:
             system_parts.append(get_tools_prompt())
+        # Retrieve relevant memories if available (only if NOT using tools - tools let LLM search itself)
         elif self.memory:
             memory_context = self._retrieve_memory_context(prompt)
             if memory_context:
@@ -251,7 +273,18 @@ class AskLLM:
             n_results = self.config.MEMORY_N_RESULTS
             min_relevance = self.config.MEMORY_MIN_RELEVANCE
             
+            mode = "mcp" if getattr(self.memory, "server_url", None) else "embedded"
+            logger.info(
+                "Memory retrieval (%s): query=%r n_results=%s min_relevance=%s",
+                mode,
+                prompt[:120],
+                n_results,
+                min_relevance,
+            )
+
             memory_results = self.memory.search(prompt, n_results=n_results, min_relevance=min_relevance)
+
+            logger.info("Memory retrieval (%s): returned=%d", mode, len(memory_results))
             
             if not memory_results:
                 return ""
@@ -282,19 +315,8 @@ class AskLLM:
                 return ""
             
             # Format as context string
-            from .memory.context_builder import build_memory_context_string
-            
-            # Get user's display name from profile if available
-            user_name = None
-            if self.profile_manager:
-                try:
-                    profile, _ = self.profile_manager.get_or_create_profile(
-                        EntityType.USER, self.user_id
-                    )
-                    user_name = profile.display_name
-                except Exception:
-                    pass
-                    
+            from ..memory.context_builder import build_memory_context_string
+            user_name = getattr(self.user_profile, 'name', None) if self.user_profile else None
             return build_memory_context_string(unique_memories, user_name=user_name)
             
         except Exception as e:
@@ -308,8 +330,8 @@ class AskLLM:
         
         def extract():
             try:
-                from .service import ServiceClient
-                from .service.tasks import create_extraction_task
+                from ..service import ServiceClient
+                from ..service.tasks import create_extraction_task
                 
                 client = ServiceClient()
                 if client.is_available():
@@ -356,3 +378,55 @@ class AskLLM:
         except Exception as e:
             logger.warning(f"Prompt refinement failed: {e}")
             return prompt
+
+    # =========================================================================
+    # Methods required by the service API
+    # =========================================================================
+
+    def prepare_messages_for_query(self, prompt: str) -> list[Message]:
+        """Prepare messages for query including history and memory context.
+        
+        Called by the service API before sending to the LLM.
+        """
+        # Add user message to history first
+        self.history_manager.add_message("user", prompt)
+        
+        # Build context with system prompt, memory, and history
+        return self._build_context_messages(prompt)
+
+    def _execute_llm_query(
+        self, 
+        messages: list[Message], 
+        plaintext_output: bool = False, 
+        stream: bool = False
+    ) -> str:
+        """Execute the LLM query and return response.
+        
+        Handles tool calling loop if bot has tools enabled.
+        Called by the service API to get the response.
+        """
+        # Use tool loop if bot has tools enabled
+        if self.bot.uses_tools and self.memory:
+            def query_fn(msgs, do_stream):
+                return self.client.query(msgs, plaintext_output=True, stream=do_stream)
+            
+            return query_with_tools(
+                messages=messages,
+                query_fn=query_fn,
+                memory_client=self.memory,
+                stream=stream,
+            )
+        
+        return self.client.query(messages, plaintext_output=plaintext_output, stream=stream)
+
+    def finalize_response(self, user_prompt: str, response: str):
+        """Finalize the response by saving to history and triggering extraction.
+        
+        Called by the service API after receiving the response.
+        """
+        if response:
+            self.history_manager.add_message("assistant", response)
+            
+            # Trigger background memory extraction if available (skip for tool bots - they store directly)
+            if self.memory and not self.bot.uses_tools:
+                self._trigger_memory_extraction(user_prompt, response)

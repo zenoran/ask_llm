@@ -9,10 +9,10 @@ from ask_llm.utils.config import set_config_value
 from ask_llm.utils.input_handler import MultilineInputHandler
 from ask_llm.core import AskLLM
 from ask_llm.model_manager import list_models, update_models_interactive, delete_model, ModelManager
-from ask_llm.gguf_handler import handle_add_gguf
 from ask_llm.bots import BotManager
 from ask_llm.user_profile import UserProfileManager, UserProfile, DEFAULT_USER_ID
 from ask_llm.utils.streaming import render_streaming_response, render_complete_response
+from ask_llm.shared.logging import LogConfig
 import logging
 from pathlib import Path
 from rich.table import Table
@@ -121,8 +121,7 @@ def show_status(config: Config, args: argparse.Namespace | None = None):
     import importlib.util
     import os
     import shutil
-    from ask_llm.core import discover_memory_backends
-    from ask_llm.utils.config import is_huggingface_available, is_llama_cpp_available
+    from ask_llm.utils.config import is_huggingface_available, is_llama_cpp_available, has_database_credentials
     
     console.print(Panel.fit("[bold magenta]ask_llm System Status[/bold magenta]", border_style="magenta"))
     console.print()
@@ -351,34 +350,25 @@ def show_status(config: Config, args: argparse.Namespace | None = None):
     # --- Memory Section ---
     db_status = "[yellow]Not Configured[/yellow]"
     long_term_count = 0
-    short_term_count = 0
     messages_count = 0
     
-    backends = discover_memory_backends()
-    if 'postgresql' in backends:
-        if not has_database_credentials(config):
-            db_status = "[yellow]Not Configured[/yellow] [dim](set ASK_LLM_POSTGRES_PASSWORD)[/dim]"
-        else:
-            try:
-                backend_class = backends['postgresql']
-                backend = backend_class(config, bot_id=default_bot.slug)
-                db_stats = backend.stats()
-                long_term_count = db_stats.get('memories', {}).get('total_count', 0)
-                messages_count = db_stats.get('messages', {}).get('total_count', 0)
-                db_status = f"[green]Connected[/green] ({config.POSTGRES_HOST}:{config.POSTGRES_PORT}/{config.POSTGRES_DATABASE})"
-                
-                short_term_mgr = backend_class.get_short_term_manager(config, bot_id=default_bot.slug)
-                short_term_count = short_term_mgr.count()
-            except Exception as e:
-                db_status = f"[red]Error: {e}[/red]"
+    if not has_database_credentials(config):
+        db_status = "[yellow]Not Configured[/yellow] [dim](set ASK_LLM_POSTGRES_PASSWORD)[/dim]"
     else:
-        db_status = "[yellow]Backend not available[/yellow]"
+        try:
+            from ask_llm.memory.postgresql import PostgreSQLMemoryBackend
+            backend = PostgreSQLMemoryBackend(config, bot_id=default_bot.slug)
+            db_stats = backend.stats()
+            long_term_count = db_stats.get('memories', {}).get('total_count', 0)
+            messages_count = db_stats.get('messages', {}).get('total_count', 0)
+            db_status = f"[green]Connected[/green] ({config.POSTGRES_HOST}:{config.POSTGRES_PORT}/{config.POSTGRES_DATABASE})"
+        except Exception as e:
+            db_status = f"[red]Error: {e}[/red]"
     
     table.add_row("[bold]Memory[/bold]", "")
     table.add_row("  PostgreSQL Backend", db_status)
     table.add_row("  Messages (permanent)", f"[green]{messages_count}[/green]" if messages_count else "[dim]0[/dim]")
     table.add_row("  Memories (distilled)", f"[green]{long_term_count}[/green]" if long_term_count else "[dim]0[/dim]")
-    table.add_row("  Session messages", f"[green]{short_term_count}[/green]" if short_term_count else "[dim]0[/dim]")
     table.add_row("", "")
     
     # --- Configuration Section ---
@@ -453,16 +443,16 @@ def show_status(config: Config, args: argparse.Namespace | None = None):
         table.add_row("  Models Config", f"[red]✗ File not found: {models_config_path}[/red]")
     
     # Check 3: Memory backend connectivity (already checked above)
-    if 'postgresql' in backends and db_status.startswith("[green]"):
+    if db_status.startswith("[green]"):
         # Test vector extension
         try:
             from pgvector.psycopg2 import register_vector
             table.add_row("  Memory Backend", "[green]✓ PostgreSQL + pgvector[/green]")
         except ImportError:
             table.add_row("  Memory Backend", "[yellow]⚠ pgvector Python package not installed[/yellow]")
-    elif 'postgresql' in backends and not has_database_credentials(config):
+    elif not has_database_credentials(config):
         table.add_row("  Memory Backend", "[dim]○ Not configured (set ASK_LLM_POSTGRES_PASSWORD)[/dim]")
-    elif 'postgresql' in backends:
+    elif db_status.startswith("[red]"):
         table.add_row("  Memory Backend", "[red]✗ PostgreSQL connection failed[/red]")
     else:
         table.add_row("  Memory Backend", "[dim]○ Not configured (--local mode only)[/dim]")
@@ -724,9 +714,8 @@ def ensure_user_profile(config: Config, user_id: str = DEFAULT_USER_ID) -> UserP
 def parse_arguments(config_obj: Config) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Query LLM models from the command line using model aliases defined in models.yaml")
     parser.add_argument("-m","--model",type=str,default=None,help=f"Model alias defined in {config_obj.MODELS_CONFIG_PATH}. Supports partial matching. (Default: bot's default or {config_obj.DEFAULT_MODEL_ALIAS or 'None'})")
-    parser.add_argument("--add-gguf",type=str,metavar="REPO_ID",help="(Deprecated: use --add-model gguf) Add a GGUF model from a Hugging Face repo ID.")
     parser.add_argument("--list-models",action="store_true",help="List available model aliases defined in the configuration file and exit.")
-    parser.add_argument("--add-model",type=str,choices=['ollama', 'openai', 'gguf'],metavar="TYPE",help="Add models: 'ollama' (refresh from server), 'openai' (query API), 'gguf' (add from HuggingFace repo)")
+    parser.add_argument("--add-model",type=str,choices=['ollama', 'openai'],metavar="TYPE",help="Add models: 'ollama' (refresh from server), 'openai' (query API)")
     parser.add_argument("--delete-model",type=str,metavar="ALIAS",help="Delete the specified model alias from the configuration file after confirmation.")
     parser.add_argument("--config-set", nargs=2, metavar=("KEY", "VALUE"), help="Set a configuration value (e.g., DEFAULT_MODEL_ALIAS) in the .env file.")
     parser.add_argument("--config-list", action="store_true", help="List the current effective configuration settings.")
@@ -774,22 +763,13 @@ def main():
     prelim_args, _ = prelim_parser.parse_known_args()
     args = parse_arguments(config_obj)
     config_obj.VERBOSE = args.verbose
+    config_obj.DEBUG = args.debug
     config_obj.PLAIN_OUTPUT = args.plain
     config_obj.NO_STREAM = args.no_stream
-    config_obj.INTERACTIVE_MODE = not args.question and not args.command # Set interactive mode flag
+    config_obj.INTERACTIVE_MODE = not args.question and not args.command  # Set interactive mode flag
 
-    # Configure logging ONLY if debug is enabled
-    if args.debug: # Check the new debug flag
-        logging.basicConfig(level=logging.DEBUG,
-                            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-        # Set higher levels for noisy libraries only when debugging
-        logging.getLogger("httpx").setLevel(logging.WARNING)
-        logging.getLogger("httpcore").setLevel(logging.WARNING)
-        logging.getLogger("openai").setLevel(logging.WARNING)
-        logging.getLogger("requests").setLevel(logging.WARNING)
-        logging.getLogger("urllib3").setLevel(logging.WARNING)
-        logging.getLogger("markdown_it").setLevel(logging.WARNING)
-    # else: Logging remains unconfigured
+    # Configure logging via centralized LogConfig
+    LogConfig.configure(verbose=args.verbose, debug=args.debug)
 
     # Handle setting config values, guard missing attribute in stubbed args
     if getattr(args, 'config_set', None):
@@ -906,23 +886,6 @@ def main():
         list_models(config_obj)
         sys.exit(0)
         return
-    if args.add_gguf:
-        # Deprecated: redirect to the consolidated logic
-        console.print("[yellow]Note:[/yellow] --add-gguf is deprecated. Use --add-model gguf instead.")
-        success = False
-        try:
-            success = handle_add_gguf(args.add_gguf, config_obj)
-            if success:
-                console.print(f"[green]Successfully processed GGUF model request for {args.add_gguf}.[/green]")
-            else:
-                 console.print(f"[red]Failed to process GGUF model request for {args.add_gguf}. Check logs above.[/red]")
-        except Exception as e:
-            console.print(f"[bold red]Error during GGUF add operation:[/bold red] {e}")
-            if config_obj.VERBOSE:
-                 traceback.print_exc()
-            success = False # Ensure failure on exception
-        sys.exit(0 if success else 1)
-        return
     if args.delete_model:
         success = False
         try:
@@ -943,14 +906,6 @@ def main():
                 success = update_models_interactive(config_obj, provider='openai')
             elif args.add_model == 'ollama':
                 success = update_models_interactive(config_obj, provider='ollama')
-            elif args.add_model == 'gguf':
-                # Prompt for HuggingFace repo ID
-                repo_id = Prompt.ask("Enter HuggingFace repo ID (e.g., TheBloke/Llama-2-7B-GGUF)")
-                if repo_id and repo_id.strip():
-                    success = handle_add_gguf(repo_id.strip(), config_obj)
-                else:
-                    console.print("[red]No repo ID provided. Cancelled.[/red]")
-                    success = False
             if success:
                 console.print(f"[green]Model add for '{args.add_model}' completed.[/green]")
             else:
@@ -1007,11 +962,13 @@ def run_app(args: argparse.Namespace, config_obj: Config, resolved_alias: str):
     
     # Handle --local with explicit --bot (conflicting intent warning)
     if args.local and args.bot:
-        console.print(f"[yellow]Warning:[/yellow] Using --local with --bot {args.bot}. The bot will run without database memory.")
         bot = bot_manager.get_bot(args.bot)
         if not bot:
             console.print(f"[bold red]Unknown bot: {args.bot}[/bold red]. Use --list-bots to see available bots.")
             sys.exit(1)
+        # Only warn if the bot requires memory (e.g., nova)
+        if bot.requires_memory and config_obj.VERBOSE:
+            console.print(f"[dim]Note: Using --local with --bot {args.bot}. The bot will run without database memory.[/dim]")
         bot_id = bot.slug
     elif args.bot:
         # Explicit bot selection
@@ -1050,9 +1007,53 @@ def run_app(args: argparse.Namespace, config_obj: Config, resolved_alias: str):
         use_service = True
     
     ask_llm = None
-    memory_backend = None
     
-    if not use_service:
+    # For history operations, we can use a lightweight path that doesn't require model init
+    history_only = (args.delete_history or args.print_history is not None) and not args.question and not args.command
+    
+    if history_only:
+        # Use lightweight history manager without full model initialization
+        from ask_llm.clients.base import StubClient
+        from ask_llm.utils.history import HistoryManager
+        from ask_llm.memory_server.client import get_memory_client
+        
+        stub_client = StubClient(config=config_obj, bot_name=bot.name)
+        
+        # Initialize memory client if database available
+        memory = None
+        if not args.local and has_database_credentials(config_obj):
+            try:
+                memory = get_memory_client(
+                    config=config_obj,
+                    bot_id=bot_id,
+                    user_id=user_id,
+                    server_url=getattr(config_obj, "MEMORY_SERVER_URL", None),
+                )
+            except Exception as e:
+                logger.debug(f"Memory client init failed: {e}")
+        
+        history_manager = HistoryManager(
+            client=stub_client,
+            config=config_obj,
+            db_backend=memory.get_short_term_manager() if memory else None,
+            bot_id=bot_id,
+        )
+        history_manager.load_history()
+        
+        if args.delete_history:
+            history_manager.clear_history()
+            console.print("[green]Chat history cleared.[/green]")
+        
+        if args.print_history is not None:
+            history_manager.print_history(args.print_history)
+        
+        console.print()
+        return
+    
+    # For query operations, we need full AskLLM
+    need_local_ask_llm = not use_service or args.delete_history or args.print_history is not None
+    
+    if need_local_ask_llm:
         try:
             ask_llm = AskLLM(
                 resolved_model_alias=resolved_alias,
@@ -1061,24 +1062,24 @@ def run_app(args: argparse.Namespace, config_obj: Config, resolved_alias: str):
                 bot_id=bot_id,
                 user_id=user_id
             )
-            memory_backend = ask_llm.memory_backend
         except (ImportError, FileNotFoundError, ValueError, Exception) as e:
              console.print(f"[bold red]Failed to initialize LLM client for '{resolved_alias}':[/bold red] {e}")
              if config_obj.VERBOSE:
                  traceback.print_exc()
-             sys.exit(1) # Or re-raise the original error if preferred: raise e
+             sys.exit(1)
+             
     if args.delete_history:
         if ask_llm:
             ask_llm.history_manager.clear_history()
             console.print("[green]Chat history cleared.[/green]")
         else:
-            console.print("[yellow]History operations require local mode (not --service)[/yellow]")
+            console.print("[yellow]History operations require a valid model configuration.[/yellow]")
     
     if args.print_history is not None:
         if ask_llm:
             ask_llm.history_manager.print_history(args.print_history)
         else:
-            console.print("[yellow]History operations require local mode (not --service)[/yellow]")
+            console.print("[yellow]History operations require a valid model configuration.[/yellow]")
         if not args.question and not args.command:
              console.print()
              return
@@ -1109,7 +1110,7 @@ def run_app(args: argparse.Namespace, config_obj: Config, resolved_alias: str):
         console.print()
     stream_flag = not config_obj.NO_STREAM
     plaintext_flag = config_obj.PLAIN_OUTPUT
-    # use_service already set above when deciding whether to init AskLLM
+    # use_tools was already set above and factored into use_service decision
     
     def do_query(prompt: str):
         """Execute query via service or local client."""
@@ -1125,7 +1126,8 @@ def run_app(args: argparse.Namespace, config_obj: Config, resolved_alias: str):
             ):
                 return
             # Service unavailable, fall back to local - need to initialize AskLLM now
-            console.print("[dim]Service unavailable, using local client[/dim]")
+            if config_obj.VERBOSE:
+                console.print("[dim]Service unavailable, using local client[/dim]")
             if ask_llm is None:
                 try:
                     ask_llm = AskLLM(
@@ -1139,6 +1141,7 @@ def run_app(args: argparse.Namespace, config_obj: Config, resolved_alias: str):
                     console.print(f"[bold red]Failed to initialize LLM client:[/bold red] {e}")
                     return
         if ask_llm:
+            # Standard mode: hardcoded memory retrieval
             ask_llm.query(prompt, plaintext_output=plaintext_flag, stream=stream_flag)
 
     if args.question:

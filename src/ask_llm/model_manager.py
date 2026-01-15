@@ -34,10 +34,14 @@ from ask_llm.utils.config import (
     PROVIDER_OPENAI,
     PROVIDER_UNKNOWN,
 )
-from .gguf_handler import normalize_for_match
 from .utils.config import Config
 
 console = Console()
+
+
+def normalize_for_match(text: str) -> str:
+    """Normalize text for fuzzy matching by lowercasing and removing special characters."""
+    return re.sub(r'[^a-z0-9]', '', text.lower())
 
 class _PathWrapper:
     """Wraps a pathlib.Path to delegate file operations while allowing dynamic attributes."""

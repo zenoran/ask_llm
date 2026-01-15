@@ -13,6 +13,43 @@ console = Console()
 def normalize_for_match(text: str) -> str:
     return re.sub(r'[^a-z0-9]', '', text.lower())
 
+
+def get_or_download_gguf_model(repo_id: str, filename: str, config: Config) -> str | None:
+    """Get path to GGUF model, downloading if needed.
+    
+    Returns the local file path, or None if download failed.
+    """
+    cache_dir = pathlib.Path(config.MODEL_CACHE_DIR).expanduser()
+    model_repo_cache_dir = cache_dir / repo_id
+    local_model_path = model_repo_cache_dir / filename
+    
+    if local_model_path.is_file():
+        return str(local_model_path)
+    
+    # Need to download
+    if importlib.util.find_spec("huggingface_hub") is None:
+        console.print("[bold red]Error:[/bold red] `huggingface-hub` required for download but not found.")
+        return None
+    
+    from huggingface_hub import hf_hub_download
+    
+    console.print(f"Downloading '[yellow]{filename}[/yellow]' from {repo_id}...")
+    model_repo_cache_dir.mkdir(parents=True, exist_ok=True)
+    
+    try:
+        downloaded_path = hf_hub_download(
+            repo_id=repo_id,
+            filename=filename,
+            local_dir=str(model_repo_cache_dir),
+            local_dir_use_symlinks=False,
+        )
+        console.print(f"[green]Download complete[/green]")
+        return downloaded_path
+    except Exception as e:
+        console.print(f"[bold red]Error downloading '{filename}':[/bold red] {e}")
+        return None
+
+
 def generate_gguf_alias(repo_id: str, filename: str, existing_aliases: List[str]) -> str:
     repo_name = repo_id.split('/')[-1] if '/' in repo_id else repo_id
     base_filename = filename.lower().replace(".gguf", "")

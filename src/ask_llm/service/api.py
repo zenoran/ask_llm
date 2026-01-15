@@ -20,6 +20,7 @@ from datetime import datetime
 from enum import Enum
 from queue import PriorityQueue
 from typing import Any, AsyncIterator, Literal
+from urllib.parse import urlparse
 
 from pydantic import BaseModel, Field
 
@@ -39,6 +40,53 @@ log = get_service_logger(__name__)
 # Configuration
 DEFAULT_HTTP_PORT = 8642
 SERVICE_VERSION = "0.1.0"
+
+
+def _is_tcp_listening(host: str, port: int) -> bool:
+    import socket
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.settimeout(0.5)
+            return sock.connect_ex((host, port)) == 0
+    except OSError:
+        return False
+
+
+_memory_mcp_thread: threading.Thread | None = None
+
+
+def _ensure_memory_mcp_server(config: Config) -> None:
+    """Ensure an MCP memory server is running and configure the service to use it.
+
+    This makes memory retrieval happen via MCP tool calls (e.g. tools/search_memories),
+    which can be logged distinctly from embedded DB access.
+    """
+    global _memory_mcp_thread
+
+    # Default to local MCP memory server for llm-service if not configured.
+    if not getattr(config, "MEMORY_SERVER_URL", None):
+        config.MEMORY_SERVER_URL = "http://127.0.0.1:8001"
+
+    parsed = urlparse(config.MEMORY_SERVER_URL)
+    host = parsed.hostname or "127.0.0.1"
+    port = parsed.port or 8001
+
+    # If something is already listening, assume it's the memory MCP server.
+    if _is_tcp_listening(host, port):
+        log.info("Memory MCP server already listening at %s", config.MEMORY_SERVER_URL)
+        return
+
+    # Start the MCP memory server in-process (HTTP transport) on a daemon thread.
+    def _run():
+        try:
+            from ..memory_server.server import run_server
+            run_server(transport="streamable-http", host=host, port=port)
+        except Exception as e:
+            log.error("Failed to start MCP memory server: %s", e)
+
+    _memory_mcp_thread = threading.Thread(target=_run, daemon=True, name="memory-mcp")
+    _memory_mcp_thread.start()
+    log.info("Started MCP memory server at %s", config.MEMORY_SERVER_URL)
 
 
 # =============================================================================
@@ -156,6 +204,155 @@ class HealthResponse(BaseModel):
     status: str = "ok"
 
 
+class HistoryMessage(BaseModel):
+    """A message in the conversation history."""
+    role: str
+    content: str
+    timestamp: float
+
+
+class HistoryResponse(BaseModel):
+    """Response for conversation history."""
+    bot_id: str
+    messages: list[HistoryMessage]
+    total_count: int
+
+
+class HistoryClearResponse(BaseModel):
+    """Response for clearing history."""
+    success: bool
+    message: str
+
+
+# Memory Management Models
+class MemoryItem(BaseModel):
+    """A memory item."""
+    id: str | None = None
+    content: str
+    importance: float = 0.5
+    relevance: float | None = None
+    tags: list[str] = []
+    created_at: float | None = None
+    last_accessed: float | None = None
+    access_count: int = 0
+    source_message_ids: list[str] = []
+
+
+class MemorySearchRequest(BaseModel):
+    """Request for memory search."""
+    query: str
+    method: str = "all"  # text, embedding, high-importance, all
+    limit: int = 10
+    min_importance: float = 0.0
+    bot_id: str | None = None
+
+
+class MemorySearchResponse(BaseModel):
+    """Response for memory search."""
+    bot_id: str
+    method: str
+    query: str
+    results: list[MemoryItem]
+    total_count: int
+
+
+class MemoryStatsResponse(BaseModel):
+    """Memory statistics."""
+    bot_id: str
+    messages: dict
+    memories: dict
+
+
+class MemoryForgetRequest(BaseModel):
+    """Request to forget messages."""
+    count: int | None = None  # forget recent N
+    minutes: int | None = None  # forget last N minutes
+
+
+class MemoryForgetResponse(BaseModel):
+    """Response for forget operation."""
+    success: bool
+    messages_ignored: int
+    memories_deleted: int
+    message: str
+
+
+class MemoryRestoreResponse(BaseModel):
+    """Response for restore operation."""
+    success: bool
+    messages_restored: int
+    message: str
+
+
+class MemoryDeleteResponse(BaseModel):
+    """Response for deleting a specific memory."""
+    success: bool
+    memory_id: str
+    message: str
+
+
+class MessagePreview(BaseModel):
+    """Preview of a message for confirmation."""
+    id: str  # UUID or int, stored as string
+    role: str
+    content: str
+    timestamp: float | None = None
+
+
+class MessagesPreviewResponse(BaseModel):
+    """Response with message previews."""
+    bot_id: str
+    messages: list[MessagePreview]
+    total_count: int
+
+
+class RegenerateEmbeddingsResponse(BaseModel):
+    """Response for regenerate embeddings operation."""
+    success: bool
+    updated: int
+    failed: int
+    embedding_dim: int | None = None
+    message: str
+
+
+class ConsolidateRequest(BaseModel):
+    """Request for memory consolidation."""
+    dry_run: bool = False
+    similarity_threshold: float | None = None
+
+
+class ConsolidateResponse(BaseModel):
+    """Response for consolidation operation."""
+    success: bool
+    dry_run: bool
+    clusters_found: int
+    clusters_merged: int
+    memories_consolidated: int
+    new_memories_created: int
+    errors: list[str] = []
+    message: str
+
+
+class RawCompletionRequest(BaseModel):
+    """Request for raw LLM completion without bot/memory overhead.
+    
+    Use this for utility tasks like memory consolidation, summarization, etc.
+    """
+    prompt: str
+    system: str | None = None
+    model: str | None = None  # Uses service default if not specified
+    max_tokens: int = 500
+    temperature: float = 0.7
+
+
+class RawCompletionResponse(BaseModel):
+    """Response from raw LLM completion."""
+    content: str
+    model: str
+    tokens: int | None = None
+    elapsed_ms: float
+
+
 # =============================================================================
 # Background Service
 # =============================================================================
@@ -198,8 +395,8 @@ class BackgroundService:
         self._generation_done: threading.Event | None = None  # Signals when generation finishes
         self._cancel_lock = threading.Lock()
         
-        # Memory backend cache keyed by bot_id
-        self._memory_backends: dict[str, Any] = {}
+        # Memory client cache keyed by bot_id
+        self._memory_clients: dict[tuple[str, str], Any] = {}
         
         # Model configuration
         self._available_models: list[str] = []
@@ -270,24 +467,31 @@ class BackgroundService:
     def uptime_seconds(self) -> float:
         return time.time() - self.start_time
     
-    def get_memory_backend(self, bot_id: str):
-        """Get or create memory backend for a bot."""
-        if bot_id not in self._memory_backends:
+    def get_memory_client(self, bot_id: str, user_id: str | None = None):
+        """Get or create memory client for a bot/user pair."""
+        if user_id is None:
+            user_id = getattr(self.config, "DEFAULT_USER", "default")
+
+        cache_key = (bot_id, user_id)
+
+        if cache_key not in self._memory_clients:
             try:
-                from ..memory.postgresql import PostgreSQLMemoryBackend
-                self._memory_backends[bot_id] = PostgreSQLMemoryBackend(
+                from ..memory_server.client import get_memory_client
+                self._memory_clients[cache_key] = get_memory_client(
                     config=self.config,
                     bot_id=bot_id,
+                    user_id=user_id,
+                    server_url=getattr(self.config, "MEMORY_SERVER_URL", None),
                 )
-                log.memory_operation("backend_init", bot_id, details="PostgreSQL connected")
+                log.memory_operation("client_init", bot_id, details="MemoryClient created")
             except Exception as e:
-                log.warning(f"Memory backend unavailable for {bot_id}: {e}")
-                self._memory_backends[bot_id] = None
-        return self._memory_backends.get(bot_id)
+                log.warning(f"Memory client unavailable for {bot_id}: {e}")
+                self._memory_clients[cache_key] = None
+        return self._memory_clients.get(cache_key)
     
     def _get_ask_llm(self, model_alias: str, bot_id: str, user_id: str, local_mode: bool = False):
         """Get or create an AskLLM instance with caching."""
-        from ..core import AskLLM
+        from .core import ServiceAskLLM
         
         cache_key = (model_alias, bot_id, user_id)
         
@@ -313,11 +517,11 @@ class BackgroundService:
         load_start = time.time()
         
         try:
-            # Create a copy of config for each AskLLM instance
-            # This is necessary because AskLLM modifies config.SYSTEM_MESSAGE
+            # Create a copy of config for each ServiceAskLLM instance
+            # This is necessary because it modifies config.SYSTEM_MESSAGE
             # based on the bot's system prompt
             instance_config = self.config.model_copy(deep=True)
-            ask_llm = AskLLM(
+            ask_llm = ServiceAskLLM(
                 resolved_model_alias=model_alias,
                 config=instance_config,
                 local_mode=local_mode,
@@ -329,9 +533,7 @@ class BackgroundService:
             # Also cache the client for future reuse by extraction tasks
             if model_alias not in self._client_cache:
                 self._client_cache[model_alias] = ask_llm.client
-            
-            load_time_ms = (time.time() - load_start) * 1000
-            log.model_loaded(model_alias, model_type, load_time_ms)
+            # Note: ServiceAskLLM already logs model_loaded, don't duplicate
             
         except Exception as e:
             log.model_error(model_alias, str(e))
@@ -619,8 +821,24 @@ class BackgroundService:
                 # Track when first token arrives
                 timing_holder[0] = time.time()
                 
-                # Use the client's stream_raw method for raw text chunks
-                for chunk in ask_llm.client.stream_raw(messages):
+                # Choose streaming method based on whether bot uses tools
+                if ask_llm.bot.uses_tools and ask_llm.memory:
+                    from ..tools import stream_with_tools
+                    log.debug("Using stream_with_tools for tool-enabled bot")
+                    
+                    def stream_fn(msgs):
+                        return ask_llm.client.stream_raw(msgs)
+                    
+                    stream_iter = stream_with_tools(
+                        messages=messages,
+                        stream_fn=stream_fn,
+                        memory_client=ask_llm.memory,
+                    )
+                else:
+                    stream_iter = ask_llm.client.stream_raw(messages)
+                
+                # Stream chunks to queue
+                for chunk in stream_iter:
                     # Check for cancellation - new request came in
                     if cancel_event.is_set():
                         log.info("Generation cancelled - newer request received")
@@ -816,27 +1034,30 @@ class BackgroundService:
         if not facts:
             return {"facts_extracted": 0, "facts_stored": 0, "llm_used": use_llm}
         
-        memory_backend = self.get_memory_backend(bot_id)
+        memory_client = self.get_memory_client(bot_id)
         stored_count = 0
         
-        if memory_backend:
-            min_importance = getattr(self.config, 'MEMORY_EXTRACTION_MIN_IMPORTANCE', 0.3)
+        if memory_client:
+                    min_importance = getattr(self.config, "MEMORY_EXTRACTION_MIN_IMPORTANCE", 0.3)
+                    profile_enabled = getattr(self.config, "MEMORY_PROFILE_ATTRIBUTE_ENABLED", True)
             
             for fact in facts:
                 if fact.importance >= min_importance:
                     try:
-                        memory_backend.add_memory(
-                            memory_id=str(uuid.uuid4()),
+                        memory_client.add_memory(
                             content=fact.content,
                             tags=fact.tags,
                             importance=fact.importance,
                             source_message_ids=fact.source_message_ids,
-                            intent=fact.meaning.intent if fact.meaning else None,
-                            stakes=fact.meaning.stakes if fact.meaning else None,
-                            emotional_charge=fact.meaning.emotional_charge if fact.meaning else None,
-                            recurrence_keywords=fact.meaning.recurrence_keywords if fact.meaning else None,
                         )
                         stored_count += 1
+                                if profile_enabled:
+                                    from ..memory_server.extraction import extract_profile_attributes_from_fact
+                                    extract_profile_attributes_from_fact(
+                                        fact=fact,
+                                        user_id=task.user_id,
+                                        config=self.config,
+                                    )
                     except Exception as e:
                         log.warning(f"Failed to store memory: {e}")
         
@@ -854,24 +1075,21 @@ class BackgroundService:
         return {"embeddings_generated": 0, "reason": "Not yet implemented"}
 
     async def _process_meaning_update(self, task: Task) -> dict:
-        """Process a meaning update task."""
-        from ..memory.maintenance import update_memory_meaning
-
+        """Process a meaning update task (via MCP tools)."""
         bot_id = task.bot_id
         payload = task.payload
         memory_id = payload.get("memory_id")
         if not memory_id:
             return {"updated": False, "reason": "No memory_id provided"}
 
-        memory_backend = self.get_memory_backend(bot_id)
-        if not memory_backend:
-            return {"updated": False, "reason": "Memory backend unavailable"}
+        memory_client = self.get_memory_client(bot_id)
+        if not memory_client:
+            return {"updated": False, "reason": "Memory client unavailable"}
 
         loop = asyncio.get_event_loop()
         success = await loop.run_in_executor(
             None,
-            lambda: update_memory_meaning(
-                backend=memory_backend,
+            lambda: memory_client.update_memory_meaning(
                 memory_id=memory_id,
                 intent=payload.get("intent"),
                 stakes=payload.get("stakes"),
@@ -880,7 +1098,7 @@ class BackgroundService:
                 updated_tags=payload.get("updated_tags"),
             ),
         )
-        return {"updated": success, "memory_id": memory_id}
+        return {"updated": bool(success), "memory_id": memory_id}
 
     async def _process_maintenance(self, task: Task) -> dict:
         """Process a unified memory maintenance task.
@@ -888,35 +1106,17 @@ class BackgroundService:
         Uses a cached LLM client if available, otherwise runs without LLM.
         Will NOT load a new model to avoid VRAM conflicts.
         """
-        from ..memory.maintenance import MemoryMaintenance
-
         bot_id = task.bot_id
         payload = task.payload
 
-        memory_backend = self.get_memory_backend(bot_id)
-        if not memory_backend:
-            return {"error": "Memory backend unavailable"}
-
-        # Try to get a cached LLM client - do NOT load a new model
-        llm_client = None
-        if self._client_cache:
-            # Use any available cached client
-            model_to_use = next(iter(self._client_cache.keys()))
-            llm_client = self._client_cache[model_to_use]
-            log.debug(f"Using cached client '{model_to_use}' for maintenance")
-        else:
-            log.debug("No cached LLM client available - running maintenance without LLM")
-
-        maint = MemoryMaintenance(
-            backend=memory_backend,
-            llm_client=llm_client,
-            config=self.config,
-        )
+        memory_client = self.get_memory_client(bot_id)
+        if not memory_client:
+            return {"error": "Memory client unavailable"}
 
         loop = asyncio.get_event_loop()
         result = await loop.run_in_executor(
             None,
-            lambda: maint.run(
+            lambda: memory_client.run_maintenance(
                 run_consolidation=payload.get("run_consolidation", True),
                 run_recurrence_detection=payload.get("run_recurrence_detection", True),
                 run_decay_pruning=payload.get("run_decay_pruning", False),
@@ -924,7 +1124,7 @@ class BackgroundService:
                 dry_run=payload.get("dry_run", False),
             ),
         )
-        return result.to_dict()
+        return result
     
     def submit_task(self, task: Task) -> str:
         """Submit a task to the processing queue."""
@@ -1043,6 +1243,11 @@ async def lifespan(app):
     
     # Startup
     config = Config()
+
+    # Prefer MCP tool-based memory retrieval for llm-service.
+    # This ensures memory retrieval happens via MCP tools and can be logged clearly.
+    _ensure_memory_mcp_server(config)
+
     _service = BackgroundService(config)
     _service.start_worker()
     
@@ -1053,6 +1258,12 @@ async def lifespan(app):
         port=config.SERVICE_PORT,
         models=_service._available_models,
         default_model=_service._default_model,
+    )
+
+    log.info(
+        "Memory mode: %s (%s)",
+        "mcp" if getattr(config, "MEMORY_SERVER_URL", None) else "embedded",
+        getattr(config, "MEMORY_SERVER_URL", ""),
     )
     
     yield
@@ -1193,6 +1404,528 @@ try:
             )
         else:
             return TaskStatusResponse(task_id=task_id, status="pending")
+
+    # -------------------------------------------------------------------------
+    # History Endpoints
+    # -------------------------------------------------------------------------
+
+    @app.get("/v1/history", response_model=HistoryResponse, tags=["History"])
+    async def get_history(
+        bot_id: str = Query(None, description="Bot ID (uses default if not specified)"),
+        user_id: str = Query("default", description="User ID"),
+        limit: int = Query(50, description="Maximum number of messages to return"),
+    ):
+        """Get conversation history for a bot."""
+        service = get_service()
+        
+        effective_bot_id = bot_id or service._default_bot
+        
+        try:
+            # Get or create an AskLLM instance to access history
+            # Use a dummy model since we only need history access
+            model_alias = list(service._available_models)[0] if service._available_models else None
+            if not model_alias:
+                raise HTTPException(status_code=500, detail="No models available")
+            
+            ask_llm = service._get_ask_llm(model_alias, effective_bot_id, user_id)
+            
+            # Get messages from history manager
+            messages = ask_llm.history_manager.messages
+            
+            # Apply limit (from most recent)
+            if limit > 0 and len(messages) > limit:
+                messages = messages[-limit:]
+            
+            history_messages = [
+                HistoryMessage(
+                    role=msg.role,
+                    content=msg.content,
+                    timestamp=msg.timestamp
+                )
+                for msg in messages
+                if msg.role != "system"  # Don't include system messages
+            ]
+            
+            return HistoryResponse(
+                bot_id=effective_bot_id,
+                messages=history_messages,
+                total_count=len(history_messages)
+            )
+        except Exception as e:
+            log.error(f"Failed to get history: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.delete("/v1/history", response_model=HistoryClearResponse, tags=["History"])
+    async def clear_history(
+        bot_id: str = Query(None, description="Bot ID (uses default if not specified)"),
+        user_id: str = Query("default", description="User ID"),
+    ):
+        """Clear conversation history for a bot."""
+        service = get_service()
+        
+        effective_bot_id = bot_id or service._default_bot
+        
+        try:
+            model_alias = list(service._available_models)[0] if service._available_models else None
+            if not model_alias:
+                raise HTTPException(status_code=500, detail="No models available")
+            
+            ask_llm = service._get_ask_llm(model_alias, effective_bot_id, user_id)
+            ask_llm.history_manager.clear_history()
+            
+            # Also remove from cache to force fresh state
+            cache_key = (model_alias, effective_bot_id, user_id)
+            if cache_key in service._ask_llm_cache:
+                del service._ask_llm_cache[cache_key]
+            
+            return HistoryClearResponse(
+                success=True,
+                message=f"History cleared for bot '{effective_bot_id}'"
+            )
+        except Exception as e:
+            log.error(f"Failed to clear history: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    # -------------------------------------------------------------------------
+    # Memory Management Endpoints
+    # -------------------------------------------------------------------------
+
+    @app.get("/v1/memory/stats", response_model=MemoryStatsResponse, tags=["Memory"])
+    async def get_memory_stats(
+        bot_id: str = Query(None, description="Bot ID (uses default if not specified)"),
+    ):
+        """Get memory statistics for a bot."""
+        service = get_service()
+        effective_bot_id = bot_id or service._default_bot
+        
+        try:
+            client = service.get_memory_client(effective_bot_id)
+            if not client:
+                raise HTTPException(status_code=503, detail="Memory service unavailable")
+            stats = client.stats()
+            return MemoryStatsResponse(
+                bot_id=effective_bot_id,
+                messages=stats.get("messages", {}),
+                memories=stats.get("memories", {})
+            )
+        except Exception as e:
+            log.error(f"Failed to get memory stats: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.post("/v1/memory/search", response_model=MemorySearchResponse, tags=["Memory"])
+    async def search_memory(request: MemorySearchRequest):
+        """Search memories."""
+        service = get_service()
+        effective_bot_id = request.bot_id or service._default_bot
+        
+        try:
+            client = service.get_memory_client(effective_bot_id)
+            if not client:
+                raise HTTPException(status_code=503, detail="Memory service unavailable")
+            
+            results = []
+            if request.method in ("embedding", "all"):
+                # Semantic search
+                memories = client.search(
+                    request.query,
+                    n_results=request.limit,
+                    min_relevance=request.min_importance,
+                )
+                for mem in memories:
+                    results.append(MemoryItem(
+                        id=str(getattr(mem, "id", "")),
+                        content=str(getattr(mem, "content", "")),
+                        importance=float(getattr(mem, "importance", 0.5)),
+                        relevance=getattr(mem, "relevance", None),
+                        tags=list(getattr(mem, "tags", []) or []),
+                        created_at=getattr(mem, "created_at", None),
+                        access_count=0,
+                    ))
+            elif request.method == "high-importance":
+                # Get high importance memories
+                memories = client.list_memories(
+                    limit=request.limit,
+                    min_importance=request.min_importance or 0.7,
+                )
+                for mem in memories:
+                    results.append(MemoryItem(
+                        id=str(mem.get("id", "")),
+                        content=mem.get("content", ""),
+                        importance=mem.get("importance", 0.5),
+                        tags=mem.get("tags", []),
+                        created_at=mem.get("created_at"),
+                    ))
+            
+            return MemorySearchResponse(
+                bot_id=effective_bot_id,
+                method=request.method,
+                query=request.query,
+                results=results,
+                total_count=len(results)
+            )
+        except Exception as e:
+            log.error(f"Failed to search memory: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.get("/v1/memory", response_model=MemorySearchResponse, tags=["Memory"])
+    async def list_memories(
+        bot_id: str = Query(None, description="Bot ID"),
+        limit: int = Query(20, description="Max results"),
+    ):
+        """List all memories for a bot (ordered by importance)."""
+        service = get_service()
+        effective_bot_id = bot_id or service._default_bot
+        
+        try:
+            client = service.get_memory_client(effective_bot_id)
+            if not client:
+                raise HTTPException(status_code=503, detail="Memory service unavailable")
+
+            memories = client.list_memories(limit=limit, min_importance=0.0)
+            
+            results = [
+                MemoryItem(
+                    id=str(mem.get("id", "")),
+                    content=mem.get("content", ""),
+                    importance=mem.get("importance", 0.5),
+                    tags=mem.get("tags", []),
+                    created_at=mem.get("created_at"),
+                    access_count=mem.get("access_count", 0),
+                )
+                for mem in memories
+            ]
+            
+            return MemorySearchResponse(
+                bot_id=effective_bot_id,
+                method="list",
+                query="",
+                results=results,
+                total_count=len(results)
+            )
+        except Exception as e:
+            log.error(f"Failed to list memories: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.delete("/v1/memory/{memory_id}", response_model=MemoryDeleteResponse, tags=["Memory"])
+    async def delete_memory(
+        memory_id: str,
+        bot_id: str = Query(None, description="Bot ID"),
+    ):
+        """Delete a specific memory by ID."""
+        service = get_service()
+        effective_bot_id = bot_id or service._default_bot
+        
+        try:
+            client = service.get_memory_client(effective_bot_id)
+            if not client:
+                raise HTTPException(status_code=503, detail="Memory service unavailable")
+
+            # The memory_id might be a prefix - try to find the full ID
+            success = client.delete_memory(memory_id)
+            
+            if success:
+                return MemoryDeleteResponse(
+                    success=True,
+                    memory_id=memory_id,
+                    message=f"Memory '{memory_id}' deleted"
+                )
+            else:
+                raise HTTPException(status_code=404, detail=f"Memory '{memory_id}' not found")
+        except HTTPException:
+            raise
+        except Exception as e:
+            log.error(f"Failed to delete memory: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.post("/v1/memory/forget", response_model=MemoryForgetResponse, tags=["Memory"])
+    async def forget_messages(
+        request: MemoryForgetRequest,
+        bot_id: str = Query(None, description="Bot ID"),
+    ):
+        """Forget recent messages (soft delete)."""
+        service = get_service()
+        effective_bot_id = bot_id or service._default_bot
+        
+        try:
+            client = service.get_memory_client(effective_bot_id)
+            if not client:
+                raise HTTPException(status_code=503, detail="Memory service unavailable")
+
+            if request.count:
+                result = client.forget_recent_messages(request.count)
+            elif request.minutes:
+                result = client.forget_messages_since_minutes(request.minutes)
+            else:
+                raise HTTPException(status_code=400, detail="Must specify count or minutes")
+
+            messages_ignored = int(result.get("messages_ignored", 0))
+            memories_deleted = int(result.get("memories_deleted", 0))
+            
+            return MemoryForgetResponse(
+                success=True,
+                messages_ignored=messages_ignored,
+                memories_deleted=memories_deleted,
+                message=f"Ignored {messages_ignored} messages, deleted {memories_deleted} memories"
+            )
+        except HTTPException:
+            raise
+        except Exception as e:
+            log.error(f"Failed to forget messages: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.post("/v1/memory/restore", response_model=MemoryRestoreResponse, tags=["Memory"])
+    async def restore_messages(
+        bot_id: str = Query(None, description="Bot ID"),
+    ):
+        """Restore ignored messages."""
+        service = get_service()
+        effective_bot_id = bot_id or service._default_bot
+        
+        try:
+            client = service.get_memory_client(effective_bot_id)
+            if not client:
+                raise HTTPException(status_code=503, detail="Memory service unavailable")
+
+            restored = client.restore_ignored_messages()
+            
+            return MemoryRestoreResponse(
+                success=True,
+                messages_restored=restored,
+                message=f"Restored {restored} messages"
+            )
+        except Exception as e:
+            log.error(f"Failed to restore messages: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.get("/v1/memory/preview/recent", response_model=MessagesPreviewResponse, tags=["Memory"])
+    async def preview_recent_messages(
+        count: int = Query(10, description="Number of recent messages to preview"),
+        bot_id: str = Query(None, description="Bot ID"),
+    ):
+        """Preview recent messages before forgetting."""
+        service = get_service()
+        effective_bot_id = bot_id or service._default_bot
+        
+        try:
+            client = service.get_memory_client(effective_bot_id)
+            if not client:
+                raise HTTPException(status_code=503, detail="Memory service unavailable")
+
+            messages = client.preview_recent_messages(count)
+            
+            return MessagesPreviewResponse(
+                bot_id=effective_bot_id,
+                messages=[
+                    MessagePreview(
+                        id=msg["id"],
+                        role=msg.get("role", "?"),
+                        content=msg.get("content", ""),
+                        timestamp=msg.get("timestamp"),
+                    )
+                    for msg in messages
+                ],
+                total_count=len(messages),
+            )
+        except Exception as e:
+            log.error(f"Failed to preview messages: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.get("/v1/memory/preview/minutes", response_model=MessagesPreviewResponse, tags=["Memory"])
+    async def preview_messages_since_minutes(
+        minutes: int = Query(..., description="Number of minutes to look back"),
+        bot_id: str = Query(None, description="Bot ID"),
+    ):
+        """Preview messages from last N minutes before forgetting."""
+        service = get_service()
+        effective_bot_id = bot_id or service._default_bot
+        
+        try:
+            client = service.get_memory_client(effective_bot_id)
+            if not client:
+                raise HTTPException(status_code=503, detail="Memory service unavailable")
+
+            messages = client.preview_messages_since_minutes(minutes)
+            
+            return MessagesPreviewResponse(
+                bot_id=effective_bot_id,
+                messages=[
+                    MessagePreview(
+                        id=msg["id"],
+                        role=msg.get("role", "?"),
+                        content=msg.get("content", ""),
+                        timestamp=msg.get("timestamp"),
+                    )
+                    for msg in messages
+                ],
+                total_count=len(messages),
+            )
+        except Exception as e:
+            log.error(f"Failed to preview messages: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.get("/v1/memory/preview/ignored", response_model=MessagesPreviewResponse, tags=["Memory"])
+    async def preview_ignored_messages(
+        bot_id: str = Query(None, description="Bot ID"),
+    ):
+        """Preview ignored messages before restoring."""
+        service = get_service()
+        effective_bot_id = bot_id or service._default_bot
+        
+        try:
+            client = service.get_memory_client(effective_bot_id)
+            if not client:
+                raise HTTPException(status_code=503, detail="Memory service unavailable")
+
+            messages = client.preview_ignored_messages()
+            
+            return MessagesPreviewResponse(
+                bot_id=effective_bot_id,
+                messages=[
+                    MessagePreview(
+                        id=msg["id"],
+                        role=msg.get("role", "?"),
+                        content=msg.get("content", ""),
+                        timestamp=msg.get("timestamp"),
+                    )
+                    for msg in messages
+                ],
+                total_count=len(messages),
+            )
+        except Exception as e:
+            log.error(f"Failed to preview ignored messages: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.post("/v1/memory/regenerate-embeddings", response_model=RegenerateEmbeddingsResponse, tags=["Memory"])
+    async def regenerate_embeddings(
+        bot_id: str = Query(None, description="Bot ID"),
+    ):
+        """Regenerate embeddings for all memories."""
+        service = get_service()
+        effective_bot_id = bot_id or service._default_bot
+        
+        try:
+            client = service.get_memory_client(effective_bot_id)
+            if not client:
+                raise HTTPException(status_code=503, detail="Memory service unavailable")
+
+            result = client.regenerate_embeddings()
+            
+            if "error" in result:
+                return RegenerateEmbeddingsResponse(
+                    success=False,
+                    updated=0,
+                    failed=0,
+                    message=result["error"]
+                )
+            
+            return RegenerateEmbeddingsResponse(
+                success=True,
+                updated=result.get("updated", 0),
+                failed=result.get("failed", 0),
+                embedding_dim=result.get("embedding_dim"),
+                message=f"Updated {result.get('updated', 0)} embeddings"
+            )
+        except Exception as e:
+            log.error(f"Failed to regenerate embeddings: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.post("/v1/memory/consolidate", response_model=ConsolidateResponse, tags=["Memory"])
+    async def consolidate_memories(
+        request: ConsolidateRequest,
+        bot_id: str = Query(None, description="Bot ID"),
+    ):
+        """Find and merge redundant memories."""
+        service = get_service()
+        effective_bot_id = bot_id or service._default_bot
+        
+        try:
+            client = service.get_memory_client(effective_bot_id)
+            if not client:
+                raise HTTPException(status_code=503, detail="Memory service unavailable")
+
+            result = client.consolidate_memories(
+                dry_run=request.dry_run,
+                similarity_threshold=request.similarity_threshold,
+            )
+            
+            return ConsolidateResponse(
+                success=True,
+                dry_run=bool(result.get("dry_run", request.dry_run)),
+                clusters_found=int(result.get("clusters_found", 0)),
+                clusters_merged=int(result.get("clusters_merged", 0)),
+                memories_consolidated=int(result.get("memories_consolidated", 0)),
+                new_memories_created=int(result.get("new_memories_created", 0)),
+                errors=list(result.get("errors", [])),
+                message=f"{'Would merge' if request.dry_run else 'Merged'} {int(result.get('clusters_merged', 0))} clusters",
+            )
+        except Exception as e:
+            log.error(f"Failed to consolidate memories: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.post("/v1/llm/complete", response_model=RawCompletionResponse, tags=["LLM"])
+    async def raw_completion(request: RawCompletionRequest):
+        """Raw LLM completion using the currently loaded model.
+        
+        Use this for utility tasks like:
+        - Memory consolidation (merging similar memories)
+        - Summarization
+        - Classification
+        - Any task that needs LLM but not the full chat pipeline
+        
+        This endpoint uses the already-loaded model in the service.
+        It will NOT load a new model - if no model is loaded, it returns 503.
+        Only one LLM model can be loaded at a time (embedding model is separate).
+        """
+        import time
+        service = get_service()
+        
+        # Check if we have any loaded client
+        if not service._client_cache:
+            raise HTTPException(
+                status_code=503, 
+                detail="No model loaded. Make a chat request first to load a model."
+            )
+        
+        # Use the currently loaded model (there should only be one)
+        loaded_models = list(service._client_cache.keys())
+        model_alias = loaded_models[0]  # Use whatever is loaded
+        
+        # If caller specified a model, warn if it doesn't match
+        if request.model and request.model != model_alias:
+            log.debug(f"Requested model '{request.model}' but using loaded model '{model_alias}'")
+        
+        try:
+            start = time.perf_counter()
+            client = service._client_cache[model_alias]
+            
+            # Build simple messages
+            messages = []
+            if request.system:
+                messages.append({"role": "system", "content": request.system})
+            messages.append({"role": "user", "content": request.prompt})
+            
+            # Query the model directly
+            response = client.query(
+                messages=messages,
+                max_tokens=request.max_tokens,
+                temperature=request.temperature,
+            )
+            
+            elapsed_ms = (time.perf_counter() - start) * 1000
+            
+            # Estimate tokens
+            tokens = len(response) // 4 if response else 0
+            
+            return RawCompletionResponse(
+                content=response,
+                model=model_alias,
+                tokens=tokens,
+                elapsed_ms=elapsed_ms,
+            )
+            
+        except Exception as e:
+            log.error(f"Raw completion failed: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
 
 except ImportError:
     # FastAPI not installed - create stub

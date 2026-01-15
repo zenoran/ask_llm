@@ -509,7 +509,7 @@ class PostgreSQLMemoryBackend(MemoryBackend):
         if embedding is None:
             try:
                 from .embeddings import generate_embedding
-                embedding = generate_embedding(content, self.embedding_model)
+                embedding = generate_embedding(content, self.embedding_model, verbose=getattr(self.config, 'VERBOSE', False))
                 if embedding:
                     logger.debug(f"Generated embedding for memory: {content[:50]}...")
             except Exception as e:
@@ -519,7 +519,7 @@ class PostgreSQLMemoryBackend(MemoryBackend):
                 from .embeddings import generate_embedding
                 meaning_text_parts = [intent or "", stakes or "", "emotional" if emotional_charge else "", " ".join(recurrence_keywords or [])]
                 meaning_text = " | ".join([p for p in meaning_text_parts if p])
-                meaning_embedding = generate_embedding(meaning_text or content, self.embedding_model)
+                meaning_embedding = generate_embedding(meaning_text or content, self.embedding_model, verbose=getattr(self.config, 'VERBOSE', False))
             except Exception as e:
                 logger.debug(f"Could not generate meaning embedding: {e}")
         if meaning_embedding:
@@ -668,7 +668,7 @@ class PostgreSQLMemoryBackend(MemoryBackend):
                 conn.commit()
                 
                 if deleted_ids:
-                    logger.info(f"Deleted {len(deleted_ids)} memories associated with forgotten messages")
+                    logger.debug(f"Deleted {len(deleted_ids)} memories associated with forgotten messages")
                 return len(deleted_ids)
             except Exception as e:
                 conn.rollback()
@@ -1171,7 +1171,7 @@ class PostgreSQLMemoryBackend(MemoryBackend):
         if self.embedding_model:
             try:
                 from .embeddings import generate_embedding
-                query_embedding = generate_embedding(query, self.embedding_model)
+                query_embedding = generate_embedding(query, self.embedding_model, verbose=getattr(self.config, 'VERBOSE', False))
                 if query_embedding:
                     embedding_results = self.search_memories_by_embedding(query_embedding, n_results, min_importance=min_relevance)
                     if embedding_results:
@@ -1265,7 +1265,7 @@ class PostgreSQLMemoryBackend(MemoryBackend):
                 stmt = delete(self.memories_table)
                 session.execute(stmt)
                 session.commit()
-                logger.info(f"Cleared all memories from {self._memories_table_name}")
+                logger.debug(f"Cleared all memories from {self._memories_table_name}")
                 return True
             except Exception as e:
                 session.rollback()
@@ -1319,7 +1319,7 @@ class PostgreSQLMemoryBackend(MemoryBackend):
                 conn.execute(delete_sql, {"ids": ids_to_forget})
                 conn.commit()
                 
-                logger.info(f"Forgot {len(ids_to_forget)} messages")
+                logger.debug(f"Forgot {len(ids_to_forget)} messages")
                 return len(ids_to_forget)
             except Exception as e:
                 conn.rollback()
@@ -1374,7 +1374,7 @@ class PostgreSQLMemoryBackend(MemoryBackend):
                 conn.execute(delete_sql, {"ids": ids_to_forget})
                 conn.commit()
                 
-                logger.info(f"Forgot {len(ids_to_forget)} messages from last {minutes} minutes")
+                logger.debug(f"Forgot {len(ids_to_forget)} messages from last {minutes} minutes")
                 return len(ids_to_forget)
             except Exception as e:
                 conn.rollback()
@@ -1427,7 +1427,7 @@ class PostgreSQLMemoryBackend(MemoryBackend):
                 conn.execute(delete_sql, {"ids": ids_to_restore})
                 conn.commit()
                 
-                logger.info(f"Restored {len(ids_to_restore)} forgotten messages")
+                logger.debug(f"Restored {len(ids_to_restore)} forgotten messages")
                 return len(ids_to_restore)
             except Exception as e:
                 conn.rollback()
@@ -1626,7 +1626,7 @@ class PostgreSQLMemoryBackend(MemoryBackend):
                 if result:
                     current_dim = result[0]
                     if current_dim != actual_dim and current_dim > 0:
-                        logger.info(f"Migrating embedding dimension from {current_dim} to {actual_dim}")
+                        logger.debug(f"Migrating embedding dimension from {current_dim} to {actual_dim}")
                         # Drop index, alter column, recreate index
                         conn.execute(text(f"DROP INDEX IF EXISTS idx_{self._memories_table_name}_embedding"))
                         conn.execute(text(f"ALTER TABLE {self._memories_table_name} ALTER COLUMN embedding TYPE vector({actual_dim})"))
@@ -1683,7 +1683,7 @@ class PostgreSQLMemoryBackend(MemoryBackend):
                         failed += 1
                 
                 conn.commit()
-                logger.info(f"Regenerated embeddings: {updated} updated, {failed} failed")
+                logger.debug(f"Regenerated embeddings: {updated} updated, {failed} failed")
         
         return {"updated": updated, "failed": failed, "embedding_dim": actual_dim}
     

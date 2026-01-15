@@ -29,6 +29,7 @@ class Bot:
     requires_memory: bool = True  # Whether this bot needs database/memory persistence
     voice_optimized: bool = False  # Whether output is optimized for TTS
     default_model: str | None = None  # Default model alias for this bot
+    uses_tools: bool = False  # Whether this bot can use tools (memory search, etc.)
     
     def __post_init__(self):
         # Ensure slug is lowercase and valid
@@ -63,6 +64,7 @@ def _load_bots_from_yaml(yaml_path: Path = BOTS_YAML_PATH) -> None:
                 requires_memory=bot_data.get("requires_memory", True),
                 voice_optimized=bot_data.get("voice_optimized", False),
                 default_model=bot_data.get("default_model"),
+                uses_tools=bot_data.get("uses_tools", False),
             )
         
         # Load defaults

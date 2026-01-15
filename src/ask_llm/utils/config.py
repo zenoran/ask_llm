@@ -66,6 +66,13 @@ class Config(BaseSettings):
     MEMORY_MAX_TOKEN_PERCENT: int = Field(default=30, description="Maximum percentage of context window to use for memories (Set via ASK_LLM_MEMORY_MAX_TOKEN_PERCENT)")
     MEMORY_DEDUP_SIMILARITY: float = Field(default=0.85, description="Similarity threshold (0.0-1.0) for fuzzy deduplication of memories against history (Set via ASK_LLM_MEMORY_DEDUP_SIMILARITY)")
 
+    # Optional MCP memory server (HTTP JSON-RPC). If set, memory operations use server mode
+    # and you will see tool calls like `tools/search_memories` in logs.
+    MEMORY_SERVER_URL: Optional[str] = Field(
+        default=None,
+        description="Optional MCP memory server base URL (Set via ASK_LLM_MEMORY_SERVER_URL)",
+    )
+
     # --- PostgreSQL Memory Backend Settings --- #
     POSTGRES_HOST: str = Field(default="postgres.home", description="PostgreSQL server hostname (Set via ASK_LLM_POSTGRES_HOST)")
     POSTGRES_PORT: int = Field(default=5432, description="PostgreSQL server port (Set via ASK_LLM_POSTGRES_PORT)")
@@ -76,6 +83,8 @@ class Config(BaseSettings):
     # --- Memory Extraction Settings --- #
     MEMORY_EXTRACTION_ENABLED: bool = Field(default=True, description="Enable LLM-based memory extraction from conversations")
     MEMORY_EXTRACTION_MIN_IMPORTANCE: float = Field(default=0.3, description="Minimum importance score for extracted memories to be stored")
+    MEMORY_PROFILE_ATTRIBUTE_ENABLED: bool = Field(default=True, description="Create profile attributes from extracted memories")
+    MEMORY_PROFILE_ATTRIBUTE_MIN_IMPORTANCE: float = Field(default=0.6, description="Minimum importance for extracted profile attributes")
     MEMORY_EMBEDDING_DIM: int = Field(default=384, description="Dimension of embedding vectors for semantic search (384 for all-MiniLM-L6-v2)")
     MEMORY_EMBEDDING_MODEL: str = Field(default="all-MiniLM-L6-v2", description="Sentence-transformers model for local embeddings")
     EXTRACTION_MODEL: Optional[str] = Field(default=None, description="Model alias to use for memory extraction (defaults to first available)")
@@ -106,6 +115,7 @@ class Config(BaseSettings):
 
     # --- UI/Interaction Settings --- #
     VERBOSE: bool = Field(default=False, description="Verbose mode for debugging")
+    DEBUG: bool = Field(default=False, description="Enable raw debug logging output")
     PLAIN_OUTPUT: bool = Field(default=False, description="Use plain text output without Rich formatting")
     NO_STREAM: bool = Field(default=False, description="Disable streaming output")
     INTERACTIVE_MODE: bool = Field(default=False, description="Whether the app is in interactive mode (set based on args)")

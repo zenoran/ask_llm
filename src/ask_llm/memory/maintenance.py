@@ -181,7 +181,7 @@ class MemoryMaintenance:
                 if mem_keywords & recurring_keywords:
                     if "recurring" not in tags:
                         if dry_run:
-                            logger.info(f"[DRY RUN] Would tag {mem_id} as recurring")
+                            logger.debug(f"[DRY RUN] Would tag {mem_id} as recurring")
                         else:
                             new_tags = tags + ["recurring"]
                             update_sql = text(f"""
@@ -226,7 +226,7 @@ class MemoryMaintenance:
 
             if to_archive:
                 if dry_run:
-                    logger.info(f"[DRY RUN] Would delete {len(to_archive)} decayed memories")
+                    logger.debug(f"[DRY RUN] Would delete {len(to_archive)} decayed memories")
                 else:
                     # Delete stale low-importance memories
                     delete_sql = text(f"""
@@ -491,7 +491,7 @@ Respond with ONLY the intent phrase, nothing else."""
         deleted_rows = conn.execute(orphan_sql).fetchall()
         deleted = len(deleted_rows)
         if deleted > 0:
-            logger.info(f"Deleted {deleted} orphaned memories (source messages no longer exist)")
+            logger.debug(f"Deleted {deleted} orphaned memories (source messages no longer exist)")
         
         # Fetch all memories missing intent (with or without source_message_ids)
         sql = text(f"""

@@ -128,7 +128,7 @@ class UserProfileManager:
             session.add(profile)
             session.commit()
             session.refresh(profile)
-            logger.info(f"Created new user profile: {user_id}")
+            logger.debug(f"Created new user profile: {user_id}")
         
         return profile, True
     
@@ -155,7 +155,7 @@ class UserProfileManager:
                     session.add(profile)
                 
                 session.commit()
-                logger.info(f"Saved user profile: {profile.user_id}")
+                logger.debug(f"Saved user profile: {profile.user_id}")
                 return True
             except Exception as e:
                 session.rollback()
@@ -205,7 +205,7 @@ class UserProfileManager:
                 
                 profile.updated_at = datetime.utcnow()
                 session.commit()
-                logger.info(f"Updated user profile field {field_path} for {user_id}")
+                logger.debug(f"Updated user profile field {field_path} for {user_id}")
                 return True
             except Exception as e:
                 session.rollback()
@@ -248,7 +248,7 @@ class UserProfileManager:
                 if profile:
                     session.delete(profile)
                     session.commit()
-                    logger.info(f"Deleted user profile: {user_id}")
+                    logger.debug(f"Deleted user profile: {user_id}")
                     return True
                 return False
             except Exception as e:

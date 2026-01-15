@@ -1,75 +1,81 @@
+"""OpenAI-compatible API client.
+
+Supports OpenAI API and any OpenAI-compatible endpoint (llama.cpp server, vLLM, Ollama, etc.)
+"""
+
+from __future__ import annotations
+
 import json
 import os
 from openai import OpenAI, OpenAIError
-from typing import List, Iterator
+from typing import List, Iterator, Any
 from rich.json import JSON
 from rich.rule import Rule
 from ..clients.base import LLMClient
-from ..utils.config import Config # Keep for type hinting
+from ..utils.config import Config
 from ..models.message import Message
-import logging # Import logging
+import logging
 
 logger = logging.getLogger(__name__)
 
+
 class OpenAIClient(LLMClient):
-    """Client for OpenAI API"""
+    """Client for OpenAI API and OpenAI-compatible endpoints.
+    
+    Supports:
+    - OpenAI API (default)
+    - OpenAI-compatible endpoints (llama.cpp server, vLLM, Ollama, etc.)
+      via base_url parameter
+    """
     SUPPORTS_STREAMING = True
 
-    def __init__(self, model: str, config: Config):
-        super().__init__(model, config) # Pass config to base class
-        self.api_key = self._get_api_key()
-        if not self.api_key:
+    def __init__(self, model: str, config: Config, base_url: str | None = None, api_key: str | None = None):
+        """Initialize OpenAI client.
+        
+        Args:
+            model: Model name/ID
+            config: Application config
+            base_url: Optional custom API endpoint for OpenAI-compatible servers
+            api_key: Optional API key (defaults to OPENAI_API_KEY env var)
+        """
+        super().__init__(model, config)
+        self.base_url = base_url
+        self.api_key = api_key or self._get_api_key()
+        
+        # For custom endpoints, API key is optional (many local servers don't need it)
+        if not self.api_key and not base_url:
             raise ValueError("OpenAI API key not found. Set OPENAI_API_KEY environment variable.")
-        self.client = OpenAI(api_key=self.api_key)
+        
+        # Use dummy key for local servers if none provided
+        effective_key = self.api_key or "not-needed"
+        
+        if base_url:
+            self.client = OpenAI(api_key=effective_key, base_url=base_url)
+            logger.debug(f"OpenAI client using custom endpoint: {base_url}")
+        else:
+            self.client = OpenAI(api_key=effective_key)
 
     def _get_api_key(self) -> str | None:
         return os.getenv("OPENAI_API_KEY")
 
     def _model_supports_temperature_top_p(self) -> bool:
-        """Check if the model supports temperature and top_p parameters.
-        
-        Many newer models don't support custom temperature/top_p:
-        - ChatGPT models (*-chat-latest) 
-        - Search preview models
-        - Audio preview models
-        - o-series reasoning models (o1, o3, o4)
-        - Some gpt-5.x models
-        
-        See: https://platform.openai.com/docs/models
-        """
-        # Models/patterns that don't support temperature/top_p
+        """Check if the model supports temperature and top_p parameters."""
         unsupported_patterns = (
-            "-chat-latest",      # ChatGPT models (gpt-5-chat-latest, gpt-5.2-chat-latest)
-            "-search-preview",   # Search models
-            "-audio-preview",    # Audio models
+            "-chat-latest",
+            "-search-preview",
+            "-audio-preview",
         )
-        unsupported_prefixes = (
-            "o1",    # o1 reasoning models
-            "o3",    # o3 reasoning models  
-            "o4",    # o4 reasoning models
-        )
+        unsupported_prefixes = ("o1", "o3", "o4")
         
-        # Check patterns
         for pattern in unsupported_patterns:
             if pattern in self.model:
                 return False
-        
-        # Check prefixes
         if self.model.startswith(unsupported_prefixes):
             return False
-            
         return True
 
     def _model_requires_max_completion_tokens(self) -> bool:
-        """Check if the model requires max_completion_tokens instead of max_tokens.
-        
-        As of 2025, max_tokens is deprecated in favor of max_completion_tokens.
-        Only legacy models (gpt-3.5-turbo, gpt-4, gpt-4-turbo) still use max_tokens.
-        All newer models (gpt-4o, gpt-5.x, o-series, etc.) use max_completion_tokens.
-        
-        See: https://platform.openai.com/docs/api-reference/chat/create
-        """
-        # Models that still use the legacy max_tokens parameter
+        """Check if the model requires max_completion_tokens instead of max_tokens."""
         legacy_models = (
             "gpt-3.5-turbo",
             "gpt-4-turbo",
@@ -77,31 +83,21 @@ class OpenAIClient(LLMClient):
             "gpt-4-0613",
             "gpt-4-32k",
         )
-        # Check exact match or prefix match for legacy models
         if self.model in legacy_models or self.model == "gpt-4":
             return False
         if self.model.startswith(("gpt-3.5-", "gpt-4-turbo-", "gpt-4-32k-")):
             return False
-        # All other models use max_completion_tokens
         return True
 
-    # ---- Token parameter handling helpers ----
     _TOKEN_PARAM_CANDIDATES = ("max_tokens", "max_completion_tokens", "max_output_tokens")
 
-    def _likely_new_api_model(self) -> bool:
-        """Heuristic: some newer models use 'max_completion_tokens' (or 'max_output_tokens')."""
-        m = self.model.lower()
-        return (
-            m.startswith("o3") or m.startswith("o4") or
-            m in {"gpt-4o-search-preview", "gpt-4o-audio-preview"}
-        )
-
     def _initial_token_param_key(self) -> str:
-        # Prefer legacy 'max_tokens' unless the model looks like a newer family
-        return "max_completion_tokens" if self._likely_new_api_model() else "max_tokens"
+        m = self.model.lower()
+        if m.startswith("o3") or m.startswith("o4") or m in {"gpt-4o-search-preview", "gpt-4o-audio-preview"}:
+            return "max_completion_tokens"
+        return "max_tokens"
 
     def _set_token_param(self, payload: dict, key: str, value: int) -> dict:
-        # Remove any existing token keys and set the desired one
         for k in self._TOKEN_PARAM_CANDIDATES:
             payload.pop(k, None)
         payload[key] = value
@@ -115,12 +111,7 @@ class OpenAIClient(LLMClient):
         self.console.print(f"[dim]Params:[/dim] [italic]{token_info}, {temp_info}, {top_p_info}, stream={payload['stream']}[/italic]")
 
     def _chat_create_with_fallback(self, payload: dict):
-        """Call chat.completions.create with fallback across token param names.
-
-        Tries the current token key in payload first, then falls back to the other
-        known keys if OpenAI returns an unsupported parameter error.
-        """
-        # Build ordered list of keys to try, preferring what's already in payload
+        """Call chat.completions.create with fallback across token param names."""
         current_key = next((k for k in self._TOKEN_PARAM_CANDIDATES if k in payload), self._initial_token_param_key())
         keys_to_try = [current_key] + [k for k in self._TOKEN_PARAM_CANDIDATES if k != current_key]
 
@@ -133,14 +124,12 @@ class OpenAIClient(LLMClient):
                 return self.client.chat.completions.create(**try_payload)
             except OpenAIError as e:
                 msg = str(e).lower()
-                # If error suggests wrong token key, continue; else re-raise
                 if ("unsupported parameter" in msg and any(k in msg for k in ("max_tokens", "max_completion_tokens", "max_output_tokens"))) or (
                     "invalid_request_error" in msg and "token" in msg
                 ):
                     last_err = e
                     continue
-                # Temperature/top_p unsupported or unsupported value -> retry without them once
-                if ("temperature" in msg or "top_p" in msg) and ("unsupported" in msg or "does not support" in msg or "unsupported_value" in msg):
+                if ("temperature" in msg or "top_p" in msg) and ("unsupported" in msg or "does not support" in msg):
                     if not attempted_without_temp_top_p:
                         try_payload_no_temp = dict(try_payload)
                         try_payload_no_temp.pop('temperature', None)
@@ -149,11 +138,8 @@ class OpenAIClient(LLMClient):
                         try:
                             return self.client.chat.completions.create(**try_payload_no_temp)
                         except OpenAIError as e2:
-                            # If still token key issue, move to next token key; else record and break to next key
                             m2 = str(e2).lower()
-                            if ("unsupported parameter" in m2 and any(k in m2 for k in ("max_tokens", "max_completion_tokens", "max_output_tokens"))) or (
-                                "invalid_request_error" in m2 and "token" in m2
-                            ):
+                            if ("unsupported parameter" in m2 and any(k in m2 for k in ("max_tokens", "max_completion_tokens", "max_output_tokens"))):
                                 last_err = e2
                                 continue
                             last_err = e2
@@ -167,18 +153,12 @@ class OpenAIClient(LLMClient):
             except Exception as e:
                 last_err = e
                 break
-        # If we exhausted retries, raise the last error
         if last_err:
             raise last_err
-        # Should not reach here
         return self.client.chat.completions.create(**payload)
 
     def stream_raw(self, messages: List[Message], **kwargs) -> Iterator[str]:
-        """
-        Stream raw text chunks from OpenAI API without console formatting.
-        
-        Used by the API service for SSE streaming.
-        """
+        """Stream raw text chunks from OpenAI API without console formatting."""
         api_messages = self._prepare_api_messages(messages)
         payload = {
             "model": self.model,
@@ -203,17 +183,7 @@ class OpenAIClient(LLMClient):
             raise
 
     def query(self, messages: List[Message], plaintext_output: bool = False, stream: bool = True, **kwargs) -> str:
-        """Query OpenAI API with full message history, using streaming by default.
-
-        Args:
-            messages: List of Message objects.
-            plaintext_output: If True, return raw text.
-            stream: Whether to stream the response.
-            **kwargs: Additional arguments (ignored by this client).
-
-        Returns:
-            The model's response as a string.
-        """
+        """Query OpenAI API with full message history."""
         api_messages = self._prepare_api_messages(messages)
         should_stream = stream and not self.config.NO_STREAM
         payload = {
@@ -221,19 +191,17 @@ class OpenAIClient(LLMClient):
             "messages": api_messages,
             "stream": should_stream,
         }
-        # Set initial token parameter key
         self._set_token_param(payload, self._initial_token_param_key(), self.config.MAX_TOKENS)
         
-        # Use max_completion_tokens for newer models, max_tokens for older ones
         if self._model_requires_max_completion_tokens():
             payload["max_completion_tokens"] = self.config.MAX_TOKENS
         else:
             payload["max_tokens"] = self.config.MAX_TOKENS
         
-        # Only add temperature and top_p for models that support them
         if self._model_supports_temperature_top_p():
             payload["temperature"] = self.config.TEMPERATURE
             payload["top_p"] = self.config.TOP_P
+
         if self.config.VERBOSE:
             self.console.print(Rule("Querying OpenAI API", style="green"))
             self._print_verbose_params(payload)
@@ -243,7 +211,6 @@ class OpenAIClient(LLMClient):
                 self.console.print(JSON(payload_str))
             except TypeError as e:
                 logger.error(f"Could not serialize payload for Rich JSON printing: {e}")
-                self.console.print(f"[red]Error printing payload:[/red] {e}")
                 import pprint
                 self.console.print(pprint.pformat(payload))
             self.console.print(Rule(style="green"))
@@ -256,7 +223,7 @@ class OpenAIClient(LLMClient):
             response = self._get_full_response(api_messages, plaintext_output, payload)
 
         if self.config.VERBOSE:
-             self.console.print(Rule(style="green"))
+            self.console.print(Rule(style="green"))
 
         return response
 
@@ -268,12 +235,10 @@ class OpenAIClient(LLMClient):
         for msg in messages:
             api_msg = msg.to_api_format()
             if api_msg['role'] == 'system':
-                # Collect all system messages to merge
                 system_contents.append(api_msg['content'])
             else:
                 prepared.append(api_msg)
 
-        # Merge all system content into a single system message
         if system_contents:
             merged_system = "\n\n".join(system_contents)
             prepared.insert(0, {"role": "system", "content": merged_system})
@@ -285,7 +250,6 @@ class OpenAIClient(LLMClient):
     def _stream_response(self, api_messages: List[dict], plaintext_output: bool, payload: dict) -> str:
         """Stream the response using the base class handler."""
         try:
-            # Try create with fallback token parameter handling
             stream = self._chat_create_with_fallback(payload)
             return self._handle_streaming_output(
                 stream_iterator=self._iterate_openai_chunks(stream),
@@ -344,5 +308,4 @@ class OpenAIClient(LLMClient):
 
     def get_styling(self) -> tuple[str | None, str]:
         """Return OpenAI specific styling."""
-        # Return None for title to let base class use bot_name, only specify border style
         return None, "green"

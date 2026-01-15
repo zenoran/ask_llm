@@ -44,13 +44,13 @@ def backfill_empty_tags(
             WHERE tags IS NULL OR tags = '[]'::jsonb
         """)
         total = conn.execute(count_sql).scalar() or 0
-        logger.info(f"Found {total} memories needing tag backfill")
+        logger.debug(f"Found {total} memories needing tag backfill")
 
         if total == 0:
             return {"updated": 0, "total": 0}
 
         if dry_run:
-            logger.info(f"[DRY RUN] Would update {total} memories")
+            logger.debug(f"[DRY RUN] Would update {total} memories")
             return {"updated": 0, "total": total, "dry_run": True}
 
         # Process in batches
@@ -76,7 +76,7 @@ def backfill_empty_tags(
             conn.commit()
             logger.debug(f"Migrated {updated}/{total} memories")
 
-    logger.info(f"Tag backfill complete: {updated} updated")
+    logger.debug(f"Tag backfill complete: {updated} updated")
     return {"updated": updated, "total": total}
 
 
@@ -109,13 +109,13 @@ def backfill_meaning_embeddings(
               AND (intent IS NOT NULL OR stakes IS NOT NULL OR recurrence_keywords IS NOT NULL)
         """)
         total = conn.execute(count_sql).scalar() or 0
-        logger.info(f"Found {total} memories needing meaning embedding generation")
+        logger.debug(f"Found {total} memories needing meaning embedding generation")
 
         if total == 0:
             return {"updated": 0, "failed": 0, "total": 0}
 
         if dry_run:
-            logger.info(f"[DRY RUN] Would generate embeddings for {total} memories")
+            logger.debug(f"[DRY RUN] Would generate embeddings for {total} memories")
             return {"updated": 0, "failed": 0, "total": total, "dry_run": True}
 
         # Process in batches
@@ -161,7 +161,7 @@ def backfill_meaning_embeddings(
             conn.commit()
             logger.debug(f"Generated embeddings for {updated}/{total} memories")
 
-    logger.info(f"Meaning embedding generation complete: {updated} updated, {failed} failed")
+    logger.debug(f"Meaning embedding generation complete: {updated} updated, {failed} failed")
     return {"updated": updated, "failed": failed, "total": total}
 
 
@@ -169,10 +169,10 @@ def run_all_migrations(backend: Any, dry_run: bool = False) -> dict:
     """Run all pending migrations."""
     results = {}
     
-    logger.info("Running tag backfill...")
+    logger.debug("Running tag backfill...")
     results["tags"] = backfill_empty_tags(backend, dry_run=dry_run)
     
-    logger.info("Running meaning embedding generation...")
+    logger.debug("Running meaning embedding generation...")
     results["meaning_embeddings"] = backfill_meaning_embeddings(backend, dry_run=dry_run)
     
     return results

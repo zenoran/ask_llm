@@ -460,23 +460,23 @@ Merged memory:"""
         result = ConsolidationResult(dry_run=dry_run)
         
         # Fetch all active memories with embeddings
-        logger.info("Fetching memories with embeddings...")
+        logger.debug("Fetching memories with embeddings...")
         memories = self.get_all_active_memories_with_embeddings()
         
         if len(memories) < 2:
-            logger.info(f"Only {len(memories)} memories found, nothing to consolidate")
+            logger.debug(f"Only {len(memories)} memories found, nothing to consolidate")
             return result
         
         # Find clusters
-        logger.info(f"Finding clusters among {len(memories)} memories (threshold={self.threshold})...")
+        logger.debug(f"Finding clusters among {len(memories)} memories (threshold={self.threshold})...")
         clusters = self.find_clusters(memories)
         result.clusters_found = len(clusters)
         
         if not clusters:
-            logger.info("No clusters found above similarity threshold")
+            logger.debug("No clusters found above similarity threshold")
             return result
         
-        logger.info(f"Found {len(clusters)} clusters to process")
+        logger.debug(f"Found {len(clusters)} clusters to process")
         
         # Process each cluster
         for cluster in clusters:
@@ -492,7 +492,7 @@ Merged memory:"""
                     merged_content = self.merge_cluster_heuristic(cluster)
                 
                 if dry_run:
-                    logger.info(f"[DRY RUN] Would merge {len(cluster)} memories into: {merged_content[:100]}...")
+                    logger.debug(f"[DRY RUN] Would merge {len(cluster)} memories into: {merged_content[:100]}...")
                     result.clusters_merged += 1
                     result.memories_consolidated += len(cluster)
                 else:
@@ -513,47 +513,82 @@ Merged memory:"""
                 logger.error(error_msg)
                 result.errors.append(error_msg)
         
+        
         return result
 
 
-def get_local_llm_client(config: Any) -> Any | None:
-    """Get a local LLM client for consolidation (never OpenAI).
+class LLMServiceClient:
+    """Simple client that proxies LLM requests to the llm-service.
     
-    Prioritizes: GGUF > Ollama > None
-    Uses AskLLM to handle model path resolution and downloading.
+    This allows consolidation (running in the MCP server) to use the
+    already-loaded model in the llm-service without loading another copy.
     """
-    from ..utils.config import PROVIDER_GGUF, PROVIDER_OLLAMA, is_llama_cpp_available
-    from ..core import AskLLM
     
-    models = config.defined_models.get("models", {})
+    def __init__(self, service_url: str):
+        self.service_url = service_url.rstrip("/")
     
-    # Try GGUF first (completely local)
-    if is_llama_cpp_available():
-        for alias, model_def in models.items():
-            if model_def.get("type") == PROVIDER_GGUF:
-                try:
-                    logger.info(f"Using GGUF model '{alias}' for consolidation")
-                    # Use AskLLM to handle model loading properly
-                    ask_llm = AskLLM(
-                        resolved_model_alias=alias,
-                        config=config,
-                        local_mode=True,  # No database for consolidation LLM
-                        bot_id="spark",   # Lightweight bot
-                    )
-                    return ask_llm.client
-                except Exception as e:
-                    logger.warning(f"Failed to load GGUF model '{alias}': {e}")
+    def query(self, messages: list[dict], max_tokens: int = 500, temperature: float = 0.7) -> str:
+        """Query the LLM via the service's raw completion endpoint."""
+        import urllib.request
+        import json
+        
+        # Extract system and user messages
+        system = None
+        prompt = ""
+        for msg in messages:
+            if msg.get("role") == "system":
+                system = msg.get("content", "")
+            elif msg.get("role") == "user":
+                prompt = msg.get("content", "")
+        
+        payload = {
+            "prompt": prompt,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+        }
+        if system:
+            payload["system"] = system
+        
+        url = f"{self.service_url}/v1/llm/complete"
+        data = json.dumps(payload).encode("utf-8")
+        headers = {"Content-Type": "application/json"}
+        
+        try:
+            req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+            with urllib.request.urlopen(req, timeout=60) as response:
+                result = json.loads(response.read().decode("utf-8"))
+                return result.get("content", "")
+        except urllib.error.HTTPError as e:
+            if e.code == 503:
+                logger.debug("LLM service has no model loaded")
+                return ""
+            raise
+        except Exception as e:
+            logger.debug(f"LLM service request failed: {e}")
+            return ""
+
+
+def get_local_llm_client(config: Any) -> Any | None:
+    """Get an LLM client for consolidation.
     
-    # Try Ollama (local server)
-    for alias, model_def in models.items():
-        if model_def.get("type") == PROVIDER_OLLAMA:
-            try:
-                from ..clients.ollama_client import OllamaClient
-                model_id = model_def.get("model_id")
-                logger.info(f"Using Ollama model '{alias}' for consolidation")
-                return OllamaClient(model=model_id, config=config)
-            except Exception as e:
-                logger.warning(f"Failed to load Ollama model '{alias}': {e}")
+    First tries to use the llm-service (which has the model already loaded).
+    Falls back to heuristic merging if service is unavailable.
+    """
+    # Try the llm-service first - it has the model already loaded
+    service_host = getattr(config, "SERVICE_HOST", "localhost")
+    service_port = getattr(config, "SERVICE_PORT", 8642)
+    service_url = f"http://{service_host}:{service_port}"
     
-    logger.warning("No local LLM available for consolidation, will use heuristic merging")
+    # Quick health check
+    import urllib.request
+    try:
+        req = urllib.request.Request(f"{service_url}/health", method="GET")
+        with urllib.request.urlopen(req, timeout=2) as response:
+            if response.status == 200:
+                logger.debug("Using llm-service for consolidation")
+                return LLMServiceClient(service_url)
+    except Exception as e:
+        logger.debug(f"llm-service not available: {e}")
+    
+    logger.debug("No LLM available for consolidation, using heuristic merging")
     return None

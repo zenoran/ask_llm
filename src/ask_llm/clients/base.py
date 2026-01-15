@@ -1,3 +1,10 @@
+"""Base LLM client class.
+
+Simple abstract base for OpenAI-compatible API clients.
+"""
+
+from __future__ import annotations
+
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
@@ -7,6 +14,7 @@ from typing import Iterator, List, Any
 from ..models.message import Message
 from ..utils.config import Config
 from ..utils.streaming import render_streaming_response
+
 
 class LLMClient(ABC):
     """Abstract base class for LLM clients."""
@@ -102,3 +110,19 @@ class LLMClient(ABC):
             panel_border_style=panel_border_style,
             plaintext_output=plaintext_output,
         )
+
+
+class StubClient(LLMClient):
+    """Stub client for history-only operations that don't need actual LLM."""
+    
+    SUPPORTS_STREAMING = False
+    
+    def __init__(self, config: Config, bot_name: str = "Assistant"):
+        super().__init__(model="stub", config=config)
+        self.bot_name = bot_name
+    
+    def query(self, messages: List[Message], plaintext_output: bool = False, **kwargs: Any) -> str:
+        raise NotImplementedError("StubClient does not support querying")
+    
+    def get_styling(self) -> tuple[str | None, str]:
+        return self.bot_name, "cyan"

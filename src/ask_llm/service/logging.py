@@ -2,9 +2,15 @@
 Rich-formatted logging for the llm-service.
 
 Provides intelligent logging with three verbosity levels:
-- Normal: Clean, rich-formatted logs for key events (API calls, model loading, errors)
-- Verbose (--verbose/-v): Additional detail including payloads and timing
-- Debug (--debug): Low-level DEBUG messages, unformatted for debugging
+- Normal: Minimal output, only errors
+- Verbose (--verbose/-v): Human-readable flow with meaningful messages
+- Debug (--debug): Low-level DEBUG messages with technical details
+
+Verbose mode aims to be:
+- Scannable: Use visual icons and colors for quick pattern recognition
+- Meaningful: Show "Fetching memories..." not "MCP tool call -> tools/get_messages"  
+- Deduped: Avoid redundant information (e.g., model loading shown once)
+- Hierarchical: Group related operations, show timing for parent operations
 
 Usage:
     from .logging import ServiceLogger, setup_service_logging
@@ -55,19 +61,41 @@ SERVICE_THEME = Theme({
     "user.id": "dim blue",
     "memory": "yellow",
     "task": "cyan",
+    "tool": "bold yellow",
+    "success": "bold green",
+    "muted": "dim",
 })
+
+# Visual icons for different operation types (verbose mode)
+ICONS = {
+    "request": "📨",
+    "response": "📤",
+    "model": "🤖",
+    "memory": "💾",
+    "tool": "🔧",
+    "search": "🔍",
+    "history": "📜",
+    "user": "👤",
+    "assistant": "🤖",
+    "success": "✓",
+    "error": "✗",
+    "loading": "⏳",
+    "done": "✓",
+}
 
 # Global state
 _verbose = False
 _debug = False
 _console: Console | None = None
+_model_loading_announced: set[str] = set()  # Track which models we've announced loading
 
 
 def get_console() -> Console:
     """Get the shared console instance."""
     global _console
     if _console is None:
-        _console = Console(theme=SERVICE_THEME, stderr=True)
+        # force_terminal=True ensures Rich renders markup even when backgrounded
+        _console = Console(theme=SERVICE_THEME, stderr=True, force_terminal=True)
     return _console
 
 
@@ -95,6 +123,20 @@ def setup_service_logging(verbose: bool = False, debug: bool = False) -> None:
     console = get_console()
 
     # Configure root logger for the service
+    log_prefix = os.getenv("ASK_LLM_LOG_PREFIX", "").strip()
+    
+    class _PrefixFilter(logging.Filter):
+        def filter(self, record: logging.LogRecord) -> bool:
+            if not log_prefix:
+                return True
+            # Format the message first if there are args, then prepend prefix
+            if record.args:
+                record.msg = record.msg % record.args
+                record.args = ()
+            # Use plain text prefix - escape [ for Rich markup
+            record.msg = f"\\[{log_prefix}] {record.msg}"
+            return True
+    
     if debug:
         # Debug mode: simple format, no rich
         logging.basicConfig(
@@ -103,6 +145,8 @@ def setup_service_logging(verbose: bool = False, debug: bool = False) -> None:
             datefmt="%H:%M:%S",
             force=True,
         )
+        for handler in logging.getLogger().handlers:
+            handler.addFilter(_PrefixFilter())
     else:
         # Normal/verbose mode: rich formatted output
         logging.basicConfig(
@@ -112,18 +156,22 @@ def setup_service_logging(verbose: bool = False, debug: bool = False) -> None:
             handlers=[RichHandler(
                 console=console,
                 show_path=False,
+                show_time=False,
+                show_level=False,
                 rich_tracebacks=True,
                 tracebacks_show_locals=verbose,
                 markup=True,
             )],
             force=True,
         )
+        for handler in logging.getLogger().handlers:
+            handler.addFilter(_PrefixFilter())
 
     # Reduce noise from third-party libraries
     # These libraries produce a lot of INFO/DEBUG messages that clutter the output
     noisy_loggers = [
         "uvicorn",
-        "uvicorn.access",
+        "uvicorn.access",  # HTTP request logs like "127.0.0.1 - POST /mcp HTTP/1.1 200"
         "uvicorn.error",
         "httpx",
         "httpcore",
@@ -142,8 +190,14 @@ def setup_service_logging(verbose: bool = False, debug: bool = False) -> None:
         "tqdm",
     ]
     
+    # In verbose mode, suppress HTTP access logs completely (we log our own summaries)
+    # In debug mode, show everything
     for logger_name in noisy_loggers:
-        logging.getLogger(logger_name).setLevel(logging.WARNING if not debug else logging.INFO)
+        if logger_name in ("uvicorn.access",) and not debug:
+            # Always suppress access logs in non-debug (we have our own MCP logging)
+            logging.getLogger(logger_name).setLevel(logging.ERROR)
+        else:
+            logging.getLogger(logger_name).setLevel(logging.WARNING if not debug else logging.INFO)
     
     # Suppress tqdm progress bars in non-debug mode
     # This prevents the "Batches: 100%..." output from sentence-transformers
@@ -306,49 +360,235 @@ class ServiceLogger:
         self._logger.error(f"{req_id} {status_str} {elapsed} {error}")
 
     def model_loading(self, model_alias: str, model_type: str, cached: bool = False) -> None:
-        """Log model loading event."""
+        """Log model loading event - deduped to avoid repeated messages."""
+        global _model_loading_announced
+        
+        cache_key = f"{model_alias}:{model_type}"
+        if cache_key in _model_loading_announced:
+            # Already announced this model loading, skip duplicate
+            return
+        _model_loading_announced.add(cache_key)
+        
         if cached:
             self._logger.info(
-                f"[model.name]{model_alias}[/model.name] [model.type]({model_type})[/model.type] [dim]using cached instance[/dim]"
+                f"{ICONS['model']} [model.name]{model_alias}[/model.name] [muted](cached)[/muted]"
             )
         else:
             self._logger.info(
-                f"[model.name]{model_alias}[/model.name] [model.type]({model_type})[/model.type] [bold yellow]loading...[/bold yellow]"
+                f"{ICONS['loading']} [model.name]{model_alias}[/model.name] [muted]loading...[/muted]"
             )
 
     def model_loaded(self, model_alias: str, model_type: str, load_time_ms: float) -> None:
-        """Log model loaded successfully."""
+        """Log model loaded successfully - deduped to avoid repeated messages."""
+        global _model_loading_announced
+        
+        cache_key = f"{model_alias}:{model_type}"
+        
+        # Only log if we previously announced loading for this model
+        # This prevents duplicate "ready" messages
+        if cache_key not in _model_loading_announced:
+            return
+        
+        # Clear the loading announcement
+        _model_loading_announced.discard(cache_key)
+        
         self._logger.info(
-            f"[model.name]{model_alias}[/model.name] [model.type]({model_type})[/model.type] "
-            f"[bold green]loaded[/bold green] [timing]{load_time_ms:.0f}ms[/timing]"
+            f"{ICONS['done']} [model.name]{model_alias}[/model.name] [success]ready[/success] [timing]{load_time_ms:.0f}ms[/timing]"
         )
 
     def model_error(self, model_alias: str, error: str) -> None:
         """Log model loading error."""
-        self._logger.error(f"[model.name]{model_alias}[/model.name] [bold red]failed to load:[/bold red] {error}")
+        self._logger.error(f"{ICONS['error']} [model.name]{model_alias}[/model.name] [bold red]failed:[/bold red] {error}")
+
+    def mcp_operation(
+        self, 
+        operation: str, 
+        bot_id: str | None = None,
+        duration_ms: float | None = None, 
+        count: int | None = None,
+        details: str | None = None,
+        success: bool = True,
+        params: dict[str, Any] | None = None,
+        result: Any | None = None,
+    ) -> None:
+        """Log MCP tool operations with human-friendly descriptions.
+        
+        Translates technical tool names to meaningful actions:
+        - get_messages -> "Fetching conversation history"
+        - search_memories -> "Searching memories"
+        - add_message -> "Saving message"
+        - store_memory -> "Storing memory"
+        
+        In verbose mode, also shows params and result summaries.
+        """
+        # Map technical tool names to human-readable descriptions
+        friendly_names = {
+            "get_messages": "Fetching history",
+            "search_memories": "Searching memories", 
+            "add_message": "Saving message",
+            "store_memory": "Storing memory",
+            "get_recent_context": "Loading context",
+            "stats": "Fetching stats",
+            "update_memory": "Updating memory",
+            "delete_memory": "Deleting memory",
+            "clear_messages": "Clearing history",
+        }
+        
+        friendly = friendly_names.get(operation, operation)
+        
+        # Select appropriate icon based on operation type
+        if "memor" in operation.lower():
+            icon = ICONS["memory"]  # 💾 for memory operations
+        elif operation in ("add_message",):
+            icon = ICONS["success"]  # ✓ for saving (quick confirmation)
+        elif operation in ("get_messages", "clear_messages"):
+            icon = ICONS["history"]  # 📜 for history operations
+        else:
+            icon = ICONS["tool"]  # 🔧 default
+        
+        parts = [f"{icon} [tool]{friendly}[/tool]"]
+        
+        if count is not None:
+            parts.append(f"[muted]({count} items)[/muted]")
+        
+        if duration_ms is not None:
+            parts.append(f"[timing]{duration_ms:.0f}ms[/timing]")
+            
+        if details:
+            parts.append(f"[muted]{details}[/muted]")
+        
+        if success:
+            self._logger.info(" ".join(parts))
+        else:
+            self._logger.warning(" ".join(parts) + " [bold red]failed[/bold red]")
+        
+        # Verbose mode: show params and result details
+        # Skip redundant info for simple operations
+        if _verbose:
+            # Operations that are simple confirmations - no extra detail needed
+            simple_operations = {"add_message", "store_memory"}
+            
+            if operation not in simple_operations:
+                if params:
+                    # Show relevant params (skip bot_id since it's usually obvious)
+                    show_params = {k: v for k, v in params.items() if k not in ("bot_id",)}
+                    if show_params:
+                        self._log_mcp_params(operation, show_params)
+                
+                # Show result for read operations
+                if result is not None:
+                    self._log_mcp_result(operation, result)
+
+    def _log_mcp_params(self, operation: str, params: dict[str, Any]) -> None:
+        """Log MCP operation parameters in verbose mode - one line."""
+        param_strs = []
+        for k, v in params.items():
+            if isinstance(v, str) and len(v) > 80:
+                param_strs.append(f"{k}={v[:80]}...")
+            else:
+                param_strs.append(f"{k}={v}")
+        self._console.print(f"  [dim]params: {', '.join(param_strs)}[/dim]")
+
+    def _log_mcp_result(self, operation: str, result: Any) -> None:
+        """Log MCP operation result in verbose mode.
+        
+        For history (get_messages), show condensed view.
+        For everything else (memory searches, etc.), show full data.
+        """
+        if result is None:
+            return
+        
+        # History can be condensed - it's usually long and just context
+        is_history = operation == "get_messages"
+        
+        if isinstance(result, list):
+            if len(result) == 0:
+                self._console.print(f"  [dim]result: (empty)[/dim]")
+            elif is_history and len(result) > 6:
+                # Condensed: first 3, ..., last 3
+                for i in range(3):
+                    self._log_result_item(result[i], i, condensed=True)
+                self._console.print(f"  [dim]... ({len(result) - 6} more) ...[/dim]")
+                for i in range(len(result) - 3, len(result)):
+                    self._log_result_item(result[i], i, condensed=True)
+            else:
+                # Full output for memory searches, etc.
+                for i, item in enumerate(result):
+                    self._log_result_item(item, i, condensed=is_history)
+        elif isinstance(result, dict):
+            self._log_result_item(result, None, condensed=False)
+        else:
+            self._console.print(f"  [dim]result:[/dim] {result}")
+
+    def _log_result_item(self, item: Any, index: int | None, condensed: bool = False) -> None:
+        """Log a single result item - one line per item.
+        
+        Args:
+            item: The item to log
+            index: Index in list (or None for single items)
+            condensed: If True, truncate long content (for history)
+        """
+        if not isinstance(item, dict):
+            self._console.print(f"    {item}")
+            return
+        
+        prefix = f"    [dim][{index}][/dim] " if index is not None else "    "
+        
+        # Format based on item type (message vs memory)
+        if "role" in item and "content" in item:
+            # Message format - one line
+            role = item.get("role", "?")
+            content = item.get("content", "")
+            if condensed and len(content) > 120:
+                content = content[:120] + "..."
+            role_color = "green" if role == "user" else "blue" if role == "assistant" else "yellow"
+            self._console.print(f"{prefix}[{role_color}]{role}[/{role_color}]: {content}")
+        elif "content" in item:
+            # Memory format - one line with metadata at end
+            content = item.get("content", "")
+            tags = item.get("tags", [])
+            importance = item.get("importance", "")
+            relevance = item.get("relevance", "")
+            
+            # Build metadata suffix
+            meta_parts = []
+            if tags:
+                meta_parts.append(f"tags={tags}")
+            if importance:
+                meta_parts.append(f"imp={importance}")
+            if relevance:
+                meta_parts.append(f"rel={relevance:.2f}" if isinstance(relevance, float) else f"rel={relevance}")
+            meta_str = f" [dim]({', '.join(meta_parts)})[/dim]" if meta_parts else ""
+            
+            self._console.print(f"{prefix}{content}{meta_str}")
+        else:
+            # Generic - one line JSON
+            import json
+            try:
+                self._console.print(f"{prefix}{json.dumps(item, default=str)}")
+            except:
+                self._console.print(f"{prefix}{item}")
 
     def memory_operation(self, operation: str, bot_id: str, count: int | None = None, details: str | None = None) -> None:
         """Log memory operations (retrieval, storage, extraction)."""
-        parts = [f"[memory]{operation}[/memory]", f"bot=[bot.name]{bot_id}[/bot.name]"]
+        parts = [f"{ICONS['memory']} [memory]{operation}[/memory]"]
         if count is not None:
-            parts.append(f"[dim]{count} items[/dim]")
+            parts.append(f"[muted]({count} items)[/muted]")
         if details:
-            parts.append(f"[dim]{details}[/dim]")
+            parts.append(f"[muted]{details}[/muted]")
 
         self._logger.info(" ".join(parts))
 
     def task_submitted(self, task_id: str, task_type: str, bot_id: str) -> None:
         """Log background task submission."""
         self._logger.info(
-            f"[task]task[/task] [dim]{task_id[:8]}[/dim] "
-            f"[bold]{task_type}[/bold] bot=[bot.name]{bot_id}[/bot.name] [dim]queued[/dim]"
+            f"{ICONS['loading']} [task]{task_type}[/task] [muted]queued[/muted]"
         )
 
     def task_completed(self, task_id: str, task_type: str, elapsed_ms: float, result: dict | None = None) -> None:
         """Log background task completion."""
         self._logger.info(
-            f"[task]task[/task] [dim]{task_id[:8]}[/dim] "
-            f"[bold]{task_type}[/bold] [bold green]completed[/bold green] [timing]{elapsed_ms:.0f}ms[/timing]"
+            f"{ICONS['done']} [task]{task_type}[/task] [success]done[/success] [timing]{elapsed_ms:.0f}ms[/timing]"
         )
 
         if _verbose and result:
@@ -357,8 +597,7 @@ class ServiceLogger:
     def task_failed(self, task_id: str, task_type: str, error: str, elapsed_ms: float) -> None:
         """Log background task failure."""
         self._logger.error(
-            f"[task]task[/task] [dim]{task_id[:8]}[/dim] "
-            f"[bold]{task_type}[/bold] [bold red]failed[/bold red] [timing]{elapsed_ms:.0f}ms[/timing]: {error}"
+            f"{ICONS['error']} [task]{task_type}[/task] [bold red]failed[/bold red] [timing]{elapsed_ms:.0f}ms[/timing]: {error}"
         )
 
     def cache_hit(self, cache_type: str, key: str) -> None:
@@ -407,47 +646,42 @@ class ServiceLogger:
         # Calculate history turns (user+assistant pairs, excluding current prompt)
         history_turns = min(role_counts["user"] - 1, role_counts["assistant"])
         
-        # Build compact summary line
-        parts = [f"[bold cyan]→ LLM[/bold cyan]"]
+        # Build compact summary line  
+        parts = [f"{ICONS['request']} [bold cyan]→ LLM[/bold cyan]"]
         
         if history_turns > 0:
-            parts.append(f"[dim]history:[/dim] {history_turns} turns")
+            parts.append(f"{history_turns} turns")
         
         memory_facts = memory_content.count("• ") if memory_content else 0
         if memory_facts > 0:
-            parts.append(f"[memory]memory:[/memory] {memory_facts} facts")
-        else:
-            parts.append("[dim]memory: none[/dim]")
+            parts.append(f"[memory]{memory_facts} memories[/memory]")
         
-        parts.append(f"[dim]total:[/dim] {len(messages)} msgs")
+        parts.append(f"[muted]{len(messages)} msgs[/muted]")
         
         self._console.print(" | ".join(parts))
         
-        # Show the user prompt (truncated)
+        # Show the full user prompt
         if user_prompt:
-            display = user_prompt[:100] + "..." if len(user_prompt) > 100 else user_prompt
-            self._console.print(f"  [green]prompt:[/green] {display}")
+            self._console.print(f"  [green]prompt:[/green] {user_prompt}")
         
         # Show memory content (this is the key troubleshooting info)
         if memory_content:
-            self._console.print(f"  [yellow]memories:[/yellow]")
+            self._console.print(f"  [yellow]memories injected:[/yellow]")
             # Show the full memory content, nicely indented
             for line in memory_content.split("\n"):
                 if line.strip():
-                    # Indent and truncate very long lines
-                    display_line = line[:120] + "..." if len(line) > 120 else line
-                    self._console.print(f"    {display_line}")
+                    self._console.print(f"    {line}")
 
     def llm_response(self, response: str, tokens: int | None = None, elapsed_ms: float | None = None) -> None:
         """Log a summary of the LLM response (verbose only)."""
         if not _verbose:
             return
         
-        parts = [f"[bold blue]← LLM[/bold blue]"]
+        parts = [f"{ICONS['response']} [bold blue]← LLM[/bold blue]"]
         
         # Show tokens or chars
         if tokens:
-            parts.append(f"{tokens} tok")
+            parts.append(f"~{tokens} tok")
         else:
             # Estimate tokens (~4 chars per token)
             tokens = len(response) // 4
@@ -465,13 +699,12 @@ class ServiceLogger:
             else:
                 speed_color = "red"
             parts.append(f"[{speed_color}]{tok_per_sec:.1f} tok/s[/{speed_color}]")
-            parts.append(f"[dim]{elapsed_ms:.0f}ms[/dim]")
+            parts.append(f"[muted]{elapsed_ms:.0f}ms[/muted]")
         
         self._console.print(" | ".join(parts))
         
-        # Show truncated response
-        display = response[:100] + "..." if len(response) > 100 else response
-        self._console.print(f"  [blue]response:[/blue] {display}")
+        # Show full response
+        self._console.print(f"  [blue]response:[/blue] {response}")
 
     def _log_payload(self, label: str, data: dict[str, Any], max_content_len: int = 500) -> None:
         """Log a payload (for verbose mode)."""
