@@ -113,18 +113,22 @@ class PostgreSQLShortTermManager:
             )
             return session.execute(stmt).scalar() or 0
 
-    def get_messages(self, since_minutes: int | None = None) -> list:
+    def get_messages(self, since_seconds: int | None = None, since_minutes: int | None = None) -> list:
         """Get messages, optionally filtered by time.
         
         Args:
-            since_minutes: If provided, only return messages from the last N seconds
-                          (note: despite the name, this is actually in seconds for 
-                          backward compatibility with HISTORY_DURATION).
+            since_seconds: If provided, only return messages from the last N seconds.
+                          Use config.HISTORY_DURATION for the standard history window.
+            since_minutes: Deprecated alias for since_seconds (for backward compatibility).
+                          Note: Despite the name, this is interpreted as seconds.
         
         Returns:
             List of Message objects.
         """
         from ..models.message import Message
+        
+        # Handle backward compatibility - since_minutes is actually seconds
+        time_filter = since_seconds if since_seconds is not None else since_minutes
         
         with Session(self._backend.engine) as session:
             stmt = (
@@ -132,8 +136,8 @@ class PostgreSQLShortTermManager:
                 .order_by(self._backend.messages_table.c.timestamp.asc())
             )
             
-            if since_minutes is not None:
-                cutoff = time.time() - since_minutes
+            if time_filter is not None:
+                cutoff = time.time() - time_filter
                 stmt = stmt.where(self._backend.messages_table.c.timestamp >= cutoff)
             
             rows = session.execute(stmt).fetchall()
