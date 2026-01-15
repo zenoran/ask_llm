@@ -11,23 +11,35 @@ Or: uvicorn ask_llm.service.server:app --host 0.0.0.0 --port 8642
 """
 
 import asyncio
-import logging
+import json
 import threading
 import time
 import uuid
 from contextlib import asynccontextmanager
-from datetime import datetime
-from enum import Enum
 from queue import PriorityQueue
-from typing import Any, AsyncIterator, Literal
-
-from pydantic import BaseModel, Field
+from typing import Any, AsyncIterator
 
 from ..utils.config import Config
 from ..bots import get_bot, strip_emotes, StreamingEmoteFilter
 from .tasks import Task, TaskResult, TaskStatus, TaskType
+from .models import (
+    DEFAULT_HTTP_PORT,
+    SERVICE_VERSION,
+    ChatMessage,
+    ChatCompletionRequest,
+    ChatCompletionChoice,
+    ChatCompletionResponse,
+    ChatCompletionChunk,
+    UsageInfo,
+    ModelInfo,
+    ModelsResponse,
+    TaskSubmitRequest,
+    TaskSubmitResponse,
+    TaskStatusResponse,
+    ServiceStatusResponse,
+    HealthResponse,
+)
 from .logging import (
-    ServiceLogger,
     RequestContext,
     setup_service_logging,
     generate_request_id,
@@ -35,125 +47,6 @@ from .logging import (
 )
 
 log = get_service_logger(__name__)
-
-# Configuration
-DEFAULT_HTTP_PORT = 8642
-SERVICE_VERSION = "0.1.0"
-
-
-# =============================================================================
-# Pydantic Models for OpenAI-compatible API
-# =============================================================================
-
-class ChatMessage(BaseModel):
-    """OpenAI-compatible chat message."""
-    role: Literal["system", "user", "assistant", "function", "tool"]
-    content: str | None = None
-    name: str | None = None
-
-
-class ChatCompletionRequest(BaseModel):
-    """OpenAI-compatible chat completion request."""
-    model: str | None = None  # Optional, will use service default if not specified
-    messages: list[ChatMessage]
-    temperature: float = Field(default=0.7, ge=0.0, le=2.0)
-    top_p: float = Field(default=1.0, ge=0.0, le=1.0)
-    max_tokens: int | None = None
-    stream: bool = False
-    stop: str | list[str] | None = None
-    presence_penalty: float = Field(default=0.0, ge=-2.0, le=2.0)
-    frequency_penalty: float = Field(default=0.0, ge=-2.0, le=2.0)
-    user: str | None = None
-    # ask_llm extensions
-    bot_id: str | None = Field(default=None, description="Bot personality to use")
-    augment_memory: bool = Field(default=True, description="Whether to augment with memory context")
-    extract_memory: bool = Field(default=True, description="Whether to extract memories from response")
-
-
-class ChatCompletionChoice(BaseModel):
-    """OpenAI-compatible chat completion choice."""
-    index: int
-    message: ChatMessage
-    finish_reason: str | None = "stop"
-
-
-class UsageInfo(BaseModel):
-    """Token usage information."""
-    prompt_tokens: int
-    completion_tokens: int
-    total_tokens: int
-
-
-class ChatCompletionResponse(BaseModel):
-    """OpenAI-compatible chat completion response."""
-    id: str = Field(default_factory=lambda: f"chatcmpl-{uuid.uuid4().hex[:12]}")
-    object: str = "chat.completion"
-    created: int = Field(default_factory=lambda: int(time.time()))
-    model: str
-    choices: list[ChatCompletionChoice]
-    usage: UsageInfo | None = None
-
-
-class ChatCompletionChunk(BaseModel):
-    """OpenAI-compatible streaming chunk."""
-    id: str
-    object: str = "chat.completion.chunk"
-    created: int
-    model: str
-    choices: list[dict]
-
-
-class ModelInfo(BaseModel):
-    """Model information for /v1/models endpoint."""
-    id: str
-    object: str = "model"
-    created: int = Field(default_factory=lambda: int(time.time()))
-    owned_by: str = "ask_llm"
-
-
-class ModelsResponse(BaseModel):
-    """Response for /v1/models endpoint."""
-    object: str = "list"
-    data: list[ModelInfo]
-
-
-class TaskSubmitRequest(BaseModel):
-    """Request to submit a background task."""
-    task_type: str
-    payload: dict[str, Any]
-    bot_id: str | None = None  # Will use config DEFAULT_BOT if not specified
-    user_id: str = "default"
-    priority: int = 0
-
-
-class TaskSubmitResponse(BaseModel):
-    """Response after submitting a task."""
-    task_id: str
-    status: str = "pending"
-
-
-class TaskStatusResponse(BaseModel):
-    """Response for task status."""
-    task_id: str
-    status: str
-    result: Any | None = None
-    error: str | None = None
-    processing_time_ms: float | None = None
-
-
-class ServiceStatusResponse(BaseModel):
-    """Service health and status."""
-    status: str = "ok"
-    version: str = SERVICE_VERSION
-    uptime_seconds: float
-    tasks_processed: int
-    tasks_pending: int
-    models_loaded: list[str] = []
-
-
-class HealthResponse(BaseModel):
-    """Simple health check response."""
-    status: str = "ok"
 
 
 # =============================================================================

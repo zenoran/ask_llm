@@ -21,6 +21,15 @@ Run the service:
 from .client import ServiceClient, ServiceStatus
 from .tasks import TaskType, Task, TaskResult
 from .logging import ServiceLogger, get_service_logger, setup_service_logging
+from .models import (
+    DEFAULT_HTTP_PORT,
+    SERVICE_VERSION,
+    ChatMessage,
+    ChatCompletionRequest,
+    ChatCompletionResponse,
+    ServiceStatusResponse,
+    HealthResponse,
+)
 
 __all__ = [
     "ServiceClient",
@@ -31,4 +40,12 @@ __all__ = [
     "ServiceLogger",
     "get_service_logger",
     "setup_service_logging",
+    # Models
+    "DEFAULT_HTTP_PORT",
+    "SERVICE_VERSION",
+    "ChatMessage",
+    "ChatCompletionRequest",
+    "ChatCompletionResponse",
+    "ServiceStatusResponse",
+    "HealthResponse",
 ]
