@@ -1,19 +1,23 @@
 import json
 import requests
-from typing import List, Iterator, Optional
+from typing import List, Iterator
 import logging
 from rich.json import JSON
 from rich.rule import Rule
 
 from ask_llm.clients.base import LLMClient
-from ask_llm.utils.config import Config # Keep for type hinting
+from ask_llm.clients.utils import prepare_api_messages
+from ask_llm.utils.config import Config
 from ask_llm.models.message import Message
 
 logger = logging.getLogger(__name__)
 
+
 class OllamaClient(LLMClient):
+    SUPPORTS_STREAMING = True
+    
     def __init__(self, model: str, config: Config):
-        super().__init__(model, config) # Pass config to base class
+        super().__init__(model, config)
 
     def query(self, messages: List[Message], plaintext_output: bool = False, stream: bool = True, **kwargs) -> str:
         """Query Ollama API with full message history, supporting streaming.
@@ -81,32 +85,14 @@ class OllamaClient(LLMClient):
             response.close()
 
     def _prepare_api_messages(self, messages: List[Message]) -> List[dict]:
-        api_messages = []
-        has_system_message = False
-        system_message = self.config.SYSTEM_MESSAGE
-        for msg in messages:
-            formatted_msg = msg.to_api_format()
-            if formatted_msg['role'] == 'system':
-                if not has_system_message:
-                    api_messages.insert(0, formatted_msg)
-                    has_system_message = True
-            else:
-                api_messages.append(formatted_msg)
-
-        if not has_system_message and system_message:
-            api_messages.insert(0, {"role": "system", "content": system_message})
-        cleaned_messages = []
-        if api_messages:
-            cleaned_messages.append(api_messages[0])
-            for i in range(1, len(api_messages)):
-                if api_messages[i]['role'] != api_messages[i-1]['role']:
-                    cleaned_messages.append(api_messages[i])
-
-        final_messages = [
-            msg for msg in cleaned_messages
-            if not (msg.get('role') == 'assistant' and msg.get('content', '').startswith('ERROR:'))
-        ]
-        return final_messages
+        """Prepare messages for Ollama API using shared utility."""
+        return prepare_api_messages(
+            messages,
+            self.config,
+            merge_system_messages=False,  # Ollama handles only first system message
+            dedupe_consecutive_roles=True,
+            filter_error_messages=True,
+        )
 
     def _stream_response(self, api_messages: List[dict], plaintext_output: bool) -> str:
         payload = {
@@ -258,14 +244,16 @@ class OllamaClient(LLMClient):
                                     in_thought = True
                                     parts = current_content_part.partition("<thought>")
                                     processed_content += parts[0]
-                                    thought_buffer += parts[2].replace("\n", " ") # Normalize newlines in thought
+                                    thought_buffer += parts[2].replace("\n", " ")  # Normalize newlines in thought
                                     current_content_part = ""
-                                    if parts[0].strip(): yield parts[0]
-                                    if not error_reported: self.console.print("[blue i]Thinking...[/blue i]", end='\r') # Overwrite thinking message
+                                    if parts[0].strip():
+                                        yield parts[0]
+                                    if not error_reported:
+                                        self.console.print("[blue i]Thinking...[/blue i]", end='\r')  # Overwrite thinking message
                                 else:
                                     processed_content += current_content_part
                                     current_content_part = ""
-                            else: # in_thought
+                            else:  # in_thought
                                 if "</thought>" in current_content_part:
                                     in_thought = False
                                     parts = current_content_part.partition("</thought>")
@@ -274,22 +262,24 @@ class OllamaClient(LLMClient):
                                     total_thought += thought_buffer.strip()
                                     if logger.isEnabledFor(logging.DEBUG) and not error_reported:
                                         logger.debug(f"Thought: {total_thought}")
-                                        self.console.print(" "*20, end='\r') # Still clear the 'Thinking...' message
+                                        self.console.print(" "*20, end='\r')  # Still clear the 'Thinking...' message
                                     total_thought = ""
                                     thought_buffer = ""
                                 else:
                                     thought_buffer += current_content_part.replace("\n", " ")
                                     current_content_part = ""
 
-                        if processed_content: yield processed_content
+                        if processed_content:
+                            yield processed_content
                     else:
-                        yield content # Plaintext or no tags found
+                        yield content  # Plaintext or no tags found
         except Exception as e:
             if not error_reported:
                  self.console.print(f"\n[bold red]Error during Ollama stream processing:[/bold red] {str(e)}")
                  yield f"\nERROR: {str(e)}"
         finally:
-            if not error_reported: self.console.print(" " * 20, end='\r') # Clear thinking message if active
+            if not error_reported:
+                self.console.print(" " * 20, end='\r')  # Clear thinking message if active
             http_response.close()
 
     def get_styling(self) -> tuple[str | None, str]:

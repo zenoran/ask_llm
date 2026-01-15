@@ -13,7 +13,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 if TYPE_CHECKING:
-    from .postgresql import PostgreSQLMemoryBackend
+    pass
 
 
 class PostgreSQLShortTermManager:

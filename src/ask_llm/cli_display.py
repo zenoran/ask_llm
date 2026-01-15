@@ -8,7 +8,6 @@ import argparse
 import importlib.util
 import os
 import shutil
-from pathlib import Path
 from typing import Callable
 
 from rich.console import Console
@@ -17,7 +16,7 @@ from rich.table import Table
 
 from ask_llm.utils.config import Config, has_database_credentials, is_huggingface_available, is_llama_cpp_available
 from ask_llm.bots import BotManager
-from ask_llm.user_profile import UserProfileManager, UserProfile, DEFAULT_USER_ID
+from ask_llm.user_profile import UserProfileManager, DEFAULT_USER_ID
 
 console = Console()
 
@@ -33,8 +32,6 @@ def _get_service_client_func() -> Callable | None:
 
 def show_status(config: Config, args: argparse.Namespace | None = None):
     """Display overall system status including dependencies, bots, memory, and configuration."""
-    from ask_llm.core import discover_memory_backends
-    
     console.print(Panel.fit("[bold magenta]ask_llm System Status[/bold magenta]", border_style="magenta"))
     console.print()
     
@@ -102,7 +99,7 @@ def _add_service_status(table: Table, config: Config):
                         else:
                             uptime_str = f"{seconds}s"
                     
-                    service_status = f"[green]✓ Running[/green]"
+                    service_status = "[green]✓ Running[/green]"
                     if uptime_str:
                         service_status += f" [dim](uptime: {uptime_str})[/dim]"
                     table.add_row("  Status", service_status)
@@ -151,7 +148,7 @@ def _add_session_status(table: Table, config: Config, args: argparse.Namespace):
         model_source = "[dim]-m flag[/dim]"
     elif target_bot.default_model:
         model_alias = target_bot.default_model
-        model_source = f"[dim]bot default[/dim]"
+        model_source = "[dim]bot default[/dim]"
     else:
         model_alias = config.DEFAULT_MODEL_ALIAS
         model_source = "[dim]config default[/dim]"
@@ -177,7 +174,7 @@ def _add_session_status(table: Table, config: Config, args: argparse.Namespace):
     # Determine effective user
     user_id = getattr(args, 'user', DEFAULT_USER_ID)
     if getattr(args, 'local', False):
-        user_display = f"[dim]N/A (--local mode)[/dim]"
+        user_display = "[dim]N/A (--local mode)[/dim]"
     else:
         try:
             profile_manager = UserProfileManager(config)
@@ -220,7 +217,7 @@ def _add_dependencies_status(table: Table, config: Config):
                 version = match.group(1) if match else "unknown"
                 cuda_status = f"[green]✓ Available[/green] (CUDA {version})"
             else:
-                cuda_status = f"[yellow]⚠ nvcc found but failed[/yellow]"
+                cuda_status = "[yellow]⚠ nvcc found but failed[/yellow]"
         except Exception:
             cuda_status = f"[green]✓ Available[/green] (nvcc at {nvcc_path})"
     table.add_row("  CUDA", cuda_status)
@@ -424,7 +421,7 @@ def _add_pipeline_checks(table: Table, config: Config):
     backends = discover_memory_backends()
     if 'postgresql' in backends and has_database_credentials(config):
         try:
-            from pgvector.psycopg2 import register_vector
+            from pgvector.psycopg2 import register_vector  # noqa: F401
             table.add_row("  Memory Backend", "[green]✓ PostgreSQL + pgvector[/green]")
         except ImportError:
             table.add_row("  Memory Backend", "[yellow]⚠ pgvector Python package not installed[/yellow]")
@@ -492,7 +489,7 @@ def show_bots(config: Config):
     
     console.print(table)
     console.print()
-    console.print(f"[dim]⭐ = default bot | ✓ = requires database | Use -b/--bot <slug> to select[/dim]")
+    console.print("[dim]⭐ = default bot | ✓ = requires database | Use -b/--bot <slug> to select[/dim]")
     console.print()
 
 
@@ -512,7 +509,7 @@ def show_user_profile(config: Config, user_id: str = DEFAULT_USER_ID):
     
     if not profile:
         console.print(f"[yellow]No user profile found for '{user_id}'.[/yellow]")
-        console.print(f"[dim]Create one with: llm --user-profile-setup[/dim]")
+        console.print("[dim]Create one with: llm --user-profile-setup[/dim]")
         return
     
     console.print(Panel.fit(f"[bold cyan]User Profile: {user_id}[/bold cyan]", border_style="cyan"))
@@ -591,5 +588,5 @@ def show_users(config: Config):
     
     console.print(table)
     console.print()
-    console.print(f"[dim]Use --user <id> to select a user profile[/dim]")
+    console.print("[dim]Use --user <id> to select a user profile[/dim]")
     console.print()
