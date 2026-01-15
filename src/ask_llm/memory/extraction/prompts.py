@@ -16,6 +16,13 @@ MEMORY_TAGS = [
   "misc",            # Anything that doesn't fit above
 ]
 
+# Profile attribute categories for persistent user traits
+PROFILE_ATTRIBUTE_CATEGORIES = [
+  "preference",      # User preferences (communication style, UI, etc.)
+  "fact",            # Persistent facts (age, name, location)
+  "interest",        # Hobbies, interests
+]
+
 # Note: Use get_fact_extraction_prompt(conversation) to get the formatted prompt
 FACT_EXTRACTION_PROMPT_TEMPLATE = """You are a memory extraction assistant. Your task is to extract important facts, preferences, and information from conversations that would be valuable to remember for future interactions.
 
@@ -44,6 +51,11 @@ For each fact, assign:
   - 0.7-0.9: Important, should be remembered
   - 1.0: Critical, essential information
 - intent: A brief phrase (3-6 words) describing WHY the user shared this. Be specific to the situation rather than generic.
+- profile_attribute: ONLY set this for PERSISTENT user traits that define who they are. NOT for events, moods, or temporary states.
+  - Set to null/omit for: events, plans, temporary states, emotional reactions, conversational context
+  - Set to {{"category": "...", "key": "..."}} for: age, name, occupation, pets, family, location, persistent preferences, hobbies
+  - Categories: """ + str(PROFILE_ATTRIBUTE_CATEGORIES) + """
+  - Key should be a short identifier like "age", "occupation", "pets", "location", "programming_language_preference"
 
 Examples:
 
@@ -60,27 +72,30 @@ Output:
       "content": "User is a software engineer working at Google",
       "tags": ["professional"],
       "importance": 0.8,
-      "intent": "establishing context"
+      "intent": "establishing professional context",
+      "profile_attribute": {{"category": "fact", "key": "occupation"}}
     }},
     {{
       "content": "User works primarily on backend projects",
       "tags": ["professional"], 
       "importance": 0.6,
-      "intent": "providing background"
+      "intent": "providing background",
+      "profile_attribute": null
     }},
     {{
       "content": "User uses Python and Go programming languages",
-      "tags": ["professional"],
+      "tags": ["professional", "preference"],
       "importance": 0.7,
-      "intent": "providing background"
+      "intent": "sharing technical preferences",
+      "profile_attribute": {{"category": "preference", "key": "programming_languages"}}
     }}
   ]
 }}
 ```
 
 Input conversation:
-User: Can you help me write a for loop?
-Assistant: Sure! Here's an example...
+User: I'm so frustrated with this bug!
+Assistant: I understand. Let me help you debug it.
 
 Output:
 ```json
@@ -88,27 +103,56 @@ Output:
   "facts": []
 }}
 ```
+(Note: Temporary emotional states are NOT extracted as facts or profile attributes)
 
 Input conversation:
-User: I have a doctor's appointment next Tuesday for my back pain
-Assistant: I hope it goes well! Is the back pain something new?
-User: No, I've had chronic lower back issues for about 2 years now
+User: I have 2 dogs, Nora and Cabbie
+Assistant: Nice! What breeds are they?
+User: Nora is a lab mix and Cabbie is short for Cabernet - she was from a litter named after wines
 
 Output:
 ```json
 {{
   "facts": [
     {{
-      "content": "User has a doctor's appointment scheduled for next Tuesday",
-      "tags": ["event"],
-      "importance": 0.5,
-      "intent": "sharing upcoming event"
+      "content": "User has 2 dogs named Nora and Cabbie",
+      "tags": ["fact", "relationship"],
+      "importance": 0.8,
+      "intent": "sharing about pets",
+      "profile_attribute": {{"category": "fact", "key": "pets"}}
     }},
     {{
-      "content": "User has chronic lower back pain that has persisted for approximately 2 years",
-      "tags": ["health"],
-      "importance": 0.8,
-      "intent": "providing health context"
+      "content": "Nora is a lab mix",
+      "tags": ["fact"],
+      "importance": 0.5,
+      "intent": "providing pet details",
+      "profile_attribute": null
+    }},
+    {{
+      "content": "Cabbie is short for Cabernet, from a wine-themed litter",
+      "tags": ["fact"],
+      "importance": 0.6,
+      "intent": "sharing pet backstory",
+      "profile_attribute": null
+    }}
+  ]
+}}
+```
+
+Input conversation:
+User: I'm 45 years old
+Assistant: Got it!
+
+Output:
+```json
+{{
+  "facts": [
+    {{
+      "content": "User is 45 years old",
+      "tags": ["fact"],
+      "importance": 0.7,
+      "intent": "sharing personal info",
+      "profile_attribute": {{"category": "fact", "key": "age"}}
     }}
   ]
 }}

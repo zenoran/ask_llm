@@ -85,3 +85,4 @@ cython_debug/
 .idea/
 .ruff_cache/
 .pypirc
+.run/llm-service.pid

@@ -989,13 +989,8 @@ def run_app(args: argparse.Namespace, config_obj: Config, resolved_alias: str):
             bot = bot_manager.get_default_bot()
         bot_id = bot.slug
     
-    # Ensure user profile exists (prompts for setup on first use)
-    # Skip in local mode - it's transient/DB-free
     # Use config default if --user not specified
     user_id = args.user if args.user != DEFAULT_USER_ID else config_obj.DEFAULT_USER
-    user_profile = None
-    if not args.local:
-        user_profile = ensure_user_profile(config_obj, user_id)
     
     # Check if we're using service mode - explicit flag or config default
     # --local takes precedence and disables service mode

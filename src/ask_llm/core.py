@@ -120,8 +120,15 @@ class AskLLM:
                 context_parts = []
                 if user_context:
                     context_parts.append(f"## About the User\n{user_context}")
+                    # Print full user profile on startup for monitoring
+                    console.print(f"[dim]─── User Profile ({self.user_id}) ───[/dim]")
+                    console.print(f"[cyan]{user_context}[/cyan]")
+                    console.print(f"[dim]{'─' * 30}[/dim]")
                 if bot_context:
                     context_parts.append(f"## Your Developed Traits\n{bot_context}")
+                    console.print(f"[dim]─── Bot Profile ({self.bot_id}) ───[/dim]")
+                    console.print(f"[magenta]{bot_context}[/magenta]")
+                    console.print(f"[dim]{'─' * 30}[/dim]")
                 
                 if context_parts:
                     profile_context = "\n\n".join(context_parts)

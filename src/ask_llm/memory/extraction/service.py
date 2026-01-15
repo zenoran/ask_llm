@@ -42,6 +42,7 @@ class ExtractedFact:
     importance: float
     source_message_ids: list[str] = field(default_factory=list)
     meaning: Optional["MeaningAssociation"] = None
+    profile_attribute: dict | None = None  # If set, should be stored as user profile attribute
     
     def to_dict(self) -> dict:
         return {
@@ -50,6 +51,7 @@ class ExtractedFact:
             "importance": self.importance,
             "source_message_ids": self.source_message_ids,
             "meaning": self.meaning.to_dict() if self.meaning else None,
+            "profile_attribute": self.profile_attribute,
         }
 
 
@@ -243,12 +245,22 @@ class MemoryExtractionService:
                 if llm_intent:
                     meaning = MeaningAssociation(intent=llm_intent)
                 
+                # Capture profile_attribute if provided by LLM
+                profile_attr = raw_fact.get("profile_attribute")
+                if profile_attr and isinstance(profile_attr, dict):
+                    # Validate it has required fields
+                    if "category" in profile_attr and "key" in profile_attr:
+                        logger.debug(f"LLM identified profile attribute: {profile_attr}")
+                    else:
+                        profile_attr = None  # Invalid format
+                
                 facts.append(ExtractedFact(
                     content=content,
                     tags=tags,
                     importance=importance,
                     source_message_ids=message_ids.copy(),
                     meaning=meaning,
+                    profile_attribute=profile_attr,
                 ))
                 
         except json.JSONDecodeError as e:

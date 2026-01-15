@@ -466,7 +466,7 @@ class ServiceLogger:
         # Skip redundant info for simple operations
         if _verbose:
             # Operations that are simple confirmations - no extra detail needed
-            simple_operations = {"add_message", "store_memory"}
+            simple_operations = {"add_message"}  # store_memory SHOULD show content
             
             if operation not in simple_operations:
                 if params:
@@ -481,6 +481,18 @@ class ServiceLogger:
 
     def _log_mcp_params(self, operation: str, params: dict[str, Any]) -> None:
         """Log MCP operation parameters in verbose mode - one line."""
+        # For store_memory, show the content prominently
+        if operation == "store_memory" and "content" in params:
+            content = params["content"]
+            # Show full content up to 200 chars
+            if len(content) > 200:
+                content = content[:200] + "..."
+            tags = params.get("tags", [])
+            importance = params.get("importance", 0.5)
+            self._console.print(f"  [dim]content:[/dim] [cyan]{content}[/cyan]")
+            self._console.print(f"  [dim]tags={tags} importance={importance:.1f}[/dim]")
+            return
+            
         param_strs = []
         for k, v in params.items():
             if isinstance(v, str) and len(v) > 80:

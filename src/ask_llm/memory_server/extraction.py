@@ -21,15 +21,6 @@ _service: MemoryExtractionService | None = None
 _llm_client: Any = None
 
 
-# Tags that indicate the fact should also be stored as a profile attribute
-PROFILE_ATTRIBUTE_TAGS = {
-    "preference": "preference",
-    "fact": "fact", 
-    "professional": "fact",
-    "health": "fact",
-    "relationship": "fact",
-}
-
 # Minimum importance to consider for profile attributes (fallback)
 PROFILE_ATTRIBUTE_MIN_IMPORTANCE = 0.6
 
@@ -39,13 +30,13 @@ def extract_profile_attributes_from_fact(
     user_id: str = "default",
     config: Config | None = None,
 ) -> bool:
-    """Extract profile attributes from a fact if applicable.
+    """Extract profile attributes from a fact if the LLM identified it as one.
     
-    Checks if the fact represents something that should be stored as a
-    user profile attribute (in addition to long-term memory).
+    The LLM extraction prompt now includes profile_attribute classification.
+    This function reads that classification and stores the attribute.
     
     Args:
-        fact: ExtractedFact object or dict with content, tags, importance
+        fact: ExtractedFact object or dict with content, tags, importance, profile_attribute
         user_id: The user to associate the attribute with
         config: Config object for database connection
         
@@ -57,45 +48,31 @@ def extract_profile_attributes_from_fact(
     # Extract fact properties
     if isinstance(fact, dict):
         content = fact.get("content", "")
-        tags = fact.get("tags", [])
         importance = fact.get("importance", 0.5)
+        profile_attr = fact.get("profile_attribute")
     else:
         content = fact.content
-        tags = fact.tags
         importance = fact.importance
-    
-    logger.info(f"[Profile] Checking fact: '{content[:60]}...' tags={tags} importance={importance:.2f}")
+        profile_attr = getattr(fact, "profile_attribute", None)
     
     # Check if profile extraction is enabled
     if not getattr(config, "MEMORY_PROFILE_ATTRIBUTE_ENABLED", True):
         logger.debug("[Profile] Profile extraction disabled")
         return False
-
-    # Check if importance meets threshold
-    min_importance = getattr(config, "MEMORY_PROFILE_ATTRIBUTE_MIN_IMPORTANCE", PROFILE_ATTRIBUTE_MIN_IMPORTANCE)
-    if importance < min_importance:
-        logger.debug(f"[Profile] Importance {importance:.2f} < threshold {min_importance:.2f}")
+    
+    # Check if LLM identified this as a profile attribute
+    if not profile_attr or not isinstance(profile_attr, dict):
+        logger.debug(f"[Profile] No profile_attribute from LLM for: '{content[:50]}...'")
         return False
     
-    # Check if any tags indicate a profile attribute
-    category = None
-    for tag in tags:
-        tag_lower = tag.lower()
-        if tag_lower in PROFILE_ATTRIBUTE_TAGS:
-            category = PROFILE_ATTRIBUTE_TAGS[tag_lower]
-            break
+    category = profile_attr.get("category")
+    key = profile_attr.get("key")
     
-    if not category:
-        logger.debug(f"[Profile] No matching category for tags: {tags}")
+    if not category or not key:
+        logger.debug(f"[Profile] Invalid profile_attribute format: {profile_attr}")
         return False
     
-    # Try to extract a key from the content
-    key = _extract_attribute_key(content)
-    if not key:
-        logger.debug(f"[Profile] Could not extract key from content")
-        return False
-    
-    logger.info(f"[Profile] Extracted key '{key}' for category '{category}'")
+    logger.info(f"[Profile] LLM identified attribute: {category}.{key} = '{content[:50]}...'")
     
     # Store as profile attribute
     try:
@@ -118,102 +95,6 @@ def extract_profile_attributes_from_fact(
     except Exception as e:
         logger.exception(f"[Profile] Failed to create profile attribute: {e}")
         return False
-
-
-def _extract_attribute_key(content: str) -> str | None:
-    """Extract a meaningful key from fact content.
-    
-    Attempts to identify what the fact is about and create a reasonable key.
-    """
-    content_lower = content.lower()
-    
-    logger.debug(f"Extracting key from: {content_lower[:100]}...")
-    
-    # Pattern: "User is <age> years old" -> age
-    if re.search(r"user (?:is )?(\d+)(?: years?)? old", content_lower):
-        return "age"
-    
-    # Pattern: "User has <N> dogs/cats/pets" -> pets
-    if re.search(r"user has (?:\d+ )?(?:dogs?|cats?|pets?|animals?)", content_lower):
-        return "pets"
-    
-    # Pattern: "User's dog/cat/pet is named" or "User has a dog named" -> pet_names
-    if re.search(r"(?:dog|cat|pet)(?:s)? (?:is |are )?named", content_lower):
-        return "pet_names"
-    
-    # Pattern: "User is a <something>" -> occupation, role, etc.
-    if match := re.search(r"user (?:is|works as) (?:a |an )?([^,\.]+)", content_lower):
-        term = match.group(1).strip()
-        if any(word in term for word in ["engineer", "developer", "manager", "programmer", "designer"]):
-            return "occupation"
-        if "student" in term:
-            return "occupation"
-        if any(word in term for word in ["years old", "year old"]):
-            return "age"
-        return "role"
-    
-    # Pattern: "User lives in <place>" -> location
-    if re.search(r"user (?:lives|resides|is located|is based|is from) in", content_lower):
-        return "location"
-    
-    # Pattern: "User prefers <something>" -> specific preference
-    if match := re.search(r"user (?:prefers?|likes?|loves?|enjoys?) ([^,\.]+)", content_lower):
-        term = match.group(1).strip()
-        if any(word in term for word in ["python", "java", "code", "programming", "language"]):
-            return "programming_preference"
-        if any(word in term for word in ["dark", "light", "theme", "mode"]):
-            return "ui_preference"
-        if any(word in term for word in ["concise", "detailed", "verbose", "brief"]):
-            return "communication_style"
-        if any(word in term for word in ["dogs", "cats", "pets", "animals"]):
-            return "pet_preference"
-        return "likes"
-    
-    # Pattern: "User's name is <name>" -> name
-    if re.search(r"user'?s? name is", content_lower):
-        return "name"
-    
-    # Pattern: "User has <condition>" -> health
-    if re.search(r"user has (?:chronic |a )?", content_lower):
-        if any(word in content_lower for word in ["pain", "condition", "disease", "allergy", "diabetes"]):
-            return "health_condition"
-        # Could be pets or other things
-        if any(word in content_lower for word in ["dog", "cat", "pet", "child", "kid"]):
-            return "family"
-    
-    # Pattern: "User works on/with <something>" -> work context
-    if re.search(r"user works (?:on|with)", content_lower):
-        return "work_focus"
-    
-    # Pattern: "User uses <something>" -> tools/tech
-    if re.search(r"user uses", content_lower):
-        return "tools"
-    
-    # Pattern: "User is married/single/divorced" -> relationship_status
-    if re.search(r"user is (?:married|single|divorced|engaged|widowed)", content_lower):
-        return "relationship_status"
-    
-    # Pattern: "User has <N> children/kids" -> family
-    if re.search(r"user has (?:\d+ )?(?:children|kids|child)", content_lower):
-        return "children"
-    
-    # Fallback: use first significant noun phrase after "User"
-    if match := re.search(r"user'?s? ([a-z_]+)", content_lower):
-        key = match.group(1).replace(" ", "_")
-        # Skip generic words
-        if key not in ["is", "has", "the", "a", "an", "was", "will", "would", "can", "could"]:
-            return key
-    
-    # Last resort: if content has "User" and some noun, try to extract it
-    if "user" in content_lower:
-        # Look for patterns like "User <verb> <noun>"
-        if match := re.search(r"user (?:\w+ ){1,2}(\w+)", content_lower):
-            word = match.group(1)
-            if len(word) > 3 and word not in ["that", "this", "with", "from", "about"]:
-                return word
-    
-    logger.debug(f"Could not extract key from: {content_lower[:60]}...")
-    return None
 
 
 def _get_extraction_client(config: Config) -> Any:

@@ -129,8 +129,15 @@ class ServiceAskLLM:
                 context_parts = []
                 if user_context:
                     context_parts.append(f"## About the User\n{user_context}")
+                    # Print full user profile on startup for monitoring
+                    console.print(f"[dim]─── User Profile ({self.user_id}) ───[/dim]")
+                    console.print(f"[cyan]{user_context}[/cyan]")
+                    console.print(f"[dim]{'─' * 30}[/dim]")
                 if bot_context:
                     context_parts.append(f"## Your Developed Traits\n{bot_context}")
+                    console.print(f"[dim]─── Bot Profile ({self.bot_id}) ───[/dim]")
+                    console.print(f"[magenta]{bot_context}[/magenta]")
+                    console.print(f"[dim]{'─' * 30}[/dim]")
                 
                 if context_parts:
                     profile_context = "\n\n".join(context_parts)
@@ -342,7 +349,10 @@ class ServiceAskLLM:
     def _trigger_memory_extraction(self, user_prompt: str, assistant_response: str):
         """Trigger background memory extraction (non-blocking)."""
         if not self.memory:
+            logger.debug("Skipping extraction - no memory client")
             return
+        
+        logger.info(f"[Extraction] Triggering for bot={self.bot_id} user={self.user_id}")
         
         def extract():
             try:
@@ -359,9 +369,12 @@ class ServiceAskLLM:
                         message_ids=[str(uuid.uuid4()), str(uuid.uuid4())],
                         model=self.resolved_model_alias,
                     )
-                    client.submit_task(task)
+                    result = client.submit_task(task)
+                    logger.info(f"[Extraction] Task submitted: {task.task_id}")
+                else:
+                    logger.warning("[Extraction] Service not available")
             except Exception as e:
-                logger.debug(f"Memory extraction failed: {e}")
+                logger.exception(f"[Extraction] Failed: {e}")
         
         thread = threading.Thread(target=extract, daemon=True)
         thread.start()
@@ -443,6 +456,7 @@ class ServiceAskLLM:
         if response:
             self.history_manager.add_message("assistant", response)
             
-            # Trigger background memory extraction if available (skip for tool bots - they store directly)
-            if self.memory and not self.bot.uses_tools:
+            # Always trigger background memory extraction - it extracts facts and profile attributes
+            # Even if bot has tools, the bot may not reliably use them, so extraction is a backup
+            if self.memory:
                 self._trigger_memory_extraction(user_prompt, response)
