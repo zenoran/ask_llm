@@ -672,10 +672,6 @@ class ServiceLogger:
         
         self._console.print(" | ".join(parts))
         
-        # Show the full user prompt
-        if user_prompt:
-            self._console.print(f"  [green]prompt:[/green] {user_prompt}")
-        
         # Show memory content (this is the key troubleshooting info)
         if memory_content:
             self._console.print(f"  [yellow]memories injected:[/yellow]")

@@ -24,141 +24,97 @@ PROFILE_ATTRIBUTE_CATEGORIES = [
 ]
 
 # Note: Use get_fact_extraction_prompt(conversation) to get the formatted prompt
-FACT_EXTRACTION_PROMPT_TEMPLATE = """You are a memory extraction assistant. Your task is to extract important facts, preferences, and information from conversations that would be valuable to remember for future interactions.
+FACT_EXTRACTION_PROMPT_TEMPLATE = """You are a Personal Information Organizer. Your task is to extract ONLY persistent, meaningful facts about the USER that would be valuable to remember in future conversations.
 
-Analyze the conversation and extract discrete facts. Focus on:
-- User preferences (likes, dislikes, habits)
-- Personal details (name, location, occupation, relationships)
-- Plans and goals (upcoming events, aspirations)
-- Professional information (job, skills, projects)
-- Health information (conditions, medications, fitness)
-- Important events (past experiences, milestones)
+## CRITICAL RULES - READ CAREFULLY:
 
-Rules:
-1. Extract ONLY information explicitly stated or strongly implied
-2. Each fact should be a single, atomic piece of information
-3. Write facts in third person (e.g., "User prefers dark mode" not "You prefer dark mode")
-4. Be specific and include context when relevant
-5. Do NOT infer or assume information not present
-6. Do NOT extract trivial or temporary information (e.g., "User said hello")
-7. If no important facts are present, return an empty list
+1. **ONLY extract facts from USER messages.** Assistant/bot messages are for context only.
+2. **YOU WILL BE PENALIZED** for extracting information from Assistant messages.
+3. **Most conversations have ZERO facts worth storing.** Return empty list when:
+   - Casual greetings ("Hi", "Hello", "How are you")
+   - Generic statements ("The weather is nice")
+   - Roleplay/fiction/creative writing actions
+   - Temporary emotions ("I'm frustrated", "I'm happy")
+   - In-the-moment actions (*walks over*, *leans in*, etc.)
+4. **Only store PERSISTENT information** that defines who the user IS, not what they're doing right now.
 
-For each fact, assign:
-- tags: One or more from """ + str(MEMORY_TAGS) + """ (you may add additional short tags if needed)
-- importance: Float 0.0-1.0 where:
-  - 0.0-0.3: Nice to know, low priority
-  - 0.4-0.6: Moderately important, useful context
-  - 0.7-0.9: Important, should be remembered
-  - 1.0: Critical, essential information
-- intent: A brief phrase (3-6 words) describing WHY the user shared this. Be specific to the situation rather than generic.
-- profile_attribute: ONLY set this for PERSISTENT user traits that define who they are. NOT for events, moods, or temporary states.
-  - Set to null/omit for: events, plans, temporary states, emotional reactions, conversational context
-  - Set to {{"category": "...", "key": "..."}} for: age, name, occupation, pets, family, location, persistent preferences, hobbies
-  - Categories: """ + str(PROFILE_ATTRIBUTE_CATEGORIES) + """
-  - Key should be a short identifier like "age", "occupation", "pets", "location", "programming_language_preference"
+## What TO extract (only if user explicitly states it):
+- Personal details: name, age, location, occupation
+- Family/relationships: spouse, children, pets (names, details)
+- Preferences: likes, dislikes, habits that persist over time
+- Professional: job, skills, employer, projects
+- Health: conditions, allergies, fitness routines
+- Plans: significant life events, goals, upcoming milestones
 
-Examples:
+## What NOT to extract:
+- Anything the Assistant says or describes doing
+- Roleplay narration or fictional scenarios
+- Temporary moods, emotions, or states
+- Actions in the moment (*does something*)
+- Generic small talk
+- Information that changes minute to minute
 
-Input conversation:
-User: I'm a software engineer working at Google
-Assistant: That's great! What kind of projects do you work on?
-User: Mostly backend stuff with Python and Go
+## Examples:
 
-Output:
-```json
-{{
-  "facts": [
-    {{
-      "content": "User is a software engineer working at Google",
-      "tags": ["professional"],
-      "importance": 0.8,
-      "intent": "establishing professional context",
-      "profile_attribute": {{"category": "fact", "key": "occupation"}}
-    }},
-    {{
-      "content": "User works primarily on backend projects",
-      "tags": ["professional"], 
-      "importance": 0.6,
-      "intent": "providing background",
-      "profile_attribute": null
-    }},
-    {{
-      "content": "User uses Python and Go programming languages",
-      "tags": ["professional", "preference"],
-      "importance": 0.7,
-      "intent": "sharing technical preferences",
-      "profile_attribute": {{"category": "preference", "key": "programming_languages"}}
-    }}
-  ]
-}}
-```
+Input:
+User: Hi there!
+Assistant: Hello! How can I help you today?
 
-Input conversation:
+Output: {{"facts": []}}
+
+Input:
+User: The weather is nice today.
+Assistant: It sure is! Perfect day to be outside.
+
+Output: {{"facts": []}}
+
+Input:
+User: *leans in closer and whispers*
+Assistant: I lean in, feeling the heat between us. My hand finds yours. "Let's get out of here," I whisper. We're moving fast, need privacy, need a bed.
+
+Output: {{"facts": []}}
+(Roleplay actions and Assistant narration are NEVER extracted)
+
+Input:
 User: I'm so frustrated with this bug!
 Assistant: I understand. Let me help you debug it.
 
-Output:
-```json
-{{
-  "facts": []
-}}
-```
-(Note: Temporary emotional states are NOT extracted as facts or profile attributes)
+Output: {{"facts": []}}
+(Temporary emotions are not facts)
 
-Input conversation:
-User: I have 2 dogs, Nora and Cabbie
-Assistant: Nice! What breeds are they?
-User: Nora is a lab mix and Cabbie is short for Cabernet - she was from a litter named after wines
+Input:
+User: I'm a software engineer at Google
+Assistant: That's great! What do you work on?
 
 Output:
 ```json
-{{
-  "facts": [
-    {{
-      "content": "User has 2 dogs named Nora and Cabbie",
-      "tags": ["fact", "relationship"],
-      "importance": 0.8,
-      "intent": "sharing about pets",
-      "profile_attribute": {{"category": "fact", "key": "pets"}}
-    }},
-    {{
-      "content": "Nora is a lab mix",
-      "tags": ["fact"],
-      "importance": 0.5,
-      "intent": "providing pet details",
-      "profile_attribute": null
-    }},
-    {{
-      "content": "Cabbie is short for Cabernet, from a wine-themed litter",
-      "tags": ["fact"],
-      "importance": 0.6,
-      "intent": "sharing pet backstory",
-      "profile_attribute": null
-    }}
-  ]
-}}
+{{"facts": [{{"content": "User is a software engineer at Google", "tags": ["professional"], "importance": 0.8}}]}}
 ```
 
-Input conversation:
-User: I'm 45 years old
-Assistant: Got it!
+Input:
+User: I have 2 dogs named Nora and Cabbie
+Assistant: What breeds?
+User: Nora is a lab mix. Cabbie is short for Cabernet - from a wine-themed litter.
 
 Output:
 ```json
-{{
-  "facts": [
-    {{
-      "content": "User is 45 years old",
-      "tags": ["fact"],
-      "importance": 0.7,
-      "intent": "sharing personal info",
-      "profile_attribute": {{"category": "fact", "key": "age"}}
-    }}
-  ]
-}}
+{{"facts": [{{"content": "User has 2 dogs: Nora (lab mix) and Cabbie (short for Cabernet)", "tags": ["fact", "relationship"], "importance": 0.8}}]}}
 ```
+(Note: Combined into ONE fact, not three separate ones)
 
-Now extract facts from the following conversation:
+## Output Format:
+
+Return JSON with a "facts" array. Each fact needs:
+- content: The fact in third person ("User...")
+- tags: From """ + str(MEMORY_TAGS) + """
+- importance: 0.0-1.0 (0.7+ for genuinely important persistent info)
+
+For truly persistent traits, optionally add:
+- profile_attribute: {{"category": "fact|preference|interest", "key": "short_identifier"}}
+
+Be EXTREMELY selective. When in doubt, return empty list.
+
+Now extract facts from:
 
 {conversation}
 

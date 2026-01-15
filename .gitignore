@@ -86,3 +86,4 @@ cython_debug/
 .ruff_cache/
 .pypirc
 .run/llm-service.pid
+.run/memory-server.pid
