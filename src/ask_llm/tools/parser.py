@@ -13,6 +13,43 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
+def _try_fix_json(json_str: str) -> str | None:
+    """Try to fix common JSON errors from LLM output.
+    
+    Models sometimes output malformed JSON like:
+    - Extra closing braces: {"name": "foo", "arguments": {}}}
+    - Missing quotes around keys
+    - Trailing commas
+    
+    Returns:
+        Fixed JSON string, or None if unfixable.
+    """
+    original = json_str
+    
+    # Fix extra closing braces (common: }}} instead of }})
+    # Count opening and closing braces
+    open_count = json_str.count('{')
+    close_count = json_str.count('}')
+    if close_count > open_count:
+        # Remove extra closing braces from the end
+        excess = close_count - open_count
+        while excess > 0 and json_str.rstrip().endswith('}'):
+            json_str = json_str.rstrip()[:-1]
+            excess -= 1
+    
+    # Fix missing closing braces
+    if open_count > close_count:
+        json_str = json_str + ('}' * (open_count - close_count))
+    
+    # Remove trailing commas before closing braces/brackets
+    json_str = re.sub(r',\s*}', '}', json_str)
+    json_str = re.sub(r',\s*]', ']', json_str)
+    
+    if json_str != original:
+        return json_str
+    return None
+
+
 @dataclass
 class ToolCall:
     """A parsed tool call from model output."""
@@ -90,6 +127,24 @@ def parse_tool_calls(text: str) -> tuple[list[ToolCall], str]:
                 logger.warning(f"Tool call missing 'name' field: {json_str}")
                 
         except json.JSONDecodeError as e:
+            # Try to fix common JSON errors from models
+            fixed_json = _try_fix_json(json_str)
+            if fixed_json:
+                try:
+                    data = json.loads(fixed_json)
+                    name = data.get("name")
+                    arguments = data.get("arguments") or data.get("args") or {}
+                    if name:
+                        tool_calls.append(ToolCall(
+                            name=name,
+                            arguments=arguments,
+                            raw_text=match.group(0)
+                        ))
+                        remaining_text = remaining_text.replace(match.group(0), "", 1)
+                        logger.debug(f"Fixed malformed JSON: {json_str} -> {fixed_json}")
+                        continue
+                except json.JSONDecodeError:
+                    pass
             logger.warning(f"Failed to parse tool call JSON: {e}\nText: {json_str}")
     
     # Clean up remaining text

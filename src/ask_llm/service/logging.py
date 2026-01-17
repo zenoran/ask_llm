@@ -627,6 +627,7 @@ class ServiceLogger:
         Log a summary of messages being sent to the LLM (verbose only).
         
         Shows a compact summary: message counts by type, memory content, and the user prompt.
+        With --verbose, also dumps the full message contents.
         """
         if not _verbose:
             return
@@ -672,13 +673,48 @@ class ServiceLogger:
         
         self._console.print(" | ".join(parts))
         
-        # Show memory content (this is the key troubleshooting info)
-        if memory_content:
-            self._console.print(f"  [yellow]memories injected:[/yellow]")
-            # Show the full memory content, nicely indented
-            for line in memory_content.split("\n"):
-                if line.strip():
-                    self._console.print(f"    {line}")
+        # VERBOSE: Dump conversation history (skip system prompt, only show last few turns)
+        self._console.print(f"[dim]{'─' * 60}[/dim]")
+        
+        # Find non-system messages (the actual conversation)
+        conv_messages = [(i, msg) for i, msg in enumerate(messages) 
+                        if (hasattr(msg, 'role') and msg.role != 'system') or 
+                           (isinstance(msg, dict) and msg.get('role') != 'system')]
+        
+        # Show system prompt summary (just length)
+        system_msgs = [msg for msg in messages 
+                      if (hasattr(msg, 'role') and msg.role == 'system') or
+                         (isinstance(msg, dict) and msg.get('role') == 'system')]
+        if system_msgs:
+            sys_content = system_msgs[0].content if hasattr(system_msgs[0], 'content') else system_msgs[0].get('content', '')
+            self._console.print(f"[dim]── SYSTEM ({len(sys_content)} chars) ──[/dim]")
+        
+        # Show last N conversation turns (user + assistant pairs)
+        max_turns_to_show = 3
+        if len(conv_messages) > max_turns_to_show * 2:
+            skipped = len(conv_messages) - max_turns_to_show * 2
+            self._console.print(f"[dim]... ({skipped} earlier messages) ...[/dim]")
+            conv_messages = conv_messages[-(max_turns_to_show * 2):]
+        
+        for i, msg in conv_messages:
+            if hasattr(msg, 'role'):
+                role = msg.role
+                content = msg.content or ""
+            else:
+                role = msg.get('role', 'unknown')
+                content = msg.get('content', '')
+            
+            # Color by role
+            if role == "user":
+                role_color = "green"
+            else:
+                role_color = "blue"
+            
+            # Truncate long messages
+            display_content = content[:300] + "..." if len(content) > 300 else content
+            self._console.print(f"[{role_color}]── {role.upper()} ──[/{role_color}]")
+            self._console.print(display_content)
+        self._console.print(f"[dim]{'─' * 60}[/dim]")
 
     def llm_response(self, response: str, tokens: int | None = None, elapsed_ms: float | None = None) -> None:
         """Log a summary of the LLM response (verbose only)."""

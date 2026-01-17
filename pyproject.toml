@@ -55,6 +55,11 @@ mcp = [
     "mcp[cli]>=1.0.0",
 ]
 
+search = [
+    "ddgs>=7.0.0",  # DuckDuckGo search (free, no API key)
+    "tavily-python>=0.5.0",  # Tavily search (production, API key required)
+]
+
 
 [project.scripts]
 ask-llm = "ask_llm.main:main"

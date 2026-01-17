@@ -13,6 +13,7 @@ from .bots import BotManager, get_system_prompt
 from .profiles import ProfileManager, EntityType
 from .memory_server.client import MemoryClient, get_memory_client
 from .tools import get_tools_prompt, query_with_tools
+from .search import get_search_client, SearchClient
 import logging
 
 try:
@@ -55,6 +56,7 @@ class AskLLM:
         self.user_id = user_id
         self.memory: MemoryClient | None = None
         self.profile_manager: ProfileManager | None = None
+        self.search_client: SearchClient | None = None
 
         if not self.model_definition:
             raise ValueError(f"Could not find model definition for resolved alias: '{resolved_model_alias}'")
@@ -97,14 +99,29 @@ class AskLLM:
                     console.print(f"[bold yellow]Warning:[/bold yellow] Memory client failed: {e}")
                 self.memory = None
 
+        # Initialize search client if bot uses search
+        if getattr(self.bot, 'uses_search', False):
+            try:
+                self.search_client = get_search_client(config)
+                if self.search_client and self.search_client.is_available():
+                    logger.debug(f"Search client initialized: {self.search_client.PROVIDER.value}")
+                else:
+                    logger.debug("Search requested but no provider available")
+                    self.search_client = None
+            except Exception as e:
+                logger.warning(f"Failed to initialize search client: {e}")
+                self.search_client = None
+
         # Set system message with optional user profile and tools
         system_prompt = self.bot.system_prompt
         
         # Add tool instructions if bot uses tools
         if self.bot.uses_tools and self.memory:
-            tools_prompt = get_tools_prompt()
+            # Include search tools only if search client is available
+            include_search = self.search_client is not None
+            tools_prompt = get_tools_prompt(include_search_tools=include_search)
             system_prompt = f"{system_prompt}\n\n{tools_prompt}"
-            logger.debug(f"Bot '{self.bot.name}' has tool calling enabled")
+            logger.debug(f"Bot '{self.bot.name}' has tool calling enabled (search={include_search})")
         
         if self._db_available:
             try:
@@ -192,6 +209,7 @@ class AskLLM:
                     query_fn=query_fn,
                     memory_client=self.memory,
                     profile_manager=self.profile_manager,
+                    search_client=self.search_client,
                     user_id=self.user_id,
                     bot_id=self.bot_id,
                     stream=stream,
@@ -241,13 +259,45 @@ class AskLLM:
         if system_parts:
             messages.append(Message(role="system", content="\n\n".join(system_parts)))
         
-        # Add conversation history
-        history = self.history_manager.get_context_messages()
-        for msg in history:
-            if msg.role in ("user", "assistant"):
-                messages.append(msg)
+        # Add conversation history.
+        # For tool-enabled bots, optionally skip history for search-like prompts
+        # to avoid stale tool outputs polluting context.
+        include_history = True
+        if self.bot.uses_tools and self.memory and getattr(self.config, "TOOLS_SKIP_HISTORY", True):
+            include_history = not self._should_skip_history(prompt)
+
+        if include_history:
+            history = self.history_manager.get_context_messages()
+            for msg in history:
+                if msg.role in ("user", "assistant"):
+                    messages.append(msg)
+        else:
+            # Always include the current user prompt when history is skipped
+            if prompt:
+                messages.append(Message(role="user", content=prompt))
         
         return messages
+
+    def _should_skip_history(self, prompt: str) -> bool:
+        """Return True if history should be skipped for this prompt.
+
+        We skip history for search-like requests to prevent stale tool results
+        (and previous "can't search" replies) from polluting context.
+        """
+        prompt_lower = (prompt or "").lower()
+        search_triggers = (
+            "search",
+            "web_search",
+            "news",
+            "current",
+            "today",
+            "latest",
+            "now",
+            "date",
+            "time",
+            "headline",
+        )
+        return any(token in prompt_lower for token in search_triggers)
 
     def _retrieve_memory_context(self, prompt: str) -> str:
         """Retrieve relevant memories and format as context string."""

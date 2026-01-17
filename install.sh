@@ -12,6 +12,7 @@
 #   --with-llama    Install llama-cpp-python for local GGUF models
 #   --with-hf       Install HuggingFace transformers + torch
 #   --with-service  Install FastAPI service for background tasks & API
+#   --with-search   Install web search providers (DuckDuckGo + Tavily)
 #   --all           Install all optional dependencies
 #   --no-cuda       Skip CUDA support for llama-cpp-python
 #   --uninstall     Remove ask_llm
@@ -30,6 +31,7 @@ NC='\033[0m' # No Color
 INSTALL_LLAMA=false
 INSTALL_HF=false
 INSTALL_SERVICE=false
+INSTALL_SEARCH=false
 WITH_CUDA=true
 UNINSTALL=false
 EDITABLE=false
@@ -50,10 +52,15 @@ while [[ $# -gt 0 ]]; do
             INSTALL_SERVICE=true
             shift
             ;;
+        --with-search)
+            INSTALL_SEARCH=true
+            shift
+            ;;
         --all)
             INSTALL_LLAMA=true
             INSTALL_HF=true
             INSTALL_SERVICE=true
+            INSTALL_SEARCH=true
             shift
             ;;
         --no-cuda)
@@ -195,6 +202,12 @@ if [ "$INSTALL_SERVICE" = true ]; then
     echo -e "${GREEN}✓ FastAPI service dependencies installed${NC}"
 fi
 
+if [ "$INSTALL_SEARCH" = true ]; then
+    echo -e "${BLUE}Installing web search dependencies...${NC}"
+    pipx runpip ask-llm install ddgs tavily-python
+    echo -e "${GREEN}✓ Web search dependencies installed (DuckDuckGo + Tavily)${NC}"
+fi
+
 # Verify installation
 echo
 echo -e "${BLUE}Verifying installation...${NC}"
@@ -232,6 +245,13 @@ echo
 echo -e "Service:"
 echo -e "  ${BLUE}llm-service${NC}            - Start the background service"
 echo -e "  ${BLUE}llm-service --port 8080${NC} - Start on custom port"
+fi
+if [ "$INSTALL_SEARCH" = true ]; then
+echo
+echo -e "Web Search:"
+echo -e "  Bots with ${YELLOW}uses_search: true${NC} can now search the internet"
+echo -e "  Default: DuckDuckGo (free)"
+echo -e "  Set ${YELLOW}TAVILY_API_KEY${NC} in .env for production search"
 fi
 echo
 echo -e "Configuration: ${YELLOW}~/.config/ask-llm/.env${NC}"

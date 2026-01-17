@@ -80,8 +80,16 @@ def handle_add_gguf(repo_id: str, config: Config) -> bool:
 
         api = HfApi()
         console.print("Listing files in repository...")
-        files_in_repo = api.list_repo_files(repo_id=repo_id)
-        gguf_files = sorted([f for f in files_in_repo if f.lower().endswith(".gguf")])
+        # Get file info including sizes
+        repo_info = api.repo_info(repo_id=repo_id, files_metadata=True)
+        gguf_files_info = []
+        for sibling in repo_info.siblings:
+            if sibling.rfilename.lower().endswith(".gguf"):
+                gguf_files_info.append({
+                    "filename": sibling.rfilename,
+                    "size": sibling.size or 0
+                })
+        gguf_files_info = sorted(gguf_files_info, key=lambda x: x["filename"])
     except HfHubHTTPError as e:
         console.print(f"[bold red]Error accessing HF repo '{repo_id}':[/bold red] {e}")
         return False
@@ -89,11 +97,11 @@ def handle_add_gguf(repo_id: str, config: Config) -> bool:
         console.print(f"[bold red]Error listing files in '{repo_id}':[/bold red] {e}")
         return False
 
-    if not gguf_files:
+    if not gguf_files_info:
         console.print(f"[bold red]Error:[/bold red] No GGUF files found in '{repo_id}'.")
         return False
 
-    selected_filename = _select_gguf_file(repo_id, gguf_files)
+    selected_filename = _select_gguf_file(repo_id, gguf_files_info)
     if not selected_filename:
         return False
 
@@ -104,19 +112,37 @@ def handle_add_gguf(repo_id: str, config: Config) -> bool:
     update_success = _update_models_yaml(repo_id, selected_filename, config)
     return update_success
 
-def _select_gguf_file(repo_id: str, gguf_files: List[str]) -> str | None:
-    if len(gguf_files) == 1:
-        selected_filename = gguf_files[0]
-        console.print(f"Found single GGUF file: [green]{selected_filename}[/green]")
+
+def _format_size(size_bytes: int) -> str:
+    """Format file size in human-readable format."""
+    if size_bytes >= 1024 ** 3:
+        return f"{size_bytes / (1024 ** 3):.1f} GB"
+    elif size_bytes >= 1024 ** 2:
+        return f"{size_bytes / (1024 ** 2):.1f} MB"
+    elif size_bytes >= 1024:
+        return f"{size_bytes / 1024:.1f} KB"
+    return f"{size_bytes} B"
+
+
+def _select_gguf_file(repo_id: str, gguf_files_info: list[dict]) -> str | None:
+    """Select a GGUF file from the list with alternating colors and file sizes."""
+    if len(gguf_files_info) == 1:
+        info = gguf_files_info[0]
+        selected_filename = info["filename"]
+        size_str = _format_size(info["size"])
+        console.print(f"Found single GGUF file: [green]{selected_filename}[/green] ({size_str})")
         if not Confirm.ask(f"Add this file?\n  Repo: {repo_id}\n  File: {selected_filename}", default=True):
              console.print("Add operation cancelled.")
              return None
         return selected_filename
     else:
         console.print("Multiple GGUF files found. Select one:")
-        choices_map = {str(i+1): fname for i, fname in enumerate(gguf_files)}
-        for i, fname in enumerate(gguf_files):
-            console.print(f"  [cyan]{i+1}[/cyan]: {fname}")
+        choices_map = {str(i+1): info["filename"] for i, info in enumerate(gguf_files_info)}
+        colors = ["cyan", "dim white"]  # Alternating colors
+        for i, info in enumerate(gguf_files_info):
+            color = colors[i % 2]
+            size_str = _format_size(info["size"])
+            console.print(f"  [{color}]{i+1:3}: {info['filename']:60} {size_str:>10}[/{color}]")
         while True:
             try:
                 choice_str = Prompt.ask("Enter the number of the file", default="1")
@@ -124,10 +150,10 @@ def _select_gguf_file(repo_id: str, gguf_files: List[str]) -> str | None:
                     console.print("[yellow]Invalid input. Please enter a number.[/yellow]")
                     continue
                 choice_int = int(choice_str)
-                if 1 <= choice_int <= len(gguf_files):
+                if 1 <= choice_int <= len(gguf_files_info):
                     return choices_map[choice_str]
                 else:
-                    console.print(f"[yellow]Invalid selection. Please enter a number between 1 and {len(gguf_files)}.[/yellow]")
+                    console.print(f"[yellow]Invalid selection. Please enter a number between 1 and {len(gguf_files_info)}.[/yellow]")
             except (ValueError, KeyError):
                 console.print("[yellow]Invalid selection.[/yellow]")
             except (EOFError, KeyboardInterrupt):
@@ -151,8 +177,9 @@ def _download_gguf_file(repo_id: str, filename: str, config: Config) -> bool:
     else:
          model_repo_cache_dir.mkdir(parents=True, exist_ok=True)
          try:
+             console.print("[dim]Starting download...[/dim]")
              downloaded_path_str = hf_hub_download(repo_id=repo_id,filename=filename,local_dir=str(model_repo_cache_dir),local_dir_use_symlinks=False,)
-             if config.VERBOSE: console.print(f"[dim]Download complete:[/dim] {downloaded_path_str}")
+             console.print(f"[green]Download complete:[/green] {downloaded_path_str}")
              return True
          except Exception as e:
              console.print(f"[bold red]Error downloading file '{filename}':[/bold red] {e}")

@@ -833,6 +833,10 @@ class BackgroundService:
                         messages=messages,
                         stream_fn=stream_fn,
                         memory_client=ask_llm.memory,
+                        profile_manager=ask_llm.profile_manager,
+                        search_client=ask_llm.search_client,
+                        user_id=ask_llm.user_id,
+                        bot_id=ask_llm.bot_id,
                     )
                 else:
                     stream_iter = ask_llm.client.stream_raw(messages)

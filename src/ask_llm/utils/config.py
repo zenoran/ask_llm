@@ -105,13 +105,29 @@ class Config(BaseSettings):
     SERVICE_HOST: str = Field(default="127.0.0.1", description="Host for the background service to bind to")
     SERVICE_PORT: int = Field(default=8642, description="Port for the background service to listen on")
 
+    # --- Web Search Settings --- #
+    SEARCH_PROVIDER: Optional[str] = Field(default=None, description="Search provider: 'duckduckgo' (free) or 'tavily' (production). Auto-selects based on available keys.")
+    TAVILY_API_KEY: str = Field(default="", description="Tavily API key for production search (get from tavily.com)")
+    SEARCH_MAX_RESULTS: int = Field(default=5, description="Maximum search results to return per query")
+    SEARCH_TIMEOUT: int = Field(default=10, description="Timeout in seconds for search requests (DuckDuckGo)")
+    SEARCH_INCLUDE_ANSWER: bool = Field(default=False, description="Include AI-generated answer from Tavily (uses more credits)")
+    SEARCH_DEPTH: str = Field(default="basic", description="Tavily search depth: 'basic' (1 credit) or 'advanced' (2 credits)")
+
+    # --- Tool/History Settings --- #
+    TOOLS_SKIP_HISTORY: bool = Field(
+        default=True,
+        description="If true, tool-enabled bots do not include conversation history in the prompt (prevents stale tool results polluting context)",
+    )
+
     # --- LLM Generation Settings --- #
     MAX_TOKENS: int = Field(default=1024*4, description="Default maximum tokens to generate")
     MAX_CONTEXT_TOKENS: int = Field(default=0, description="Maximum context tokens for input (0 = use LLAMA_CPP_N_CTX - MAX_TOKENS)")
     TEMPERATURE: float = Field(default=0.8, description="Default generation temperature")
     TOP_P: float = Field(default=0.95, description="Default nucleus sampling top-p")
-    LLAMA_CPP_N_CTX: int = Field(default=8192, description="Context size for Llama.cpp models")
+    LLAMA_CPP_N_CTX: int = Field(default=32768, description="Context size for Llama.cpp models (32K for high VRAM)")
     LLAMA_CPP_N_GPU_LAYERS: int = Field(default=-1, description="Number of layers to offload to GPU (-1 for all possible layers)")
+    LLAMA_CPP_N_BATCH: int = Field(default=2048, description="Batch size for prompt processing (higher = faster but more VRAM)")
+    LLAMA_CPP_FLASH_ATTN: bool = Field(default=True, description="Enable flash attention for memory efficiency")
 
     # --- UI/Interaction Settings --- #
     VERBOSE: bool = Field(default=False, description="Verbose mode for debugging")

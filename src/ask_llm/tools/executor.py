@@ -1,7 +1,7 @@
 """Tool executor for LLM tool calls.
 
 Executes tool calls by routing them to the appropriate backend
-(MCP memory server, profiles, etc.) and returning formatted results.
+(MCP memory server, profiles, web search, etc.) and returning formatted results.
 """
 
 import logging
@@ -12,6 +12,7 @@ from .parser import ToolCall, format_tool_result, format_memories_for_result
 if TYPE_CHECKING:
     from ..memory_server.client import MemoryClient
     from ..profiles import ProfileManager
+    from ..search.base import SearchClient
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +31,7 @@ class ToolExecutor:
         self, 
         memory_client: "MemoryClient | None" = None,
         profile_manager: "ProfileManager | None" = None,
+        search_client: "SearchClient | None" = None,
         user_id: str = "default",
         bot_id: str = "nova",
     ):
@@ -38,11 +40,13 @@ class ToolExecutor:
         Args:
             memory_client: Memory client for memory operations.
             profile_manager: Profile manager for user/bot profile operations.
+            search_client: Search client for web search operations.
             user_id: Current user ID for profile operations.
             bot_id: Current bot ID for bot personality operations.
         """
         self.memory_client = memory_client
         self.profile_manager = profile_manager
+        self.search_client = search_client
         self.user_id = user_id
         self.bot_id = bot_id
         self._call_count = 0
@@ -92,6 +96,11 @@ class ToolExecutor:
                 return self._execute_delete_user_attribute(tool_call)
             elif tool_call.name == "set_my_trait":
                 return self._execute_set_my_trait(tool_call)
+            # Web search tools
+            elif tool_call.name == "web_search":
+                return self._execute_web_search(tool_call)
+            elif tool_call.name == "news_search":
+                return self._execute_news_search(tool_call)
             else:
                 return format_tool_result(
                     tool_call.name,
@@ -389,4 +398,73 @@ class ToolExecutor:
             
         except Exception as e:
             logger.error(f"Set bot trait failed: {e}")
+            return format_tool_result(tool_call.name, None, error=str(e))
+
+    # =========================================================================
+    # Web Search Tool Execution
+    # =========================================================================
+
+    def _execute_web_search(self, tool_call: ToolCall) -> str:
+        """Execute web_search tool."""
+        if not self.search_client:
+            return format_tool_result(
+                tool_call.name,
+                None,
+                error="Web search not available"
+            )
+        
+        query = tool_call.arguments.get("query", "")
+        max_results = tool_call.arguments.get("max_results", 5)
+        
+        if not query:
+            return format_tool_result(
+                tool_call.name,
+                None,
+                error="Missing required parameter: query"
+            )
+        
+        try:
+            results = self.search_client.search(query, max_results=max_results)
+            formatted = self.search_client.format_results_for_llm(results)
+            
+            logger.info(f"Web search '{query}' returned {len(results)} results")
+            return format_tool_result(tool_call.name, formatted)
+            
+        except Exception as e:
+            logger.error(f"Web search failed: {e}")
+            return format_tool_result(tool_call.name, None, error=str(e))
+
+    def _execute_news_search(self, tool_call: ToolCall) -> str:
+        """Execute news_search tool."""
+        if not self.search_client:
+            return format_tool_result(
+                tool_call.name,
+                None,
+                error="News search not available"
+            )
+        
+        query = tool_call.arguments.get("query", "")
+        time_range = tool_call.arguments.get("time_range", "w")
+        max_results = tool_call.arguments.get("max_results", 5)
+        
+        if not query:
+            return format_tool_result(
+                tool_call.name,
+                None,
+                error="Missing required parameter: query"
+            )
+        
+        try:
+            results = self.search_client.search_news(
+                query, 
+                max_results=max_results,
+                time_range=time_range,
+            )
+            formatted = self.search_client.format_results_for_llm(results)
+            
+            logger.info(f"News search '{query}' returned {len(results)} results")
+            return format_tool_result(tool_call.name, formatted)
+            
+        except Exception as e:
+            logger.error(f"News search failed: {e}")
             return format_tool_result(tool_call.name, None, error=str(e))

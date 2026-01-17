@@ -17,6 +17,7 @@ from ..bots import Bot, BotManager, get_system_prompt
 from ..profiles import ProfileManager, EntityType
 from ..memory_server.client import MemoryClient, get_memory_client
 from ..tools import get_tools_prompt, query_with_tools
+from ..search import get_search_client, SearchClient
 from .logging import get_service_logger
 import logging
 
@@ -63,6 +64,8 @@ class ServiceAskLLM:
         self.user_id = user_id
         self.memory: MemoryClient | None = None
         self.user_profile = None
+        self.profile_manager: "ProfileManager | None" = None
+        self.search_client: "SearchClient | None" = None
 
         if not self.model_definition:
             raise ValueError(f"Could not find model definition for resolved alias: '{resolved_model_alias}'")
@@ -112,18 +115,33 @@ class ServiceAskLLM:
                     console.print(f"[bold yellow]Warning:[/bold yellow] Memory client failed: {e}")
                 self.memory = None
 
+        # Initialize search client if bot uses search
+        if getattr(self.bot, 'uses_search', False):
+            try:
+                self.search_client = get_search_client(config)
+                if self.search_client and self.search_client.is_available():
+                    slog.info(f"Search client initialized: {self.search_client.PROVIDER.value}")
+                else:
+                    slog.info("Search requested but no provider available")
+                    self.search_client = None
+            except Exception as e:
+                logger.warning(f"Failed to initialize search client: {e}")
+                self.search_client = None
+        else:
+            slog.debug(f"Bot '{self.bot.name}' does not use search")
+
         # Set system message with optional user profile and bot personality
         system_prompt = self.bot.system_prompt
         
         if self._db_available:
             try:
-                profile_manager = ProfileManager(config)
+                self.profile_manager = ProfileManager(config)
                 
                 # Get user profile summary for context injection
-                user_context = profile_manager.get_user_profile_summary(self.user_id)
+                user_context = self.profile_manager.get_user_profile_summary(self.user_id)
                 
                 # Get bot personality traits (if any have developed)
-                bot_context = profile_manager.get_bot_profile_summary(self.bot_id)
+                bot_context = self.profile_manager.get_bot_profile_summary(self.bot_id)
                 
                 # Build system message with profile contexts
                 context_parts = []
@@ -232,6 +250,10 @@ class ServiceAskLLM:
                     messages=context_messages,
                     query_fn=query_fn,
                     memory_client=self.memory,
+                    profile_manager=self.profile_manager,
+                    search_client=self.search_client,
+                    user_id=self.user_id,
+                    bot_id=self.bot_id,
                     stream=stream,
                 )
             else:
@@ -269,7 +291,9 @@ class ServiceAskLLM:
         
         # Add tool instructions if bot uses tools
         if self.bot.uses_tools and self.memory:
-            system_parts.append(get_tools_prompt())
+            include_search = self.search_client is not None
+            slog.debug(f"Adding tools prompt (include_search={include_search})")
+            system_parts.append(get_tools_prompt(include_search_tools=include_search))
         # Retrieve relevant memories if available (only if NOT using tools - tools let LLM search itself)
         elif self.memory:
             memory_context = self._retrieve_memory_context(prompt)
@@ -279,13 +303,45 @@ class ServiceAskLLM:
         if system_parts:
             messages.append(Message(role="system", content="\n\n".join(system_parts)))
         
-        # Add conversation history
-        history = self.history_manager.get_context_messages()
-        for msg in history:
-            if msg.role in ("user", "assistant"):
-                messages.append(msg)
+        # Add conversation history.
+        # For tool-enabled bots, optionally skip history for search-like prompts
+        # to avoid stale tool outputs polluting context.
+        include_history = True
+        if self.bot.uses_tools and self.memory and getattr(self.config, "TOOLS_SKIP_HISTORY", True):
+            include_history = not self._should_skip_history(prompt)
+
+        if include_history:
+            history = self.history_manager.get_context_messages()
+            for msg in history:
+                if msg.role in ("user", "assistant"):
+                    messages.append(msg)
+        else:
+            # Always include the current user prompt when history is skipped
+            if prompt:
+                messages.append(Message(role="user", content=prompt))
         
         return messages
+
+    def _should_skip_history(self, prompt: str) -> bool:
+        """Return True if history should be skipped for this prompt.
+
+        We skip history for search-like requests to prevent stale tool results
+        (and previous "can't search" replies) from polluting context.
+        """
+        prompt_lower = (prompt or "").lower()
+        search_triggers = (
+            "search",
+            "web_search",
+            "news",
+            "current",
+            "today",
+            "latest",
+            "now",
+            "date",
+            "time",
+            "headline",
+        )
+        return any(token in prompt_lower for token in search_triggers)
 
     def _retrieve_memory_context(self, prompt: str) -> str:
         """Retrieve relevant memories and format as context string."""
@@ -443,6 +499,10 @@ class ServiceAskLLM:
                 messages=messages,
                 query_fn=query_fn,
                 memory_client=self.memory,
+                profile_manager=self.profile_manager,
+                search_client=self.search_client,
+                user_id=self.user_id,
+                bot_id=self.bot_id,
                 stream=stream,
             )
         

@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     from ..models.message import Message
     from ..memory_server.client import MemoryClient
     from ..profiles import ProfileManager
+    from ..search.base import SearchClient
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +33,7 @@ class ToolLoop:
         self,
         memory_client: "MemoryClient | None" = None,
         profile_manager: "ProfileManager | None" = None,
+        search_client: "SearchClient | None" = None,
         user_id: str = "default",
         bot_id: str = "nova",
         max_iterations: int = DEFAULT_MAX_ITERATIONS,
@@ -40,6 +42,7 @@ class ToolLoop:
         Args:
             memory_client: Client for memory operations.
             profile_manager: Manager for profile operations.
+            search_client: Client for web search operations.
             user_id: Current user ID.
             bot_id: Current bot ID.
             max_iterations: Maximum tool call iterations per turn.
@@ -47,6 +50,7 @@ class ToolLoop:
         self.executor = ToolExecutor(
             memory_client=memory_client,
             profile_manager=profile_manager,
+            search_client=search_client,
             user_id=user_id,
             bot_id=bot_id,
         )
@@ -142,6 +146,7 @@ def query_with_tools(
     query_fn: Callable[[list["Message"], bool], str],
     memory_client: "MemoryClient | None" = None,
     profile_manager: "ProfileManager | None" = None,
+    search_client: "SearchClient | None" = None,
     user_id: str = "default",
     bot_id: str = "nova",
     max_iterations: int = DEFAULT_MAX_ITERATIONS,
@@ -154,6 +159,7 @@ def query_with_tools(
         query_fn: LLM query function (messages, stream) -> response.
         memory_client: Memory client for tool execution.
         profile_manager: Profile manager for user/bot profile tools.
+        search_client: Search client for web search tools.
         user_id: Current user ID.
         bot_id: Current bot ID.
         max_iterations: Max tool iterations.
@@ -165,6 +171,7 @@ def query_with_tools(
     loop = ToolLoop(
         memory_client=memory_client,
         profile_manager=profile_manager,
+        search_client=search_client,
         user_id=user_id,
         bot_id=bot_id,
         max_iterations=max_iterations,

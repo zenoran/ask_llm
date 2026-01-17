@@ -97,12 +97,38 @@ stop_service() {
   if [[ -n "$pid" ]] && kill -0 "$pid" >/dev/null 2>&1; then
     echo "Stopping $name (pid $pid)..."
     kill "$pid" || true
+    # Wait for process to actually exit (up to 10 seconds)
+    for i in {1..20}; do
+      if ! kill -0 "$pid" >/dev/null 2>&1; then
+        break
+      fi
+      sleep 0.5
+    done
+    # Force kill if still running
+    if kill -0 "$pid" >/dev/null 2>&1; then
+      echo "Force killing $name..."
+      kill -9 "$pid" 2>/dev/null || true
+      sleep 0.5
+    fi
   elif [[ -n "$pattern" ]]; then
     # Fallback: check for processes matching the pattern
     # Use pgrep to see if any exist first
     if pgrep -f "$pattern" >/dev/null; then
       echo "$name pidfile missing/stale, but process found. Killing by pattern '$pattern'..."
       pkill -f "$pattern" || true
+      # Wait for processes to exit
+      for i in {1..20}; do
+        if ! pgrep -f "$pattern" >/dev/null; then
+          break
+        fi
+        sleep 0.5
+      done
+      # Force kill if still running
+      if pgrep -f "$pattern" >/dev/null; then
+        echo "Force killing $name..."
+        pkill -9 -f "$pattern" 2>/dev/null || true
+        sleep 0.5
+      fi
     else
       echo "$name not running (pidfile missing)"
     fi

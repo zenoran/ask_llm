@@ -42,12 +42,19 @@ class LlamaCppClient(LLMClient):
             self.console.print(f"Loading GGUF model: [bold yellow]{self.model_path}[/bold yellow]...")
         n_gpu_layers = self.config.LLAMA_CPP_N_GPU_LAYERS # -1 means load all possible layers to GPU
         n_ctx = self.config.LLAMA_CPP_N_CTX # Context size
+        n_batch = getattr(self.config, 'LLAMA_CPP_N_BATCH', 2048) # Batch size for prompt processing
+        flash_attn = getattr(self.config, 'LLAMA_CPP_FLASH_ATTN', True) # Flash attention for memory efficiency
 
         model_load_params = {
             "model_path": self.model_path,
             "n_gpu_layers": n_gpu_layers,
             "n_ctx": n_ctx,
-            "chat_format": "chatml",
+            "n_batch": n_batch,  # Higher batch size = faster prompt processing
+            "flash_attn": flash_attn,  # Flash attention reduces VRAM usage for long contexts
+            # Let llama.cpp auto-detect chat format from GGUF metadata
+            # This is better than hardcoding chatml which doesn't work for all models
+            # (e.g., Mistral-based models like Cydonia use mistral-instruct format)
+            "chat_format": None,
             "verbose": False, # Disable llama-cpp's library-level verbose logging
         }
         final_chat_format = model_load_params["chat_format"]
@@ -66,7 +73,7 @@ class LlamaCppClient(LLMClient):
                 ctx_size = getattr(self.model, 'n_ctx', 'N/A')
                 gpu_layers = model_load_params['n_gpu_layers']
                 self.console.print(
-                    f"[green]Model loaded:[/green] Context={ctx_size}, GPU Layers={gpu_layers if gpu_layers != -1 else 'All'}"
+                    f"[green]Model loaded:[/green] Context={ctx_size}, Batch={n_batch}, FlashAttn={flash_attn}, GPU Layers={gpu_layers if gpu_layers != -1 else 'All'}"
                 )
         except Exception as e:
             self.console.print(f"[bold red]Error loading GGUF model {self.model_path}:[/bold red] {e}")

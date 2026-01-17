@@ -2,6 +2,11 @@
 
 Defines the available tools that bots can use, with their descriptions
 and parameters in a format suitable for prompt injection.
+
+Tool categories:
+- MEMORY_TOOLS: Search/store/delete memories
+- PROFILE_TOOLS: Manage user/bot attributes
+- SEARCH_TOOLS: Web search capabilities
 """
 
 from dataclasses import dataclass, field
@@ -167,6 +172,54 @@ MEMORY_TOOLS = [
 ]
 
 
+# Web search tools for internet access
+SEARCH_TOOLS = [
+    Tool(
+        name="web_search",
+        description="Search the internet for current information. Use this when asked about recent events, news, facts you're unsure about, or anything that might have changed since your training.",
+        parameters=[
+            ToolParameter(
+                name="query",
+                type="string",
+                description="What to search for. Be specific and include relevant keywords."
+            ),
+            ToolParameter(
+                name="max_results",
+                type="integer",
+                description="Maximum number of results to return (default: 5)",
+                required=False,
+                default=5
+            ),
+        ]
+    ),
+    Tool(
+        name="news_search",
+        description="Search for recent news articles. Use this for current events, breaking news, or time-sensitive topics.",
+        parameters=[
+            ToolParameter(
+                name="query",
+                type="string",
+                description="News topic to search for"
+            ),
+            ToolParameter(
+                name="time_range",
+                type="string",
+                description="How recent: 'd' (past day), 'w' (past week), 'm' (past month)",
+                required=False,
+                default="w"
+            ),
+            ToolParameter(
+                name="max_results",
+                type="integer",
+                description="Maximum number of results (default: 5)",
+                required=False,
+                default=5
+            ),
+        ]
+    ),
+]
+
+
 # All tools combined
 ALL_TOOLS = MEMORY_TOOLS + PROFILE_TOOLS
 
@@ -174,60 +227,99 @@ ALL_TOOLS = MEMORY_TOOLS + PROFILE_TOOLS
 TOOL_CALLING_INSTRUCTIONS = '''
 ## Tools Available
 
-You have access to memory and profile tools. When you need to use a tool, output ONLY a tool call in this exact format:
+You have access to tools for memory, profile management, and optionally web search. When you need to use a tool, output a tool call in this EXACT format:
 
 <tool_call>
-{{"name": "tool_name", "arguments": {{"param1": "value1", "param2": "value2"}}}}
+{{"name": "tool_name", "arguments": {{"param1": "value1"}}}}
 </tool_call>
 
-After outputting a tool call, STOP and wait for the result. You will receive the result in a <tool_result> block, then you can continue your response.
+**CRITICAL**: When you want to use a tool, OUTPUT THE TOOL CALL IMMEDIATELY. Do not say "let me try" or "give me a sec" - just output the <tool_call> block. After outputting, STOP and wait for the <tool_result>.
+
+### Example - Getting User Profile:
+User: "What do you know about me?"
+Your response:
+<tool_call>
+{{"name": "get_user_profile", "arguments": {{}}}}
+</tool_call>
+
+Then wait for result. After getting result, respond naturally with what you learned.
+
+### Example - Searching Memories:
+User: "Do you remember what we talked about yesterday?"
+Your response:
+<tool_call>
+{{"name": "search_memories", "arguments": {{"query": "yesterday conversation"}}}}
+</tool_call>
 
 ### Available Tools:
 {tools_list}
 
 ### When to Use Tools:
 
-**Memory Tools** (for conversation-specific info):
-- **search_memories**: When asked "do you remember...", "what's my...", or anything about past conversations
-- **store_memory**: When user shares significant info that relates to a specific conversation context
-- **delete_memory**: When user says you remembered something incorrectly
+**Profile Tools** (for WHO the user IS - use these first!):
+- **get_user_profile**: ALWAYS use this when asked "what do you know about me" or similar
+- **set_user_attribute**: When learning persistent facts (name, occupation, preferences)
+- **delete_user_attribute**: When user says a stored attribute is wrong
 
-**Profile Tools** (for persistent user/bot attributes):
-- **set_user_attribute**: When learning something fundamental about the user (name, occupation, preferences, communication style) that should persist across all conversations
-- **get_user_profile**: To refresh your understanding of the user at the start of meaningful conversations
-- **delete_user_attribute**: When the user says a stored attribute is wrong
-- **set_my_trait**: To record your own developing personality traits and preferences
-
-### Memory vs Profile:
-- Use **memories** for: conversation events, specific discussions, things that happened
-- Use **profiles** for: who the user IS (attributes, preferences, facts about them)
+**Memory Tools** (for recalling things you've learned):
+- **search_memories**: Use this when you DON'T KNOW something about the user! If asked their name, age, job, or any personal detail and you don't see it in the system prompt - SEARCH YOUR MEMORIES before saying "I don't know"
+- **store_memory**: For conversation-specific details worth remembering
+- **delete_memory**: When user says a memory is incorrect
+{search_guidance}
+### CRITICAL - Before saying "I don't know":
+If asked about the user's name, occupation, age, location, family, pets, or any personal detail:
+1. First check the "About the User" section in your system prompt
+2. If not there, SEARCH MEMORIES with a query like "user name" or "user occupation"
+3. Only say "I don't know" AFTER searching returns no results
 
 ### Important:
+- Output the <tool_call> block IMMEDIATELY when you need info - don't narrate
 - Only call ONE tool at a time
-- Wait for the result before continuing
-- If a tool returns no results, say so naturally
-- Don't make up information - if you don't find it in memory, admit you don't know
+- Wait for <tool_result> before responding
+- If a tool returns empty/no results, say "I don't have anything stored about that"
+'''
+
+# Guidance added when search tools are enabled
+SEARCH_GUIDANCE = '''
+**Web Search Tools** (for current/external information):
+- **web_search**: For facts you're unsure about, recent events, or anything that might have changed. Search first, then respond with what you found.
+- **news_search**: For current events, breaking news, time-sensitive topics
 '''
 
 
-def get_tools_prompt(tools: list[Tool] | None = None, include_profile_tools: bool = True) -> str:
+def get_tools_prompt(
+    tools: list[Tool] | None = None,
+    include_profile_tools: bool = True,
+    include_search_tools: bool = False,
+) -> str:
     """Generate the tools instruction prompt.
     
     Args:
-        tools: List of tools to include. Defaults to ALL_TOOLS.
+        tools: List of tools to include. If None, auto-selects based on flags.
         include_profile_tools: Whether to include profile tools (default True).
+        include_search_tools: Whether to include web search tools (default False).
         
     Returns:
         Formatted prompt string to inject into system message.
     """
     if tools is None:
+        tools = MEMORY_TOOLS.copy()
         if include_profile_tools:
-            tools = ALL_TOOLS
-        else:
-            tools = MEMORY_TOOLS
+            tools.extend(PROFILE_TOOLS)
+        if include_search_tools:
+            tools.extend(SEARCH_TOOLS)
     
     tools_list = "\n".join(tool.to_prompt_string() for tool in tools)
-    return TOOL_CALLING_INSTRUCTIONS.format(tools_list=tools_list)
+    
+    # Add search guidance if search tools are included
+    search_guidance = ""
+    if include_search_tools or any(t.name in ("web_search", "news_search") for t in tools):
+        search_guidance = SEARCH_GUIDANCE
+    
+    return TOOL_CALLING_INSTRUCTIONS.format(
+        tools_list=tools_list,
+        search_guidance=search_guidance,
+    )
 
 
 def get_tool_by_name(name: str, tools: list[Tool] | None = None) -> Tool | None:

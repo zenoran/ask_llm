@@ -147,12 +147,21 @@ class MemoryExtractionService:
             return self._extract_with_heuristics(messages, message_ids)
     
     def _format_conversation(self, messages: list[dict]) -> str:
-        """Format messages into a conversation string for the prompt."""
+        """Format messages into a conversation string for the prompt.
+        
+        Uses clear labels to help the LLM distinguish user vs assistant content.
+        """
         lines = []
         for msg in messages:
-            role = msg.get("role", "unknown").capitalize()
+            role = msg.get("role", "unknown").lower()
             content = msg.get("content", "")
-            lines.append(f"{role}: {content}")
+            # Use very explicit labels
+            if role == "user":
+                lines.append(f"[USER SAID]: {content}")
+            elif role == "assistant":
+                lines.append(f"[ASSISTANT/BOT SAID - IGNORE FOR EXTRACTION]: {content}")
+            else:
+                lines.append(f"[{role.upper()}]: {content}")
         return "\n".join(lines)
     
     def _extract_with_llm(

@@ -83,12 +83,22 @@ Output: {{"facts": []}}
 (Temporary emotions are not facts)
 
 Input:
+User: I'm Nick, nice to meet you
+Assistant: Nice to meet you too, Nick!
+
+Output:
+```json
+{{"facts": [{{"content": "User's name is Nick", "tags": ["fact"], "importance": 1.0, "profile_attribute": {{"category": "fact", "key": "name"}}}}]}}
+```
+(Note: Name is ALWAYS importance 1.0 and MUST have profile_attribute)
+
+Input:
 User: I'm a software engineer at Google
 Assistant: That's great! What do you work on?
 
 Output:
 ```json
-{{"facts": [{{"content": "User is a software engineer at Google", "tags": ["professional"], "importance": 0.8}}]}}
+{{"facts": [{{"content": "User is a software engineer at Google", "tags": ["professional"], "importance": 0.8, "profile_attribute": {{"category": "fact", "key": "occupation"}}}}]}}
 ```
 
 Input:
@@ -98,7 +108,7 @@ User: Nora is a lab mix. Cabbie is short for Cabernet - from a wine-themed litte
 
 Output:
 ```json
-{{"facts": [{{"content": "User has 2 dogs: Nora (lab mix) and Cabbie (short for Cabernet)", "tags": ["fact", "relationship"], "importance": 0.8}}]}}
+{{"facts": [{{"content": "User has 2 dogs: Nora (lab mix) and Cabbie (short for Cabernet)", "tags": ["fact", "relationship"], "importance": 0.8, "profile_attribute": {{"category": "fact", "key": "pets"}}}}]}}
 ```
 (Note: Combined into ONE fact, not three separate ones)
 
@@ -109,8 +119,15 @@ Return JSON with a "facts" array. Each fact needs:
 - tags: From """ + str(MEMORY_TAGS) + """
 - importance: 0.0-1.0 (0.7+ for genuinely important persistent info)
 
-For truly persistent traits, optionally add:
+**REQUIRED for core identity facts (name, age, occupation, location, pets):**
 - profile_attribute: {{"category": "fact|preference|interest", "key": "short_identifier"}}
+
+Profile attributes are persisted to the user's profile and shown in every conversation. ALWAYS include them for:
+- Name (key: "name", importance: 1.0)
+- Age (key: "age")
+- Occupation/job (key: "occupation")
+- Location (key: "location")
+- Family/pets (key: "family" or "pets")
 
 Be EXTREMELY selective. When in doubt, return empty list.
 
