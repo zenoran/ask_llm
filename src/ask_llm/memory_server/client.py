@@ -677,9 +677,6 @@ class MemoryClient:
         Uses PostgreSQL full-text search for efficient keyword matching
         across the entire message history.
         
-        Note: Always uses embedded mode since this is a direct database query
-        that doesn't need MCP server routing.
-        
         Args:
             query: Search query (keywords, phrases).
             n_results: Maximum results to return.
@@ -690,10 +687,11 @@ class MemoryClient:
         """
         self._ensure_initialized()
         
-        # Always use embedded mode - direct database query
-        # The MCP server doesn't need to route this
-        storage = self._get_storage()
-        backend = storage._get_backend(self.bot_id)
+        # For message search, we need direct database access
+        # Create a backend connection directly since this isn't routed through MCP
+        from ..memory.postgresql import PostgreSQLMemoryBackend
+        
+        backend = PostgreSQLMemoryBackend(self.config, bot_id=self.bot_id)
         
         # Use the existing search_messages_by_text method
         results = backend.search_messages_by_text(
