@@ -55,6 +55,7 @@ class ToolLoop:
             bot_id=bot_id,
         )
         self.max_iterations = max_iterations
+        self.tool_context: list[dict] = []  # Track tool interactions for history
     
     def run(
         self,
@@ -75,6 +76,7 @@ class ToolLoop:
         from ..models.message import Message
         
         self.executor.reset_call_count()
+        self.tool_context = []  # Reset tool context
         current_messages = messages.copy()
         
         for iteration in range(1, self.max_iterations + 1):
@@ -110,16 +112,34 @@ class ToolLoop:
                 ", ".join(tc.name for tc in tool_calls)
             )
             
+            # Track tool interactions for history/context
+            tool_summary = "\n\n".join(tool_results)
+            self.tool_context.append({
+                "tools_called": [tc.name for tc in tool_calls],
+                "results": tool_summary,
+            })
+            
             # Build continuation messages
             current_messages.append(Message(role="assistant", content=response))
             current_messages.append(Message(
                 role="user", 
-                content="\n\n".join(tool_results)
+                content=tool_summary
             ))
         
         # Max iterations reached
         logger.warning(f"Tool loop: max iterations ({self.max_iterations}) reached")
         return response if 'response' in dir() else ""
+    
+    def get_tool_context_summary(self) -> str:
+        """Return a summary of tool interactions for saving to history."""
+        if not self.tool_context:
+            return ""
+        
+        summaries = []
+        for ctx in self.tool_context:
+            tools = ", ".join(ctx["tools_called"])
+            summaries.append(f"[Tools used: {tools}]\n{ctx['results']}")
+        return "\n\n".join(summaries)
     
     def _execute_tools(self, tool_calls: list) -> list[str]:
         """Execute a list of tool calls and return formatted results."""
@@ -151,7 +171,7 @@ def query_with_tools(
     bot_id: str = "nova",
     max_iterations: int = DEFAULT_MAX_ITERATIONS,
     stream: bool = True,
-) -> str:
+) -> tuple[str, str]:
     """Convenience function for tool-enabled queries.
     
     Args:
@@ -166,7 +186,8 @@ def query_with_tools(
         stream: Whether to stream the final response.
         
     Returns:
-        Final response after tool resolution.
+        Tuple of (final_response, tool_context_summary).
+        tool_context_summary contains the tool results that should be saved to history.
     """
     loop = ToolLoop(
         memory_client=memory_client,
@@ -176,4 +197,6 @@ def query_with_tools(
         bot_id=bot_id,
         max_iterations=max_iterations,
     )
-    return loop.run(messages, query_fn, stream_final=stream)
+    response = loop.run(messages, query_fn, stream_final=stream)
+    tool_context = loop.get_tool_context_summary()
+    return response, tool_context

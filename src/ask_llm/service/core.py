@@ -246,7 +246,7 @@ class ServiceAskLLM:
                 def query_fn(msgs, do_stream):
                     return self.client.query(msgs, plaintext_output=True, stream=do_stream)
                 
-                assistant_response = query_with_tools(
+                assistant_response, tool_context = query_with_tools(
                     messages=context_messages,
                     query_fn=query_fn,
                     memory_client=self.memory,
@@ -256,6 +256,10 @@ class ServiceAskLLM:
                     bot_id=self.bot_id,
                     stream=stream,
                 )
+                
+                # Save tool context to history so follow-up questions have context
+                if tool_context:
+                    self.history_manager.add_message("system", f"[Tool Results]\n{tool_context}")
             else:
                 assistant_response = self.client.query(
                     context_messages, 
@@ -484,11 +488,14 @@ class ServiceAskLLM:
         messages: list[Message], 
         plaintext_output: bool = False, 
         stream: bool = False
-    ) -> str:
+    ) -> tuple[str, str]:
         """Execute the LLM query and return response.
         
         Handles tool calling loop if bot has tools enabled.
         Called by the service API to get the response.
+        
+        Returns:
+            Tuple of (response, tool_context). tool_context is empty if no tools used.
         """
         # Use tool loop if bot has tools enabled
         if self.bot.uses_tools and self.memory:
@@ -506,13 +513,22 @@ class ServiceAskLLM:
                 stream=stream,
             )
         
-        return self.client.query(messages, plaintext_output=plaintext_output, stream=stream)
+        return self.client.query(messages, plaintext_output=plaintext_output, stream=stream), ""
 
-    def finalize_response(self, user_prompt: str, response: str):
+    def finalize_response(self, user_prompt: str, response: str, tool_context: str = ""):
         """Finalize the response by saving to history and triggering extraction.
         
         Called by the service API after receiving the response.
+        
+        Args:
+            user_prompt: The original user prompt.
+            response: The assistant's response.
+            tool_context: Optional tool results to save to history.
         """
+        # Save tool context first so it appears before the assistant response in history
+        if tool_context:
+            self.history_manager.add_message("system", f"[Tool Results]\n{tool_context}")
+        
         if response:
             self.history_manager.add_message("assistant", response)
             

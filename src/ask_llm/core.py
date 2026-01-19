@@ -204,7 +204,7 @@ class AskLLM:
                 def query_fn(msgs, do_stream):
                     return self.client.query(msgs, plaintext_output=True, stream=do_stream)
                 
-                assistant_response = query_with_tools(
+                assistant_response, tool_context = query_with_tools(
                     messages=context_messages,
                     query_fn=query_fn,
                     memory_client=self.memory,
@@ -214,6 +214,10 @@ class AskLLM:
                     bot_id=self.bot_id,
                     stream=stream,
                 )
+                
+                # Save tool context to history so follow-up questions have context
+                if tool_context:
+                    self.history_manager.add_message("system", f"[Tool Results]\n{tool_context}")
             else:
                 assistant_response = self.client.query(
                     context_messages, 

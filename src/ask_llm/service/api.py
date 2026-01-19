@@ -658,7 +658,7 @@ class BackgroundService:
                 log.llm_context(prepared_messages)
                 
                 # Execute the query with prepared messages
-                response = ask_llm._execute_llm_query(
+                response, tool_context = ask_llm._execute_llm_query(
                     prepared_messages,
                     plaintext_output=True,
                     stream=False,
@@ -671,7 +671,7 @@ class BackgroundService:
                     return ""
                 
                 # Finalize (add to history, trigger memory extraction)
-                ask_llm.finalize_response(user_prompt, response)
+                ask_llm.finalize_response(user_prompt, response, tool_context)
                 
                 return response
             

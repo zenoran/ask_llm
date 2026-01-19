@@ -136,13 +136,18 @@ def _select_gguf_file(repo_id: str, gguf_files_info: list[dict]) -> str | None:
              return None
         return selected_filename
     else:
-        console.print("Multiple GGUF files found. Select one:")
+        console.print("Multiple GGUF files found. Select one:\n")
         choices_map = {str(i+1): info["filename"] for i, info in enumerate(gguf_files_info)}
-        colors = ["cyan", "dim white"]  # Alternating colors
         for i, info in enumerate(gguf_files_info):
-            color = colors[i % 2]
             size_str = _format_size(info["size"])
-            console.print(f"  [{color}]{i+1:3}: {info['filename']:60} {size_str:>10}[/{color}]")
+            num = f"{i+1:3}"
+            fname = info['filename']
+            # Alternating colors for readability
+            if i % 2 == 0:
+                console.print(f"  [bold cyan]{num}[/bold cyan]  [white]{fname:<60}[/white]  [green]{size_str:>10}[/green]")
+            else:
+                console.print(f"  [bold cyan]{num}[/bold cyan]  [dim]{fname:<60}[/dim]  [green]{size_str:>10}[/green]")
+        console.print()
         while True:
             try:
                 choice_str = Prompt.ask("Enter the number of the file", default="1")
@@ -160,31 +165,50 @@ def _select_gguf_file(repo_id: str, gguf_files_info: list[dict]) -> str | None:
                 console.print("\n[red]Selection cancelled.[/red]")
                 return None
 
-def _download_gguf_file(repo_id: str, filename: str, config: Config) -> bool:
+def _download_gguf_file(repo_id: str, filename: str, config: Config, max_retries: int = 3) -> bool:
     if importlib.util.find_spec("huggingface_hub") is None:
         console.print("[bold red]Error:[/bold red] `huggingface-hub` required for download but not found.")
         return False
     from huggingface_hub import hf_hub_download
+    import time
 
-    console.print(f"Verifying/Downloading '[yellow]{filename}[/yellow]' to cache...")
+    console.print(f"Downloading '[yellow]{filename}[/yellow]'...")
     cache_dir = pathlib.Path(config.MODEL_CACHE_DIR).expanduser()
     model_repo_cache_dir = cache_dir / repo_id
     local_model_path = model_repo_cache_dir / filename
 
     if local_model_path.is_file():
-         if config.VERBOSE: console.print("[dim]File already exists in cache.[/dim]")
+         console.print("[dim]File already exists in cache.[/dim]")
          return True
-    else:
-         model_repo_cache_dir.mkdir(parents=True, exist_ok=True)
-         try:
-             console.print("[dim]Starting download...[/dim]")
-             downloaded_path_str = hf_hub_download(repo_id=repo_id,filename=filename,local_dir=str(model_repo_cache_dir),local_dir_use_symlinks=False,)
-             console.print(f"[green]Download complete:[/green] {downloaded_path_str}")
-             return True
-         except Exception as e:
-             console.print(f"[bold red]Error downloading file '{filename}':[/bold red] {e}")
-             console.print("Cannot add model to config without successful download/verification.")
-             return False
+    
+    model_repo_cache_dir.mkdir(parents=True, exist_ok=True)
+    
+    for attempt in range(1, max_retries + 1):
+        try:
+            if attempt > 1:
+                console.print(f"[yellow]Retry {attempt}/{max_retries}...[/yellow]")
+            downloaded_path_str = hf_hub_download(
+                repo_id=repo_id,
+                filename=filename,
+                local_dir=str(model_repo_cache_dir),
+            )
+            console.print(f"[green]Download complete:[/green] {downloaded_path_str}")
+            return True
+        except KeyboardInterrupt:
+            console.print("\n[red]Download cancelled.[/red]")
+            return False
+        except Exception as e:
+            error_msg = str(e)
+            if attempt < max_retries:
+                console.print(f"[yellow]Download error (attempt {attempt}/{max_retries}):[/yellow] {error_msg}")
+                console.print("[dim]Waiting 5 seconds before retry...[/dim]")
+                time.sleep(5)
+            else:
+                console.print(f"[bold red]Download failed after {max_retries} attempts:[/bold red] {error_msg}")
+                console.print("Cannot add model to config without successful download.")
+                return False
+    
+    return False
 
 def _update_models_yaml(repo_id: str, selected_filename: str, config: Config) -> bool:
     yaml_path = pathlib.Path(config.MODELS_CONFIG_PATH)
