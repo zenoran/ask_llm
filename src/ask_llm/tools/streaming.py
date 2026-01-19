@@ -4,7 +4,7 @@ Handles tool calling while maintaining streaming output to the client.
 """
 
 import logging
-from typing import TYPE_CHECKING, Iterator, Callable
+from typing import TYPE_CHECKING, Iterator, Callable, Any
 
 from .parser import parse_tool_calls, has_tool_call, format_tool_result
 from .executor import ToolExecutor
@@ -14,6 +14,7 @@ if TYPE_CHECKING:
     from ..memory_server.client import MemoryClient
     from ..profiles import ProfileManager
     from ..search.base import SearchClient
+    from ..core.model_lifecycle import ModelLifecycleManager
 
 # Use service logger if available, otherwise standard logging
 try:
@@ -30,6 +31,7 @@ def stream_with_tools(
     memory_client: "MemoryClient | None" = None,
     profile_manager: "ProfileManager | None" = None,
     search_client: "SearchClient | None" = None,
+    model_lifecycle: "ModelLifecycleManager | None" = None,
     user_id: str = "default",
     bot_id: str = "nova",
     max_iterations: int = DEFAULT_MAX_ITERATIONS,
@@ -45,6 +47,7 @@ def stream_with_tools(
         memory_client: Memory client for tool execution.
         profile_manager: Profile manager for profile tools.
         search_client: Search client for web search tools.
+        model_lifecycle: Model lifecycle manager for model switching tools.
         user_id: Current user ID.
         bot_id: Current bot ID.
         max_iterations: Max tool iterations per turn.
@@ -58,6 +61,7 @@ def stream_with_tools(
         memory_client=memory_client,
         profile_manager=profile_manager,
         search_client=search_client,
+        model_lifecycle=model_lifecycle,
         user_id=user_id,
         bot_id=bot_id,
     )

@@ -1,11 +1,11 @@
 """Tool executor for LLM tool calls.
 
 Executes tool calls by routing them to the appropriate backend
-(MCP memory server, profiles, web search, etc.) and returning formatted results.
+(MCP memory server, profiles, web search, model management, etc.) and returning formatted results.
 """
 
 import logging
-from typing import Any, TYPE_CHECKING
+from typing import Any, Callable, TYPE_CHECKING
 
 from .parser import ToolCall, format_tool_result, format_memories_for_result
 
@@ -13,8 +13,16 @@ if TYPE_CHECKING:
     from ..memory_server.client import MemoryClient
     from ..profiles import ProfileManager
     from ..search.base import SearchClient
+    from ..core.model_lifecycle import ModelLifecycleManager
 
 logger = logging.getLogger(__name__)
+
+# Try to get service logger for verbose tool result logging
+try:
+    from ..service.logging import get_service_logger
+    slog = get_service_logger(__name__)
+except ImportError:
+    slog = None
 
 
 class ToolExecutor:
@@ -32,6 +40,7 @@ class ToolExecutor:
         memory_client: "MemoryClient | None" = None,
         profile_manager: "ProfileManager | None" = None,
         search_client: "SearchClient | None" = None,
+        model_lifecycle: "ModelLifecycleManager | None" = None,
         user_id: str = "default",
         bot_id: str = "nova",
     ):
@@ -41,15 +50,39 @@ class ToolExecutor:
             memory_client: Memory client for memory operations.
             profile_manager: Profile manager for user/bot profile operations.
             search_client: Search client for web search operations.
+            model_lifecycle: Model lifecycle manager for model switching.
             user_id: Current user ID for profile operations.
             bot_id: Current bot ID for bot personality operations.
         """
         self.memory_client = memory_client
         self.profile_manager = profile_manager
         self.search_client = search_client
+        self.model_lifecycle = model_lifecycle
         self.user_id = user_id
         self.bot_id = bot_id
         self._call_count = 0
+        
+        # Tool dispatch table - maps tool names to handler methods
+        self._handlers: dict[str, Callable[[ToolCall], str]] = {
+            # Memory tools
+            "search_memories": self._execute_search_memories,
+            "store_memory": self._execute_store_memory,
+            "delete_memory": self._execute_delete_memory,
+            "search_history": self._execute_search_history,
+            "forget_history": self._execute_forget_history,
+            # Profile tools
+            "set_user_attribute": self._execute_set_user_attribute,
+            "get_user_profile": self._execute_get_user_profile,
+            "delete_user_attribute": self._execute_delete_user_attribute,
+            "set_my_trait": self._execute_set_my_trait,
+            # Web search tools
+            "web_search": self._execute_web_search,
+            "news_search": self._execute_news_search,
+            # Model management tools
+            "list_models": self._execute_list_models,
+            "get_current_model": self._execute_get_current_model,
+            "switch_model": self._execute_switch_model,
+        }
     
     def reset_call_count(self):
         """Reset the per-turn call counter."""
@@ -79,37 +112,26 @@ class ToolExecutor:
         
         logger.info(f"Executing tool: {tool_call.name} with args: {tool_call.arguments}")
         
+        result: str
         try:
-            # Memory tools
-            if tool_call.name == "search_memories":
-                return self._execute_search_memories(tool_call)
-            elif tool_call.name == "store_memory":
-                return self._execute_store_memory(tool_call)
-            elif tool_call.name == "delete_memory":
-                return self._execute_delete_memory(tool_call)
-            # Profile tools
-            elif tool_call.name == "set_user_attribute":
-                return self._execute_set_user_attribute(tool_call)
-            elif tool_call.name == "get_user_profile":
-                return self._execute_get_user_profile(tool_call)
-            elif tool_call.name == "delete_user_attribute":
-                return self._execute_delete_user_attribute(tool_call)
-            elif tool_call.name == "set_my_trait":
-                return self._execute_set_my_trait(tool_call)
-            # Web search tools
-            elif tool_call.name == "web_search":
-                return self._execute_web_search(tool_call)
-            elif tool_call.name == "news_search":
-                return self._execute_news_search(tool_call)
+            handler = self._handlers.get(tool_call.name)
+            if handler:
+                result = handler(tool_call)
             else:
-                return format_tool_result(
+                result = format_tool_result(
                     tool_call.name,
                     None,
                     error=f"Unknown tool: {tool_call.name}"
                 )
         except Exception as e:
             logger.exception(f"Tool execution failed: {tool_call.name}")
-            return format_tool_result(tool_call.name, None, error=str(e))
+            result = format_tool_result(tool_call.name, None, error=str(e))
+        
+        # Log the result in verbose mode
+        if slog:
+            slog.tool_result(tool_call.name, result)
+        
+        return result
     
     def _execute_search_memories(self, tool_call: ToolCall) -> str:
         """Execute search_memories tool."""
@@ -228,6 +250,91 @@ class ToolExecutor:
                 
         except Exception as e:
             logger.error(f"Memory delete failed: {e}")
+            return format_tool_result(tool_call.name, None, error=str(e))
+
+    def _execute_search_history(self, tool_call: ToolCall) -> str:
+        """Execute search_history tool - searches ALL conversation messages."""
+        if not self.memory_client:
+            return format_tool_result(
+                tool_call.name,
+                None,
+                error="Memory system not available"
+            )
+        
+        query = tool_call.arguments.get("query", "")
+        n_results = tool_call.arguments.get("n_results", 10)
+        role_filter = tool_call.arguments.get("role_filter")
+        
+        if not query:
+            return format_tool_result(
+                tool_call.name,
+                None,
+                error="Missing required parameter: query"
+            )
+        
+        try:
+            results = self.memory_client.search_messages(
+                query=query,
+                n_results=n_results,
+                role_filter=role_filter,
+            )
+            
+            if not results:
+                return format_tool_result(
+                    tool_call.name,
+                    "No messages found matching your search."
+                )
+            
+            # Format results for the model
+            lines = [f"Found {len(results)} messages matching '{query}':"]
+            for i, msg in enumerate(results, 1):
+                # Truncate long messages
+                content = msg.content[:200] + "..." if len(msg.content) > 200 else msg.content
+                # Escape newlines for readability
+                content = content.replace("\n", " ")
+                lines.append(f"{i}. [{msg.role}] {content}")
+            
+            return format_tool_result(tool_call.name, "\n".join(lines))
+            
+        except Exception as e:
+            logger.error(f"History search failed: {e}")
+            return format_tool_result(tool_call.name, None, error=str(e))
+
+    def _execute_forget_history(self, tool_call: ToolCall) -> str:
+        """Execute forget_history tool - deletes recent messages and related memories."""
+        if not self.memory_client:
+            return format_tool_result(
+                tool_call.name,
+                None,
+                error="Memory system not available"
+            )
+        
+        count = tool_call.arguments.get("count")
+        minutes = tool_call.arguments.get("minutes")
+        
+        # Need either count or minutes
+        if count is None and minutes is None:
+            return format_tool_result(
+                tool_call.name,
+                None,
+                error="Must specify either 'count' (number of messages) or 'minutes' (time range)"
+            )
+        
+        try:
+            if count is not None:
+                result = self.memory_client.forget_recent_messages(int(count))
+                msg = f"Forgot {result['messages_ignored']} messages"
+            else:
+                result = self.memory_client.forget_messages_since_minutes(int(minutes))
+                msg = f"Forgot {result['messages_ignored']} messages from the last {minutes} minutes"
+            
+            if result.get('memories_deleted', 0) > 0:
+                msg += f" and {result['memories_deleted']} related memories"
+            
+            return format_tool_result(tool_call.name, msg)
+            
+        except Exception as e:
+            logger.error(f"Forget history failed: {e}")
             return format_tool_result(tool_call.name, None, error=str(e))
 
     # =========================================================================
@@ -467,4 +574,112 @@ class ToolExecutor:
             
         except Exception as e:
             logger.error(f"News search failed: {e}")
+            return format_tool_result(tool_call.name, None, error=str(e))
+
+    # =========================================================================
+    # Model Management Tool Execution
+    # =========================================================================
+
+    def _execute_list_models(self, tool_call: ToolCall) -> str:
+        """Execute list_models tool - returns available model shortcuts."""
+        if not self.model_lifecycle:
+            return format_tool_result(
+                tool_call.name,
+                None,
+                error="Model management not available"
+            )
+        
+        try:
+            models = self.model_lifecycle.get_available_models()
+            current = self.model_lifecycle.current_model
+            
+            if not models:
+                return format_tool_result(
+                    tool_call.name,
+                    "No models configured."
+                )
+            
+            # Format as a simple list with current model marked
+            lines = ["Available models:"]
+            for model in sorted(models):
+                if model == current:
+                    lines.append(f"  • {model} (current)")
+                else:
+                    lines.append(f"  • {model}")
+            
+            return format_tool_result(tool_call.name, "\n".join(lines))
+            
+        except Exception as e:
+            logger.error(f"List models failed: {e}")
+            return format_tool_result(tool_call.name, None, error=str(e))
+
+    def _execute_get_current_model(self, tool_call: ToolCall) -> str:
+        """Execute get_current_model tool - returns current model info."""
+        if not self.model_lifecycle:
+            return format_tool_result(
+                tool_call.name,
+                None,
+                error="Model management not available"
+            )
+        
+        try:
+            current = self.model_lifecycle.current_model
+            
+            if not current:
+                return format_tool_result(
+                    tool_call.name,
+                    "No model currently loaded."
+                )
+            
+            # Get model info for more details
+            model_info = self.model_lifecycle.get_model_info(current)
+            if model_info:
+                model_type = model_info.get("type", "unknown")
+                model_id = model_info.get("model_id", model_info.get("repo_id", ""))
+                description = model_info.get("description", "")
+                
+                result = f"Current model: {current}\n"
+                result += f"  Type: {model_type}\n"
+                if model_id:
+                    result += f"  Model ID: {model_id}\n"
+                if description:
+                    result += f"  Description: {description}"
+            else:
+                result = f"Current model: {current}"
+            
+            return format_tool_result(tool_call.name, result)
+            
+        except Exception as e:
+            logger.error(f"Get current model failed: {e}")
+            return format_tool_result(tool_call.name, None, error=str(e))
+
+    def _execute_switch_model(self, tool_call: ToolCall) -> str:
+        """Execute switch_model tool - switches to a different model."""
+        if not self.model_lifecycle:
+            return format_tool_result(
+                tool_call.name,
+                None,
+                error="Model management not available"
+            )
+        
+        model_name = tool_call.arguments.get("model_name", "")
+        
+        if not model_name:
+            return format_tool_result(
+                tool_call.name,
+                None,
+                error="Missing required parameter: model_name"
+            )
+        
+        try:
+            success, message = self.model_lifecycle.switch_model(model_name)
+            
+            if success:
+                logger.info(f"Model switch requested: {model_name}")
+                return format_tool_result(tool_call.name, message)
+            else:
+                return format_tool_result(tool_call.name, None, error=message)
+            
+        except Exception as e:
+            logger.error(f"Switch model failed: {e}")
             return format_tool_result(tool_call.name, None, error=str(e))

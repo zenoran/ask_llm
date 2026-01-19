@@ -19,6 +19,7 @@ if TYPE_CHECKING:
     from ..memory_server.client import MemoryClient
     from ..profiles import ProfileManager
     from ..search.base import SearchClient
+    from ..core.model_lifecycle import ModelLifecycleManager
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +35,7 @@ class ToolLoop:
         memory_client: "MemoryClient | None" = None,
         profile_manager: "ProfileManager | None" = None,
         search_client: "SearchClient | None" = None,
+        model_lifecycle: "ModelLifecycleManager | None" = None,
         user_id: str = "default",
         bot_id: str = "nova",
         max_iterations: int = DEFAULT_MAX_ITERATIONS,
@@ -43,6 +45,7 @@ class ToolLoop:
             memory_client: Client for memory operations.
             profile_manager: Manager for profile operations.
             search_client: Client for web search operations.
+            model_lifecycle: Manager for model lifecycle operations.
             user_id: Current user ID.
             bot_id: Current bot ID.
             max_iterations: Maximum tool call iterations per turn.
@@ -51,6 +54,7 @@ class ToolLoop:
             memory_client=memory_client,
             profile_manager=profile_manager,
             search_client=search_client,
+            model_lifecycle=model_lifecycle,
             user_id=user_id,
             bot_id=bot_id,
         )
@@ -167,6 +171,7 @@ def query_with_tools(
     memory_client: "MemoryClient | None" = None,
     profile_manager: "ProfileManager | None" = None,
     search_client: "SearchClient | None" = None,
+    model_lifecycle: "ModelLifecycleManager | None" = None,
     user_id: str = "default",
     bot_id: str = "nova",
     max_iterations: int = DEFAULT_MAX_ITERATIONS,
@@ -180,6 +185,7 @@ def query_with_tools(
         memory_client: Memory client for tool execution.
         profile_manager: Profile manager for user/bot profile tools.
         search_client: Search client for web search tools.
+        model_lifecycle: Model lifecycle manager for model switching tools.
         user_id: Current user ID.
         bot_id: Current bot ID.
         max_iterations: Max tool iterations.
@@ -193,6 +199,7 @@ def query_with_tools(
         memory_client=memory_client,
         profile_manager=profile_manager,
         search_client=search_client,
+        model_lifecycle=model_lifecycle,
         user_id=user_id,
         bot_id=bot_id,
         max_iterations=max_iterations,

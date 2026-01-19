@@ -37,9 +37,71 @@ UNINSTALL=false
 EDITABLE=false
 REPO="git+https://github.com/zenoran/ask_llm.git"
 
+# Help function
+show_help() {
+    cat << EOF
+ask_llm installer
+
+USAGE:
+    ./install.sh [OPTIONS]
+
+    # From GitHub (one-liner):
+    curl -fsSL https://raw.githubusercontent.com/zenoran/ask_llm/master/install.sh | bash
+
+OPTIONS:
+    -h, --help          Show this help message
+
+    Installation:
+    --local <PATH>      Install from local path in editable mode (for development)
+                        Example: ./install.sh --local .
+    --uninstall         Remove ask_llm completely
+
+    Optional Dependencies:
+    --with-service      Install FastAPI background service (llm-service command)
+    --with-llama        Install llama-cpp-python for local GGUF model inference
+    --with-hf           Install HuggingFace transformers + torch
+    --with-search       Install web search providers (DuckDuckGo + Tavily)
+    --all               Install ALL optional dependencies
+
+    Build Options:
+    --no-cuda           Skip CUDA/GPU support for llama-cpp-python (CPU only)
+
+EXAMPLES:
+    # Basic install from GitHub
+    ./install.sh
+
+    # Development install (editable, from current directory)
+    ./install.sh --local .
+
+    # Full install with all features
+    ./install.sh --all
+
+    # Development with service and search
+    ./install.sh --local . --with-service --with-search
+
+    # Uninstall
+    ./install.sh --uninstall
+
+AFTER INSTALLATION:
+    llm --status        Check system status
+    llm --list-models   List available models  
+    llm "Hello!"        Ask a question
+    llm-service         Start background service (if --with-service)
+
+CONFIGURATION:
+    ~/.config/ask-llm/.env          API keys and settings
+    ~/.config/ask-llm/models.yaml   Model definitions
+
+EOF
+    exit 0
+}
+
 # Parse arguments
 while [[ $# -gt 0 ]]; do
     case $1 in
+        -h|--help)
+            show_help
+            ;;
         --with-llama)
             INSTALL_LLAMA=true
             shift
@@ -134,27 +196,37 @@ if [ "$INSTALL_SERVICE" = true ]; then
     EXTRAS="service"
 fi
 
-# Build pipx install flags
-PIPX_FLAGS="--force"
-if [ "$EDITABLE" = true ]; then
-    PIPX_FLAGS="$PIPX_FLAGS --editable"
-    echo -e "${YELLOW}  Installing in editable mode (changes to source will take effect immediately)${NC}"
+# Uninstall first if already installed (clean slate for editable)
+if pipx list | grep -q "ask-llm"; then
+    echo -e "${YELLOW}  Removing existing installation...${NC}"
+    pipx uninstall ask-llm 2>/dev/null || true
 fi
 
-if [ -n "$EXTRAS" ]; then
-    # Install with extras - need to modify the package spec
-    if [[ "$REPO" == git+* ]]; then
-        # Git URL: append [extras] before the .git or at end
-        INSTALL_SPEC="${REPO%.git}[${EXTRAS}].git"
-        # Fallback: just install base then inject
-        pipx install $PIPX_FLAGS "$REPO"
-    else
-        # Local path
+# Build pipx install command
+if [ "$EDITABLE" = true ]; then
+    echo -e "${YELLOW}  Installing in editable mode from: $REPO${NC}"
+    
+    # For editable installs, pipx needs the path directly with -e flag
+    if [ -n "$EXTRAS" ]; then
         INSTALL_SPEC="${REPO}[${EXTRAS}]"
-        pipx install $PIPX_FLAGS "$INSTALL_SPEC"
+    else
+        INSTALL_SPEC="${REPO}"
     fi
+    
+    pipx install --editable "$INSTALL_SPEC"
 else
-    pipx install $PIPX_FLAGS "$REPO"
+    # Non-editable (from git or PyPI)
+    if [ -n "$EXTRAS" ]; then
+        if [[ "$REPO" == git+* ]]; then
+            # Git URL - install base then inject extras
+            pipx install --force "$REPO"
+        else
+            INSTALL_SPEC="${REPO}[${EXTRAS}]"
+            pipx install --force "$INSTALL_SPEC"
+        fi
+    else
+        pipx install --force "$REPO"
+    fi
 fi
 echo -e "${GREEN}✓ ask_llm installed${NC}"
 
@@ -197,8 +269,6 @@ fi
 if [ "$INSTALL_SERVICE" = true ]; then
     echo -e "${BLUE}Installing FastAPI service dependencies...${NC}"
     pipx runpip ask-llm install fastapi "uvicorn[standard]" httpx
-    # Reinstall to expose the llm-service entry point
-    pipx install $PIPX_FLAGS "$REPO"
     echo -e "${GREEN}✓ FastAPI service dependencies installed${NC}"
 fi
 

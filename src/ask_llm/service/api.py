@@ -197,6 +197,8 @@ class ServiceStatusResponse(BaseModel):
     tasks_processed: int
     tasks_pending: int
     models_loaded: list[str] = []
+    current_model: str | None = None
+    available_models: list[str] = []
 
 
 class HealthResponse(BaseModel):
@@ -372,6 +374,10 @@ class BackgroundService:
         self._shutdown_event = asyncio.Event()
         self._worker_task: asyncio.Task | None = None
         
+        # Initialize model lifecycle manager (singleton)
+        from ..core.model_lifecycle import get_model_lifecycle
+        self._model_lifecycle = get_model_lifecycle(config)
+        
         # Cached AskLLM instances keyed by (model_alias, bot_id, user_id)
         self._ask_llm_cache: dict[tuple[str, str, str], Any] = {}
         self._cache_lock = asyncio.Lock()
@@ -398,11 +404,36 @@ class BackgroundService:
         # Memory client cache keyed by bot_id
         self._memory_clients: dict[tuple[str, str], Any] = {}
         
+        # Session model overrides: when user switches model via tool, 
+        # remember it for the rest of the session. Keyed by (bot_id, user_id).
+        self._session_model_overrides: dict[tuple[str, str], str] = {}
+        
         # Model configuration
         self._available_models: list[str] = []
         self._default_model: str | None = None
         self._default_bot: str = config.DEFAULT_BOT or "nova"
         self._load_available_models()
+        
+        # Register callback for model unload - clears caches when model changes
+        self._model_lifecycle.on_model_unloaded(self._on_model_unloaded)
+    
+    def _on_model_unloaded(self, model_alias: str):
+        """Called when a model is unloaded - clears related caches."""
+        log.info(f"Model '{model_alias}' unloaded - clearing related caches")
+        
+        # Clear client cache for this model
+        if model_alias in self._client_cache:
+            del self._client_cache[model_alias]
+        
+        # Clear all AskLLM instances that use this model
+        keys_to_remove = [
+            key for key in self._ask_llm_cache
+            if key[0] == model_alias
+        ]
+        for key in keys_to_remove:
+            del self._ask_llm_cache[key]
+        
+        log.debug(f"Cleared {len(keys_to_remove)} cached instances for model '{model_alias}'")
     
     def _load_available_models(self):
         """Load list of available models from config."""
@@ -467,6 +498,11 @@ class BackgroundService:
     def uptime_seconds(self) -> float:
         return time.time() - self.start_time
     
+    @property
+    def model_lifecycle(self):
+        """Get the model lifecycle manager for tool access."""
+        return self._model_lifecycle
+    
     def get_memory_client(self, bot_id: str, user_id: str | None = None):
         """Get or create memory client for a bot/user pair."""
         if user_id is None:
@@ -490,10 +526,41 @@ class BackgroundService:
         return self._memory_clients.get(cache_key)
     
     def _get_ask_llm(self, model_alias: str, bot_id: str, user_id: str, local_mode: bool = False):
-        """Get or create an AskLLM instance with caching."""
+        """Get or create an AskLLM instance with caching.
+        
+        This method enforces single-model loading through the ModelLifecycleManager.
+        If a different model is requested, the current model will be unloaded first.
+        
+        Model selection priority:
+        1. Pending model switch (from switch_model tool) - becomes the new session model
+        2. Current session model override (from previous switch)
+        3. Model from API request
+        """
         from .core import ServiceAskLLM
         
+        # Session key for model overrides (per bot+user)
+        session_key = (bot_id, user_id)
+        
+        # Check for pending model switch (from switch_model tool)
+        pending = self._model_lifecycle.clear_pending_switch()
+        if pending:
+            log.info(f"Processing pending model switch to: {pending}")
+            # Store as session override so subsequent requests use this model
+            self._session_model_overrides[session_key] = pending
+            model_alias = pending
+        elif session_key in self._session_model_overrides:
+            # Use the session model override from a previous switch
+            model_alias = self._session_model_overrides[session_key]
+            log.debug(f"Using session model override: {model_alias}")
+        
         cache_key = (model_alias, bot_id, user_id)
+        
+        # Check if we need to switch models (different model requested)
+        current_model = self._model_lifecycle.current_model
+        if current_model and current_model != model_alias:
+            log.info(f"Model switch requested: {current_model} -> {model_alias}")
+            # Unloading will trigger _on_model_unloaded callback which clears caches
+            self._model_lifecycle.unload_current_model()
         
         if cache_key in self._ask_llm_cache:
             log.cache_hit("ask_llm", f"{model_alias}/{bot_id}/{user_id}")
@@ -533,6 +600,9 @@ class BackgroundService:
             # Also cache the client for future reuse by extraction tasks
             if model_alias not in self._client_cache:
                 self._client_cache[model_alias] = ask_llm.client
+                
+            # Register with lifecycle manager as the primary model
+            self._model_lifecycle.register_client(model_alias, ask_llm.client)
             # Note: ServiceAskLLM already logs model_loaded, don't duplicate
             
         except Exception as e:
@@ -835,6 +905,7 @@ class BackgroundService:
                         memory_client=ask_llm.memory,
                         profile_manager=ask_llm.profile_manager,
                         search_client=ask_llm.search_client,
+                        model_lifecycle=ask_llm.model_lifecycle,
                         user_id=ask_llm.user_id,
                         bot_id=ask_llm.bot_id,
                     )
@@ -1226,11 +1297,14 @@ class BackgroundService:
     
     def get_status(self) -> ServiceStatusResponse:
         """Get service status."""
+        current = self._model_lifecycle.current_model
         return ServiceStatusResponse(
             uptime_seconds=self.uptime_seconds,
             tasks_processed=self.tasks_processed,
             tasks_pending=self._task_queue.qsize(),
-            models_loaded=self._available_models,
+            models_loaded=[current] if current else [],
+            current_model=current,
+            available_models=self._available_models,
         )
 
 

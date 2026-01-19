@@ -169,6 +169,77 @@ MEMORY_TOOLS = [
             ),
         ]
     ),
+    Tool(
+        name="search_history",
+        description="Search the ENTIRE conversation history for specific words or phrases. Use this when you need to find a specific past conversation, something the user said before, or when search_memories doesn't find what you're looking for. This searches raw messages, not extracted memories.",
+        parameters=[
+            ToolParameter(
+                name="query",
+                type="string",
+                description="Keywords or phrases to search for in conversation history"
+            ),
+            ToolParameter(
+                name="n_results",
+                type="integer",
+                description="Maximum number of messages to retrieve",
+                required=False,
+                default=10
+            ),
+            ToolParameter(
+                name="role_filter",
+                type="string",
+                description="Only search messages from this role: 'user', 'assistant', or omit for all messages",
+                required=False,
+                default=None
+            ),
+        ]
+    ),
+    Tool(
+        name="forget_history",
+        description="Delete recent conversation history. Use when asked to forget recent messages or clear conversation. Also deletes any memories extracted from those messages.",
+        parameters=[
+            ToolParameter(
+                name="count",
+                type="integer",
+                description="Number of recent messages to forget. Use this OR minutes, not both.",
+                required=False,
+                default=None
+            ),
+            ToolParameter(
+                name="minutes",
+                type="integer",
+                description="Forget all messages from the last N minutes. Use this OR count, not both.",
+                required=False,
+                default=None
+            ),
+        ]
+    ),
+]
+
+
+# Model management tools for switching/listing models
+MODEL_TOOLS = [
+    Tool(
+        name="list_models",
+        description="List all available AI models. Use this when asked about what models are available, or before switching models to see options.",
+        parameters=[]
+    ),
+    Tool(
+        name="get_current_model",
+        description="Get information about the currently loaded model. Use this when asked which model is running.",
+        parameters=[]
+    ),
+    Tool(
+        name="switch_model",
+        description="Switch to a different AI model. This will unload the current model and load the new one. Use this when asked to change models or use a specific model.",
+        parameters=[
+            ToolParameter(
+                name="model_name",
+                type="string",
+                description="The shortcut name of the model to switch to (e.g., 'gpt4', 'cydonia', 'claude'). Use list_models to see available options."
+            ),
+        ]
+    ),
 ]
 
 
@@ -221,7 +292,7 @@ SEARCH_TOOLS = [
 
 
 # All tools combined
-ALL_TOOLS = MEMORY_TOOLS + PROFILE_TOOLS
+ALL_TOOLS = MEMORY_TOOLS + PROFILE_TOOLS + MODEL_TOOLS
 
 
 TOOL_CALLING_INSTRUCTIONS = '''
@@ -261,10 +332,14 @@ Your response:
 - **set_user_attribute**: When learning persistent facts (name, occupation, preferences)
 - **delete_user_attribute**: When user says a stored attribute is wrong
 
-**Memory Tools** (for recalling things you've learned):
-- **search_memories**: Use this when you DON'T KNOW something about the user! If asked their name, age, job, or any personal detail and you don't see it in the system prompt - SEARCH YOUR MEMORIES before saying "I don't know"
-- **store_memory**: For conversation-specific details worth remembering
+**Memory Tools** (for facts you've learned and stored):
+- **search_memories**: Searches extracted FACTS about the user (not raw conversation). Use when looking for specific learned information.
+- **store_memory**: For important facts worth remembering permanently
 - **delete_memory**: When user says a memory is incorrect
+
+**History Tools** (for conversation history):
+- **search_history**: Searches ALL past messages (full-text search). Use when looking for something specific that was said, or when search_memories doesn't find what you need.
+- **forget_history**: Deletes recent messages and related memories. Use when asked to forget recent conversation, clear history, or undo recent messages. Specify count (number of messages) OR minutes (time range).
 {search_guidance}
 ### CRITICAL - Before saying "I don't know":
 If asked about the user's name, occupation, age, location, family, pets, or any personal detail:
@@ -277,6 +352,7 @@ If asked about the user's name, occupation, age, location, family, pets, or any 
 - Only call ONE tool at a time
 - Wait for <tool_result> before responding
 - If a tool returns empty/no results, say "I don't have anything stored about that"
+- **TRUST THE TOOL RESULT**: When you receive a <tool_result>, use the EXACT information from it in your response. Never contradict, ignore, or make up different information than what the tool returned.
 '''
 
 # Guidance added when search tools are enabled
@@ -286,11 +362,20 @@ SEARCH_GUIDANCE = '''
 - **news_search**: For current events, breaking news, time-sensitive topics
 '''
 
+# Guidance added when model tools are enabled
+MODEL_GUIDANCE = '''
+**Model Management Tools** (for switching AI models):
+- **list_models**: See all available models and their shortcuts
+- **get_current_model**: Check which model is currently running
+- **switch_model**: Switch to a different model (e.g., switch_model("gpt4") to use GPT-4)
+'''
+
 
 def get_tools_prompt(
     tools: list[Tool] | None = None,
     include_profile_tools: bool = True,
     include_search_tools: bool = False,
+    include_model_tools: bool = False,
 ) -> str:
     """Generate the tools instruction prompt.
     
@@ -298,6 +383,7 @@ def get_tools_prompt(
         tools: List of tools to include. If None, auto-selects based on flags.
         include_profile_tools: Whether to include profile tools (default True).
         include_search_tools: Whether to include web search tools (default False).
+        include_model_tools: Whether to include model management tools (default False).
         
     Returns:
         Formatted prompt string to inject into system message.
@@ -308,6 +394,8 @@ def get_tools_prompt(
             tools.extend(PROFILE_TOOLS)
         if include_search_tools:
             tools.extend(SEARCH_TOOLS)
+        if include_model_tools:
+            tools.extend(MODEL_TOOLS)
     
     tools_list = "\n".join(tool.to_prompt_string() for tool in tools)
     
@@ -315,6 +403,10 @@ def get_tools_prompt(
     search_guidance = ""
     if include_search_tools or any(t.name in ("web_search", "news_search") for t in tools):
         search_guidance = SEARCH_GUIDANCE
+    
+    # Add model guidance if model tools are included
+    if include_model_tools or any(t.name in ("list_models", "switch_model", "get_current_model") for t in tools):
+        search_guidance += MODEL_GUIDANCE
     
     return TOOL_CALLING_INSTRUCTIONS.format(
         tools_list=tools_list,

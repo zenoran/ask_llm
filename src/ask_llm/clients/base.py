@@ -74,6 +74,14 @@ class LLMClient(ABC):
         """Return the specific panel title and border style for this client."""
         pass
 
+    def unload(self) -> None:
+        """Unload the model and free resources.
+        
+        Override in subclasses that load models into memory (e.g., GGUF).
+        Called by ModelLifecycleManager when switching models.
+        """
+        pass
+
     def stream_raw(self, messages: List[Message], **kwargs: Any) -> Iterator[str]:
         """
         Stream raw text chunks from the LLM without console formatting.

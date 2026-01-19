@@ -622,6 +622,42 @@ class ServiceLogger:
         if _verbose:
             self._logger.debug(f"[dim]cache miss: {cache_type} [{key}][/dim]")
 
+    def tool_result(self, tool_name: str, result: str, truncate_at: int = 500) -> None:
+        """Log tool execution result (verbose only).
+        
+        In verbose mode, shows the actual result returned to the LLM.
+        Useful for debugging what information the model received.
+        
+        Args:
+            tool_name: Name of the tool that was executed
+            result: The formatted result string returned to the LLM
+            truncate_at: Max characters to show (0 = no truncation)
+        """
+        if not _verbose:
+            return
+        
+        console = get_console()
+        
+        # Truncate if needed
+        display_result = result
+        truncated = False
+        if truncate_at > 0 and len(result) > truncate_at:
+            display_result = result[:truncate_at]
+            truncated = True
+        
+        # Format nicely
+        lines = display_result.strip().split('\n')
+        if len(lines) == 1:
+            # Single line - show inline
+            console.print(f"  [tool]→ {tool_name}[/tool]: {display_result}{'...' if truncated else ''}")
+        else:
+            # Multi-line - show in a panel
+            console.print(f"  [tool]→ {tool_name} result:[/tool]")
+            for line in lines:
+                console.print(f"    {line}")
+            if truncated:
+                console.print(f"    [dim]... ({len(result) - truncate_at} more chars)[/dim]")
+
     def llm_context(self, messages: list, label: str = "LLM Context") -> None:
         """
         Log a summary of messages being sent to the LLM (verbose only).

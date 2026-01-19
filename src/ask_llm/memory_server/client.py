@@ -665,6 +665,55 @@ class MemoryClient:
             )
         )
         return MessageResult.from_dict(result.to_dict())
+    
+    def search_messages(
+        self,
+        query: str,
+        n_results: int = 10,
+        role_filter: str | None = None,
+    ) -> list[MessageResult]:
+        """Search ALL conversation history using full-text search.
+        
+        Uses PostgreSQL full-text search for efficient keyword matching
+        across the entire message history.
+        
+        Note: Always uses embedded mode since this is a direct database query
+        that doesn't need MCP server routing.
+        
+        Args:
+            query: Search query (keywords, phrases).
+            n_results: Maximum results to return.
+            role_filter: Only include messages with this role (user/assistant/None for all).
+            
+        Returns:
+            List of MessageResult sorted by relevance.
+        """
+        self._ensure_initialized()
+        
+        # Always use embedded mode - direct database query
+        # The MCP server doesn't need to route this
+        storage = self._get_storage()
+        backend = storage._get_backend(self.bot_id)
+        
+        # Use the existing search_messages_by_text method
+        results = backend.search_messages_by_text(
+            query=query,
+            n_results=n_results,
+            exclude_recent_seconds=0,  # Don't exclude recent for explicit searches
+            role_filter=role_filter,
+        )
+        
+        return [
+            MessageResult(
+                id=r.get("id", ""),
+                role=r.get("role", ""),
+                content=r.get("content", ""),
+                bot_id=self.bot_id,
+                created_at=str(r.get("timestamp", "")),
+            )
+            for r in results
+        ]
+
     # -------------------------------------------------------------------------
     # Extraction Operations
     # -------------------------------------------------------------------------

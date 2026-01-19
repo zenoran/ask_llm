@@ -11,7 +11,7 @@ from ask_llm.core import AskLLM
 from ask_llm.model_manager import list_models, update_models_interactive, delete_model, ModelManager
 from ask_llm.gguf_handler import handle_add_gguf
 from ask_llm.bots import BotManager
-from ask_llm.user_profile import UserProfileManager, UserProfile, DEFAULT_USER_ID
+from ask_llm.profiles import ProfileManager, EntityType, AttributeCategory
 from ask_llm.utils.streaming import render_streaming_response, render_complete_response
 from ask_llm.shared.logging import LogConfig
 import logging
@@ -19,6 +19,9 @@ from pathlib import Path
 from rich.table import Table
 from rich.panel import Panel
 from typing import Iterator
+
+# Backward-compatible constant - prefer config.DEFAULT_USER
+DEFAULT_USER_ID = "default"
 
 console = Console()
 
@@ -695,7 +698,6 @@ def ensure_user_profile(config: Config, user_id: str = DEFAULT_USER_ID) -> bool:
     except Exception as e:
         logging.getLogger(__name__).warning(f"Could not ensure user profile: {e}")
         return True  # Don't block on profile errors
-        return None
 
 
 def parse_arguments(config_obj: Config) -> argparse.Namespace:
@@ -744,11 +746,8 @@ def main():
         # Catch potential Pydantic validation errors or file issues during Config init
         console.print(f"[bold red]Error initializing configuration:[/bold red] {e}")
         sys.exit(1)
-        
-    prelim_parser = argparse.ArgumentParser(add_help=False)
-    prelim_parser.add_argument("--verbose", action="store_true", help="Enable verbose output")
-    prelim_parser.add_argument("--plain", action="store_true", help="Use plain text output")
-    prelim_args, _ = prelim_parser.parse_known_args()
+    
+    # Parse full arguments now that config is loaded
     args = parse_arguments(config_obj)
     config_obj.VERBOSE = args.verbose
     config_obj.DEBUG = args.debug
@@ -932,6 +931,18 @@ def main():
         sys.exit(0 if success else 1)
         return
     
+    # Check if this is a history-only operation (doesn't need model)
+    history_only = (args.delete_history or args.print_history is not None) and not args.question and not args.command
+    
+    # Check if using service mode (don't validate model locally - let service handle it)
+    use_service = False
+    if args.local:
+        use_service = False
+    elif getattr(args, 'service', False):
+        use_service = True
+    elif config_obj.USE_SERVICE:
+        use_service = True
+    
     # Determine which bot will be used (needed to get bot's default model)
     bot_manager = BotManager(config_obj)
     if args.bot:
@@ -944,7 +955,7 @@ def main():
     else:
         target_bot = bot_manager.get_bot(config_obj.DEFAULT_BOT) or bot_manager.get_default_bot()
     
-    # Determine effective model: -m flag > bot's default_model > config DEFAULT_MODEL_ALIAS
+    # Determine effective model alias (without validation for service mode)
     if args.model:
         effective_model = args.model
     elif target_bot.default_model:
@@ -952,11 +963,20 @@ def main():
     else:
         effective_model = config_obj.DEFAULT_MODEL_ALIAS
     
-    model_manager = ModelManager(config_obj)
-    resolved_alias = model_manager.resolve_model_alias(effective_model)
-    if not resolved_alias:
-        sys.exit(1)
-        return
+    # For history-only or service mode, skip local model validation
+    if history_only:
+        resolved_alias = None
+    elif use_service:
+        # In service mode, pass the model alias directly - let the service validate it
+        resolved_alias = effective_model
+    else:
+        # Local mode: validate model is available locally
+        model_manager = ModelManager(config_obj)
+        resolved_alias = model_manager.resolve_model_alias(effective_model)
+        if not resolved_alias:
+            sys.exit(1)
+            return
+    
     try:
         run_app(args, config_obj, resolved_alias)
     except Exception as e:
@@ -1066,7 +1086,9 @@ def run_app(args: argparse.Namespace, config_obj: Config, resolved_alias: str):
                 config=config_obj,
                 local_mode=args.local,
                 bot_id=bot_id,
-                user_id=user_id
+                user_id=user_id,
+                verbose=args.verbose,
+                debug=args.debug,
             )
         except (ImportError, FileNotFoundError, ValueError, Exception) as e:
              console.print(f"[bold red]Failed to initialize LLM client for '{resolved_alias}':[/bold red] {e}")
@@ -1141,7 +1163,9 @@ def run_app(args: argparse.Namespace, config_obj: Config, resolved_alias: str):
                         config=config_obj,
                         local_mode=args.local,
                         bot_id=bot_id,
-                        user_id=user_id
+                        user_id=user_id,
+                        verbose=args.verbose,
+                        debug=args.debug,
                     )
                 except Exception as e:
                     console.print(f"[bold red]Failed to initialize LLM client:[/bold red] {e}")

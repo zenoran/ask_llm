@@ -629,12 +629,21 @@ class PostgreSQLMemoryBackend(MemoryBackend):
                 logger.error(f"Failed to add memory {memory_id}: {e}")
     
     def delete_memory(self, memory_id: str) -> bool:
-        """Delete a specific memory."""
+        """Delete a specific memory.
+        
+        Supports both full UUID and prefix matching (first 8 chars).
+        """
         with Session(self.engine) as session:
             try:
-                stmt = delete(self.memories_table).where(
-                    self.memories_table.c.id == memory_id
-                )
+                # If it's a short ID (prefix), use LIKE matching
+                if len(memory_id) < 36:  # Full UUID is 36 chars
+                    stmt = delete(self.memories_table).where(
+                        self.memories_table.c.id.like(f"{memory_id}%")
+                    )
+                else:
+                    stmt = delete(self.memories_table).where(
+                        self.memories_table.c.id == memory_id
+                    )
                 result = session.execute(stmt)
                 session.commit()
                 return result.rowcount > 0

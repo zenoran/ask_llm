@@ -211,4 +211,35 @@ class LlamaCppClient(LLMClient):
     def get_styling(self) -> tuple[str | None, str]:
         """Return Llama.cpp specific styling."""
         # Return None for title to let base class use bot_name, only specify border style
-        return None, "yellow" 
+        return None, "yellow"
+
+    def unload(self) -> None:
+        """Unload the GGUF model and free GPU/CPU memory."""
+        if self.model is None:
+            return
+        
+        logger.info(f"Unloading GGUF model: {self.model_path}")
+        
+        try:
+            # Delete the model instance
+            del self.model
+            self.model = None
+            
+            # Force garbage collection
+            import gc
+            gc.collect()
+            
+            # Try to clear CUDA cache if available
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                    torch.cuda.synchronize()
+            except ImportError:
+                pass
+            
+            if self.config.VERBOSE:
+                self.console.print("[green]Model unloaded and memory freed[/green]")
+                
+        except Exception as e:
+            logger.warning(f"Error during model unload: {e}") 

@@ -175,7 +175,12 @@ def format_tool_result(tool_name: str, result: Any, error: str | None = None) ->
         Formatted string to inject as a message.
     """
     if error:
-        return f"<tool_result name=\"{tool_name}\" status=\"error\">\n{error}\n</tool_result>"
+        return (
+            f"<tool_result name=\"{tool_name}\" status=\"error\">\n"
+            f"{error}\n"
+            f"</tool_result>\n"
+            f"[IMPORTANT: The tool failed. Report this error to the user accurately.]"
+        )
     
     # Format result nicely
     if isinstance(result, (dict, list)):
@@ -183,7 +188,12 @@ def format_tool_result(tool_name: str, result: Any, error: str | None = None) ->
     else:
         result_str = str(result)
     
-    return f"<tool_result name=\"{tool_name}\" status=\"success\">\n{result_str}\n</tool_result>"
+    return (
+        f"<tool_result name=\"{tool_name}\" status=\"success\">\n"
+        f"{result_str}\n"
+        f"</tool_result>\n"
+        f"[IMPORTANT: Use the ACTUAL result above in your response. Do not make up or assume different information.]"
+    )
 
 
 def format_memories_for_result(memories: list[dict]) -> str:
