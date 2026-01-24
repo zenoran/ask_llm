@@ -36,6 +36,8 @@ WITH_CUDA=true
 UNINSTALL=false
 EDITABLE=false
 REPO="git+https://github.com/zenoran/ask_llm.git"
+DEV_SYNC=false
+FORCE_REBUILD=false
 
 # Help function
 show_help() {
@@ -54,6 +56,8 @@ OPTIONS:
     Installation:
     --local <PATH>      Install from local path in editable mode (for development)
                         Example: ./install.sh --local .
+    --dev               Sync local .venv with all optional deps (for development)
+                        Uses uv to install mcp, service, search, llama-cpp (CUDA), HF
     --uninstall         Remove ask_llm completely
 
     Optional Dependencies:
@@ -65,6 +69,7 @@ OPTIONS:
 
     Build Options:
     --no-cuda           Skip CUDA/GPU support for llama-cpp-python (CPU only)
+    --force-rebuild     Force rebuild of llama-cpp-python (ignore cached build)
 
 EXAMPLES:
     # Basic install from GitHub
@@ -72,6 +77,9 @@ EXAMPLES:
 
     # Development install (editable, from current directory)
     ./install.sh --local .
+
+    # Sync local .venv with all deps for development/server.sh
+    ./install.sh --dev
 
     # Full install with all features
     ./install.sh --all
@@ -129,6 +137,10 @@ while [[ $# -gt 0 ]]; do
             WITH_CUDA=false
             shift
             ;;
+        --force-rebuild)
+            FORCE_REBUILD=true
+            shift
+            ;;
         --uninstall)
             UNINSTALL=true
             shift
@@ -138,6 +150,11 @@ while [[ $# -gt 0 ]]; do
             REPO="$2"
             EDITABLE=true
             shift 2
+            ;;
+        --dev)
+            # Sync local .venv with all optional deps for development
+            DEV_SYNC=true
+            shift
             ;;
         *)
             echo -e "${RED}Unknown option: $1${NC}"
@@ -150,6 +167,88 @@ echo -e "${BLUE}╭────────────────────�
 echo -e "${BLUE}│   ask_llm Installer         │${NC}"
 echo -e "${BLUE}╰─────────────────────────────╯${NC}"
 echo
+
+# Dev sync - sync local .venv with all optional dependencies
+if [ "$DEV_SYNC" = true ]; then
+    echo -e "${BLUE}Syncing local .venv with all optional dependencies...${NC}"
+    
+    # Check for uv
+    if ! command -v uv &> /dev/null; then
+        echo -e "${RED}✗ uv not found. Install with: curl -LsSf https://astral.sh/uv/install.sh | sh${NC}"
+        exit 1
+    fi
+    echo -e "${GREEN}✓ uv available${NC}"
+    
+    # Sync all extras (excluding llamacpp - we handle that separately for CUDA)
+    # Use --inexact to not remove packages not in the lock file (like our CUDA-built llama-cpp)
+    echo -e "${YELLOW}  Syncing extras: mcp, service, search, memory, huggingface...${NC}"
+    uv sync --inexact --extra mcp --extra service --extra search --extra memory --extra huggingface
+    echo -e "${GREEN}✓ Base extras synced${NC}"
+    
+    # Install llama-cpp-python with CUDA
+    echo -e "${BLUE}Installing llama-cpp-python with CUDA...${NC}"
+    if [ "$WITH_CUDA" = true ]; then
+        if command -v nvcc &> /dev/null || [ -d "/usr/local/cuda" ]; then
+            # Check if already installed with CUDA support (skip check if force rebuild)
+            LLAMA_CUDA_CHECK=$(uv run python -c "
+try:
+    import llama_cpp
+    # Check if CUDA/cuBLAS support is available
+    import llama_cpp.llama_cpp as lib
+    if hasattr(lib, 'ggml_cuda_loaded') or 'cuda' in str(dir(lib)).lower() or 'cublas' in str(dir(lib)).lower():
+        print('cuda')
+    else:
+        print('cpu')
+except ImportError:
+    print('not_installed')
+" 2>/dev/null)
+            
+            if [ "$FORCE_REBUILD" = false ] && [ "$LLAMA_CUDA_CHECK" = "cuda" ]; then
+                echo -e "${GREEN}✓ llama-cpp-python already installed with CUDA support${NC}"
+            else
+                if [ "$LLAMA_CUDA_CHECK" = "not_installed" ]; then
+                    echo -e "${YELLOW}  llama-cpp-python not installed, building with CUDA...${NC}"
+                elif [ "$LLAMA_CUDA_CHECK" = "cpu" ]; then
+                    echo -e "${YELLOW}  llama-cpp-python installed without CUDA, rebuilding...${NC}"
+                else
+                    echo -e "${YELLOW}  Force rebuilding llama-cpp-python...${NC}"
+                fi
+                
+                CUDA_VERSION=$(nvcc --version 2>/dev/null | grep -oP 'release \K[0-9]+\.[0-9]+' | head -1)
+                if [ -n "$CUDA_VERSION" ]; then
+                    echo -e "${YELLOW}  CUDA version: $CUDA_VERSION${NC}"
+                fi
+                # Export CMAKE_ARGS for the build process
+                export CMAKE_ARGS="-DGGML_CUDA=on -DCMAKE_CUDA_ARCHITECTURES=60;70;75;80;86;89;90"
+                if [ "$FORCE_REBUILD" = true ]; then
+                    uv pip install llama-cpp-python --reinstall --no-cache-dir
+                else
+                    uv pip install llama-cpp-python --reinstall
+                fi
+                echo -e "${GREEN}✓ llama-cpp-python installed with CUDA${NC}"
+            fi
+        else
+            echo -e "${YELLOW}  No CUDA detected, installing CPU-only version...${NC}"
+            uv pip install llama-cpp-python
+            echo -e "${GREEN}✓ llama-cpp-python installed${NC}"
+        fi
+    else
+        echo -e "${YELLOW}  Installing CPU-only version (--no-cuda)...${NC}"
+        uv pip install llama-cpp-python
+        echo -e "${GREEN}✓ llama-cpp-python installed${NC}"
+    fi
+    
+    echo
+    echo -e "${GREEN}╭─────────────────────────────╮${NC}"
+    echo -e "${GREEN}│   Dev Sync Complete!        │${NC}"
+    echo -e "${GREEN}╰─────────────────────────────╯${NC}"
+    echo
+    echo -e "Local .venv is now ready for development."
+    echo -e "  ${BLUE}./server.sh start${NC}  - Start MCP + LLM service"
+    echo -e "  ${BLUE}uv run llm${NC}         - Run llm from local venv"
+    echo
+    exit 0
+fi
 
 # Uninstall
 if [ "$UNINSTALL" = true ]; then

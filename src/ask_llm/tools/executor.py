@@ -41,7 +41,7 @@ class ToolExecutor:
         profile_manager: "ProfileManager | None" = None,
         search_client: "SearchClient | None" = None,
         model_lifecycle: "ModelLifecycleManager | None" = None,
-        user_id: str = "default",
+        user_id: str = "",  # Required - must be passed explicitly
         bot_id: str = "nova",
     ):
         """Initialize the executor.
@@ -51,9 +51,11 @@ class ToolExecutor:
             profile_manager: Profile manager for user/bot profile operations.
             search_client: Search client for web search operations.
             model_lifecycle: Model lifecycle manager for model switching.
-            user_id: Current user ID for profile operations.
+            user_id: Current user ID for profile operations (required).
             bot_id: Current bot ID for bot personality operations.
         """
+        if not user_id:
+            raise ValueError("user_id is required for ToolExecutor")
         self.memory_client = memory_client
         self.profile_manager = profile_manager
         self.search_client = search_client
@@ -82,6 +84,8 @@ class ToolExecutor:
             "list_models": self._execute_list_models,
             "get_current_model": self._execute_get_current_model,
             "switch_model": self._execute_switch_model,
+            # Utility tools
+            "get_current_time": self._execute_get_current_time,
         }
     
     def reset_call_count(self):
@@ -216,7 +220,7 @@ class ToolExecutor:
             return format_tool_result(tool_call.name, None, error=str(e))
     
     def _execute_delete_memory(self, tool_call: ToolCall) -> str:
-        """Execute delete_memory tool."""
+        """Execute delete_memory tool - delete by ID or by query."""
         if not self.memory_client:
             return format_tool_result(
                 tool_call.name,
@@ -225,15 +229,56 @@ class ToolExecutor:
             )
         
         memory_id = tool_call.arguments.get("memory_id", "")
+        query = tool_call.arguments.get("query", "")
         
-        if not memory_id:
+        if not memory_id and not query:
             return format_tool_result(
                 tool_call.name,
                 None,
-                error="Missing required parameter: memory_id"
+                error="Missing required parameter: provide either memory_id or query"
             )
         
         try:
+            # If query provided, search for matching memories and delete them
+            if query:
+                # Search for memories matching the query
+                memories = self.memory_client.search(
+                    query=query,
+                    n_results=50,  # Get up to 50 matches
+                    min_relevance=0.3  # Reasonable threshold for deletion
+                )
+                
+                if not memories:
+                    return format_tool_result(
+                        tool_call.name,
+                        f"No memories found matching '{query}'"
+                    )
+                
+                # Delete each matching memory
+                deleted_count = 0
+                deleted_contents = []
+                for memory in memories:
+                    mid = memory.id
+                    if mid:
+                        success = self.memory_client.delete_memory(mid)
+                        if success:
+                            deleted_count += 1
+                            content = memory.content[:50] if memory.content else ""
+                            deleted_contents.append(f"- {content}...")
+                
+                if deleted_count > 0:
+                    result = f"Deleted {deleted_count} memories matching '{query}':\n" + "\n".join(deleted_contents[:5])
+                    if deleted_count > 5:
+                        result += f"\n... and {deleted_count - 5} more"
+                    return format_tool_result(tool_call.name, result)
+                else:
+                    return format_tool_result(
+                        tool_call.name,
+                        None,
+                        error=f"Found {len(memories)} memories but failed to delete them"
+                    )
+            
+            # Delete by specific ID
             success = self.memory_client.delete_memory(memory_id)
             
             if success:
@@ -422,7 +467,7 @@ class ToolExecutor:
             return format_tool_result(tool_call.name, None, error=str(e))
 
     def _execute_delete_user_attribute(self, tool_call: ToolCall) -> str:
-        """Execute delete_user_attribute tool."""
+        """Execute delete_user_attribute tool - delete by category+key or by query."""
         if not self.profile_manager:
             return format_tool_result(
                 tool_call.name,
@@ -432,17 +477,39 @@ class ToolExecutor:
         
         category = tool_call.arguments.get("category", "")
         key = tool_call.arguments.get("key", "")
+        query = tool_call.arguments.get("query", "")
         
-        if not category or not key:
+        if not query and (not category or not key):
             return format_tool_result(
                 tool_call.name,
                 None,
-                error="Missing required parameters: category and key"
+                error="Missing required parameters: provide either (category and key) or query"
             )
         
         try:
             from ..profiles import EntityType
             
+            # If query provided, search and delete matching attributes
+            if query:
+                count, deleted = self.profile_manager.search_and_delete_attributes(
+                    entity_type=EntityType.USER,
+                    entity_id=self.user_id,
+                    query=query,
+                    category=category if category else None,
+                )
+                
+                if count > 0:
+                    result = f"Deleted {count} attribute(s) matching '{query}':\n" + "\n".join(f"- {d}" for d in deleted[:5])
+                    if count > 5:
+                        result += f"\n... and {count - 5} more"
+                    return format_tool_result(tool_call.name, result)
+                else:
+                    return format_tool_result(
+                        tool_call.name,
+                        f"No attributes found matching '{query}'"
+                    )
+            
+            # Delete by exact category+key
             success = self.profile_manager.delete_attribute(
                 entity_type=EntityType.USER,
                 entity_id=self.user_id,
@@ -683,3 +750,22 @@ class ToolExecutor:
         except Exception as e:
             logger.error(f"Switch model failed: {e}")
             return format_tool_result(tool_call.name, None, error=str(e))
+
+    # ─── Utility Tools ─────────────────────────────────────────────────────────
+
+    def _execute_get_current_time(self, tool_call: ToolCall) -> str:
+        """Execute get_current_time tool - returns current date and time."""
+        from datetime import datetime
+        
+        now = datetime.now()
+        # Format: "Thursday, January 23, 2026 at 6:45 PM"
+        datetime_str = now.strftime("%A, %B %d, %Y at %I:%M %p")
+        # Also include timezone if available
+        try:
+            import time
+            tz_name = time.tzname[time.daylight] if time.daylight else time.tzname[0]
+            datetime_str += f" ({tz_name})"
+        except Exception:
+            pass
+        
+        return format_tool_result(tool_call.name, datetime_str)

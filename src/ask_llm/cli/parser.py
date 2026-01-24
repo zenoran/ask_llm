@@ -6,9 +6,6 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from ..utils.config import Config
 
-# Backward-compatible constant
-DEFAULT_USER_ID = "default"
-
 
 def parse_arguments(config_obj: "Config") -> argparse.Namespace:
     """Parse command-line arguments.
@@ -158,8 +155,8 @@ def parse_arguments(config_obj: "Config") -> argparse.Namespace:
     parser.add_argument(
         "--user",
         type=str,
-        default=DEFAULT_USER_ID,
-        help="User profile to use (creates if not exists)"
+        default=None,  # Will use config.DEFAULT_USER if not specified
+        help="User profile to use (creates if not exists). Defaults to config.DEFAULT_USER"
     )
     parser.add_argument(
         "--list-users",

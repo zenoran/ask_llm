@@ -80,17 +80,25 @@ PROFILE_TOOLS = [
     ),
     Tool(
         name="delete_user_attribute",
-        description="Remove an incorrect attribute from the user's profile. Use when the user says a stored preference or fact is wrong.",
+        description="Remove an attribute from the user's profile. Use when the user says a stored preference or fact is wrong. You can delete by exact category+key or by searching with a query.",
         parameters=[
             ToolParameter(
                 name="category",
                 type="string",
-                description="Category of attribute: 'preference', 'fact', 'interest', 'communication'"
+                description="Category of attribute: 'preference', 'fact', 'interest', 'communication'. Optional if using query.",
+                required=False
             ),
             ToolParameter(
                 name="key",
                 type="string",
-                description="The attribute name to delete"
+                description="The exact attribute key to delete. Optional if using query.",
+                required=False
+            ),
+            ToolParameter(
+                name="query",
+                type="string",
+                description="Search term to find and delete matching attributes. Searches both key and value.",
+                required=False
             ),
         ]
     ),
@@ -160,12 +168,19 @@ MEMORY_TOOLS = [
     ),
     Tool(
         name="delete_memory",
-        description="Remove an incorrect or outdated memory. Use when the user corrects something you remembered wrong.",
+        description="Remove incorrect or outdated memories. Use when the user corrects something you remembered wrong or asks to forget something specific. You can delete by memory_id (from search results) or by query (searches and deletes matching memories).",
         parameters=[
             ToolParameter(
                 name="memory_id",
                 type="string",
-                description="The ID of the memory to delete (from search results)"
+                description="The ID of a specific memory to delete (from search results)",
+                required=False
+            ),
+            ToolParameter(
+                name="query",
+                type="string",
+                description="Search query to find and delete matching memories. All memories matching this query will be deleted.",
+                required=False
             ),
         ]
     ),
@@ -291,8 +306,18 @@ SEARCH_TOOLS = [
 ]
 
 
+# Utility tools for general assistance
+UTILITY_TOOLS = [
+    Tool(
+        name="get_current_time",
+        description="Get the current date and time. Use this when the user asks what time or date it is, or when you need to know the current time for context.",
+        parameters=[]
+    ),
+]
+
+
 # All tools combined
-ALL_TOOLS = MEMORY_TOOLS + PROFILE_TOOLS + MODEL_TOOLS
+ALL_TOOLS = MEMORY_TOOLS + PROFILE_TOOLS + MODEL_TOOLS + UTILITY_TOOLS
 
 
 TOOL_CALLING_INSTRUCTIONS = '''

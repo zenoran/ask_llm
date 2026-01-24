@@ -169,9 +169,9 @@ def display_results(results: list, method: str, show_ids: bool = True):
         console.print(f"[dim]Use --delete <ID> to remove a memory[/dim]\n")
 
 
-def show_stats(bot_id: str):
+def show_stats(bot_id: str, user_id: str):
     """Show memory statistics."""
-    data = api_get("/v1/memory/stats", {"bot_id": bot_id})
+    data = api_get("/v1/memory/stats", {"bot_id": bot_id, "user_id": user_id})
     if not data:
         return
 
@@ -209,9 +209,9 @@ def show_stats(bot_id: str):
         console.print(table)
 
 
-def list_all_memories(bot_id: str, limit: int):
+def list_all_memories(bot_id: str, user_id: str, limit: int):
     """List all memories ordered by importance."""
-    data = api_get("/v1/memory", {"bot_id": bot_id, "limit": limit})
+    data = api_get("/v1/memory", {"bot_id": bot_id, "user_id": user_id, "limit": limit})
     if not data:
         return
 
@@ -244,7 +244,7 @@ def list_all_memories(bot_id: str, limit: int):
     console.print(f"[dim]Use --delete <ID> to remove a memory[/dim]")
 
 
-def search_memories(bot_id: str, query: str, method: str, limit: int, min_importance: float):
+def search_memories(bot_id: str, user_id: str, query: str, method: str, limit: int, min_importance: float):
     """Search memories using specified method."""
     console.print(f"[bold]Query:[/bold] \"{query}\"\n")
     
@@ -258,6 +258,7 @@ def search_memories(bot_id: str, query: str, method: str, limit: int, min_import
                 "limit": limit,
                 "min_importance": min_importance if m == "high-importance" else 0.0,
                 "bot_id": bot_id,
+                "user_id": user_id,
             })
             if data and data.get("results"):
                 display_results(data["results"], m)
@@ -270,6 +271,7 @@ def search_memories(bot_id: str, query: str, method: str, limit: int, min_import
             "limit": limit,
             "min_importance": min_importance,
             "bot_id": bot_id,
+            "user_id": user_id,
         })
         if data and data.get("results"):
             display_results(data["results"], method)
@@ -277,10 +279,10 @@ def search_memories(bot_id: str, query: str, method: str, limit: int, min_import
             console.print("[dim]No results[/dim]")
 
 
-def handle_forget_recent(bot_id: str, count: int, skip_confirm: bool):
+def handle_forget_recent(bot_id: str, user_id: str, count: int, skip_confirm: bool):
     """Ignore the last N messages and delete associated long-term memories."""
     # Preview messages first
-    data = api_get("/v1/memory/preview/recent", {"bot_id": bot_id, "count": count})
+    data = api_get("/v1/memory/preview/recent", {"bot_id": bot_id, "user_id": user_id, "count": count})
     if not data or not data.get("messages"):
         console.print("[yellow]No messages to ignore[/yellow]")
         return
@@ -290,7 +292,7 @@ def handle_forget_recent(bot_id: str, count: int, skip_confirm: bool):
     display_messages_preview(messages)
     
     if skip_confirm or console.input("\n[bold yellow]Ignore these messages? (y/N):[/bold yellow] ").strip().lower() in ('y', 'yes'):
-        result = api_post("/v1/memory/forget", {"count": count}, {"bot_id": bot_id})
+        result = api_post("/v1/memory/forget", {"count": count}, {"bot_id": bot_id, "user_id": user_id})
         if result:
             console.print(f"[green]{result.get('message', 'Done')}[/green]")
             console.print("[dim]Use --restore to undo[/dim]")
@@ -298,10 +300,10 @@ def handle_forget_recent(bot_id: str, count: int, skip_confirm: bool):
         console.print("[dim]Cancelled[/dim]")
 
 
-def handle_forget_minutes(bot_id: str, minutes: int, skip_confirm: bool):
+def handle_forget_minutes(bot_id: str, user_id: str, minutes: int, skip_confirm: bool):
     """Ignore messages from the last N minutes and delete associated long-term memories."""
     # Preview messages first
-    data = api_get("/v1/memory/preview/minutes", {"bot_id": bot_id, "minutes": minutes})
+    data = api_get("/v1/memory/preview/minutes", {"bot_id": bot_id, "user_id": user_id, "minutes": minutes})
     if not data or not data.get("messages"):
         console.print("[yellow]No messages in that time range[/yellow]")
         return
@@ -311,7 +313,7 @@ def handle_forget_minutes(bot_id: str, minutes: int, skip_confirm: bool):
     display_messages_preview(messages)
     
     if skip_confirm or console.input("\n[bold yellow]Ignore these messages? (y/N):[/bold yellow] ").strip().lower() in ('y', 'yes'):
-        result = api_post("/v1/memory/forget", {"minutes": minutes}, {"bot_id": bot_id})
+        result = api_post("/v1/memory/forget", {"minutes": minutes}, {"bot_id": bot_id, "user_id": user_id})
         if result:
             console.print(f"[green]{result.get('message', 'Done')}[/green]")
             console.print("[dim]Use --restore to undo[/dim]")
@@ -319,10 +321,10 @@ def handle_forget_minutes(bot_id: str, minutes: int, skip_confirm: bool):
         console.print("[dim]Cancelled[/dim]")
 
 
-def handle_restore(bot_id: str, skip_confirm: bool):
+def handle_restore(bot_id: str, user_id: str, skip_confirm: bool):
     """Restore all ignored messages."""
     # Preview ignored messages first
-    data = api_get("/v1/memory/preview/ignored", {"bot_id": bot_id})
+    data = api_get("/v1/memory/preview/ignored", {"bot_id": bot_id, "user_id": user_id})
     if not data or not data.get("messages"):
         console.print("[yellow]No ignored messages to restore[/yellow]")
         return
@@ -332,19 +334,19 @@ def handle_restore(bot_id: str, skip_confirm: bool):
     display_messages_preview(messages)
     
     if skip_confirm or console.input("\n[bold yellow]Restore these messages? (y/N):[/bold yellow] ").strip().lower() in ('y', 'yes'):
-        result = api_post("/v1/memory/restore", params={"bot_id": bot_id})
+        result = api_post("/v1/memory/restore", params={"bot_id": bot_id, "user_id": user_id})
         if result:
             console.print(f"[green]{result.get('message', 'Done')}[/green]")
     else:
         console.print("[dim]Cancelled[/dim]")
 
 
-def handle_regenerate_embeddings(bot_id: str):
+def handle_regenerate_embeddings(bot_id: str, user_id: str):
     """Regenerate embeddings for all memories."""
     console.print(f"[bold]Regenerating embeddings for bot: {bot_id}[/bold]\n")
     
     with console.status("[bold green]Generating embeddings..."):
-        result = api_post("/v1/memory/regenerate-embeddings", params={"bot_id": bot_id}, timeout=LONG_TIMEOUT)
+        result = api_post("/v1/memory/regenerate-embeddings", params={"bot_id": bot_id, "user_id": user_id}, timeout=LONG_TIMEOUT)
     console.print()  # Newline after spinner clears
     
     if not result:
@@ -361,7 +363,7 @@ def handle_regenerate_embeddings(bot_id: str):
         console.print("Install with: [cyan]pipx runpip ask-llm install sentence-transformers[/cyan]")
 
 
-def handle_consolidate(bot_id: str, dry_run: bool = False):
+def handle_consolidate(bot_id: str, user_id: str, dry_run: bool = False):
     """Find and merge redundant memories."""
     mode_str = "[yellow](DRY RUN)[/yellow] " if dry_run else ""
     console.print(f"[bold]{mode_str}Memory Consolidation for bot: {bot_id}[/bold]\n")
@@ -370,7 +372,7 @@ def handle_consolidate(bot_id: str, dry_run: bool = False):
         result = api_post(
             "/v1/memory/consolidate",
             {"dry_run": dry_run},
-            {"bot_id": bot_id},
+            {"bot_id": bot_id, "user_id": user_id},
             timeout=LONG_TIMEOUT,
         )
     console.print()  # Newline after spinner clears
@@ -397,7 +399,7 @@ def handle_consolidate(bot_id: str, dry_run: bool = False):
             console.print(f"  - {err}")
 
 
-def handle_delete_memory(bot_id: str, memory_id: str, skip_confirm: bool):
+def handle_delete_memory(bot_id: str, user_id: str, memory_id: str, skip_confirm: bool):
     """Delete a specific memory by ID."""
     # First, try to find the memory to show what will be deleted
     data = api_post("/v1/memory/search", {
@@ -405,6 +407,7 @@ def handle_delete_memory(bot_id: str, memory_id: str, skip_confirm: bool):
         "method": "embedding",
         "limit": 100,
         "bot_id": bot_id,
+        "user_id": user_id,
     })
     
     matching = None
@@ -416,7 +419,7 @@ def handle_delete_memory(bot_id: str, memory_id: str, skip_confirm: bool):
     
     if not matching:
         # Try listing all memories
-        data = api_get("/v1/memory", {"bot_id": bot_id, "limit": 100})
+        data = api_get("/v1/memory", {"bot_id": bot_id, "user_id": user_id, "limit": 100})
         if data and data.get("results"):
             for mem in data["results"]:
                 if mem.get("id", "").startswith(memory_id):
@@ -443,7 +446,7 @@ def handle_delete_memory(bot_id: str, memory_id: str, skip_confirm: bool):
             console.print("[dim]Cancelled[/dim]")
             return
     
-    result = api_delete(f"/v1/memory/{full_id}", {"bot_id": bot_id})
+    result = api_delete(f"/v1/memory/{full_id}", {"bot_id": bot_id, "user_id": user_id})
     if result and result.get("success"):
         console.print(f"[green]✓ Memory deleted[/green]")
     else:
@@ -454,6 +457,7 @@ def main():
     parser = argparse.ArgumentParser(description="Memory management for ask_llm")
     parser.add_argument("query", nargs="?", default="", help="Search query")
     parser.add_argument("--bot", "-b", default="nova", help="Bot ID (default: nova)")
+    parser.add_argument("--user", "-u", default=None, help="User ID (default: from config.DEFAULT_USER)")
     
     # Search options
     search_group = parser.add_argument_group("Search options")
@@ -483,6 +487,12 @@ def main():
     
     args = parser.parse_args()
     
+    # Get user_id from args or config
+    user_id = args.user or config.DEFAULT_USER
+    if not user_id:
+        console.print("[red]Error: user_id is required. Set ASK_LLM_DEFAULT_USER or use --user[/red]")
+        sys.exit(1)
+    
     # Check service availability
     if not check_service_available():
         console.print("[red]Error: llm-service is not running.[/red]")
@@ -493,39 +503,39 @@ def main():
     
     # Handle delete command first
     if args.delete:
-        handle_delete_memory(args.bot, args.delete, args.yes)
+        handle_delete_memory(args.bot, user_id, args.delete, args.yes)
         return
     
     # Handle message management commands first
     if args.forget_recent:
-        handle_forget_recent(args.bot, args.forget_recent, args.yes)
+        handle_forget_recent(args.bot, user_id, args.forget_recent, args.yes)
         return
     
     if args.forget_minutes:
-        handle_forget_minutes(args.bot, args.forget_minutes, args.yes)
+        handle_forget_minutes(args.bot, user_id, args.forget_minutes, args.yes)
         return
     
     if args.restore:
-        handle_restore(args.bot, args.yes)
+        handle_restore(args.bot, user_id, args.yes)
         return
     
     # Memory maintenance
     if args.regenerate_embeddings:
-        handle_regenerate_embeddings(args.bot)
+        handle_regenerate_embeddings(args.bot, user_id)
         return
     
     if args.consolidate or args.consolidate_dry_run:
-        handle_consolidate(args.bot, dry_run=args.consolidate_dry_run)
+        handle_consolidate(args.bot, user_id, dry_run=args.consolidate_dry_run)
         return
     
     # Show stats
     if args.stats:
-        show_stats(args.bot)
+        show_stats(args.bot, user_id)
         return
     
     # List all memories
     if args.list_all:
-        list_all_memories(args.bot, args.limit)
+        list_all_memories(args.bot, user_id, args.limit)
         return
     
     # Search
@@ -533,7 +543,7 @@ def main():
         console.print("[red]Error:[/red] Query required for search (use --list-all to see all memories, or --stats)")
         sys.exit(1)
     
-    search_memories(args.bot, args.query, args.method, args.limit, args.min_importance)
+    search_memories(args.bot, user_id, args.query, args.method, args.limit, args.min_importance)
 
 
 if __name__ == "__main__":

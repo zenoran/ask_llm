@@ -343,6 +343,7 @@ class ModelManager:
 
         if model_type == PROVIDER_GGUF:
             repo = model_info.get('repo_id')
+            filename = model_info.get('filename')
             desc = model_info.get('description')
             chat_format = model_info.get('chat_format')
             # Avoid duplicating repo info if already in description
@@ -352,6 +353,11 @@ class ModelManager:
                 parts.append(f"Format: {chat_format}")
             if desc:
                 parts.append(desc)
+            # Add file size if the file exists
+            if repo and filename:
+                file_size = self._get_gguf_file_size(repo, filename)
+                if file_size:
+                    parts.append(f"[dim]{file_size}[/dim]")
 
         elif model_type in (PROVIDER_HF, PROVIDER_OLLAMA, PROVIDER_OPENAI):
             mid = model_info.get('model_id')
@@ -377,6 +383,33 @@ class ModelManager:
                     parts.append(processed_desc)
 
         return ", ".join(parts) or "No details"
+
+    def _get_gguf_file_size(self, repo_id: str, filename: str) -> Optional[str]:
+        """Get the file size of a GGUF model file if it exists locally."""
+        from pathlib import Path
+        
+        # Check in the model cache directory
+        file_path = Path(self.config.MODEL_CACHE_DIR) / repo_id / filename
+        if not file_path.exists():
+            return None
+        
+        try:
+            size_bytes = file_path.stat().st_size
+            return self._format_size(size_bytes)
+        except Exception:
+            return None
+    
+    @staticmethod
+    def _format_size(size_bytes: int) -> str:
+        """Format bytes as human-readable size (e.g., 14.5G, 3.2M)."""
+        size = float(size_bytes)
+        for unit in ['B', 'K', 'M', 'G', 'T']:
+            if abs(size) < 1024:
+                if unit == 'B':
+                    return f"{int(size)}{unit}"
+                return f"{size:.1f}{unit}"
+            size /= 1024
+        return f"{size:.1f}P"
 
     @staticmethod
     def _get_dependency_note(model_type: str) -> str:

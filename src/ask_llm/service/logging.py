@@ -599,12 +599,29 @@ class ServiceLogger:
 
     def task_completed(self, task_id: str, task_type: str, elapsed_ms: float, result: dict | None = None) -> None:
         """Log background task completion."""
+        # Format result as compact single line if present
+        result_str = ""
+        if result:
+            # Create a compact summary for extraction tasks
+            if task_type == "memory_extraction" and isinstance(result, dict):
+                parts = []
+                if result.get("facts_extracted"):
+                    parts.append(f"extracted={result['facts_extracted']}")
+                if result.get("facts_stored"):
+                    parts.append(f"stored={result['facts_stored']}")
+                if result.get("profile_attrs"):
+                    parts.append(f"profiles={result['profile_attrs']}")
+                if result.get("llm_used") is not None:
+                    parts.append(f"llm={result['llm_used']}")
+                if parts:
+                    result_str = f" [dim]({', '.join(parts)})[/dim]"
+            elif _verbose:
+                # For other tasks in verbose mode, show compact JSON
+                result_str = f" [dim]{result}[/dim]"
+        
         self._logger.info(
-            f"{ICONS['done']} [task]{task_type}[/task] [success]done[/success] [timing]{elapsed_ms:.0f}ms[/timing]"
+            f"{ICONS['done']} [task]{task_type}[/task] [success]done[/success] [timing]{elapsed_ms:.0f}ms[/timing]{result_str}"
         )
-
-        if _verbose and result:
-            self._log_payload("Result", result)
 
     def task_failed(self, task_id: str, task_type: str, error: str, elapsed_ms: float) -> None:
         """Log background task failure."""

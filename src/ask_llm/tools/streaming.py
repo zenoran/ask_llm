@@ -32,7 +32,7 @@ def stream_with_tools(
     profile_manager: "ProfileManager | None" = None,
     search_client: "SearchClient | None" = None,
     model_lifecycle: "ModelLifecycleManager | None" = None,
-    user_id: str = "default",
+    user_id: str = "",  # Required - must be passed explicitly
     bot_id: str = "nova",
     max_iterations: int = DEFAULT_MAX_ITERATIONS,
 ) -> Iterator[str]:
@@ -48,13 +48,15 @@ def stream_with_tools(
         profile_manager: Profile manager for profile tools.
         search_client: Search client for web search tools.
         model_lifecycle: Model lifecycle manager for model switching tools.
-        user_id: Current user ID.
+        user_id: Current user ID (required).
         bot_id: Current bot ID.
         max_iterations: Max tool iterations per turn.
         
     Yields:
         Text chunks from the LLM response.
     """
+    if not user_id:
+        raise ValueError("user_id is required for stream_with_tools")
     from ..models.message import Message
     
     executor = ToolExecutor(

@@ -44,7 +44,7 @@ class ServiceAskLLM(BaseAskLLM):
         config: Config,
         local_mode: bool = False,
         bot_id: str = "nova",
-        user_id: str = "default",
+        user_id: str = "",  # Required - must be passed explicitly
         verbose: bool = False,
         debug: bool = False,
     ):
@@ -55,7 +55,7 @@ class ServiceAskLLM(BaseAskLLM):
             config: Application configuration
             local_mode: Skip database features
             bot_id: Bot personality to use
-            user_id: User profile ID
+            user_id: User profile ID (required)
             verbose: Enable verbose logging (--verbose)
             debug: Enable debug logging (--debug)
         """
@@ -219,8 +219,8 @@ class ServiceAskLLM(BaseAskLLM):
             self.history_manager.add_message("assistant", response)
             
             # Trigger background memory extraction
-            # Even if bot has tools, extraction is a backup for facts the bot missed
-            if self.memory:
+            # Skip extraction if tools were called - the tool already handled user intent
+            if self.memory and not tool_context:
                 self._trigger_memory_extraction(user_prompt, response)
     
     def _trigger_memory_extraction(self, user_prompt: str, assistant_response: str):

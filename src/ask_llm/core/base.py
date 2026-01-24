@@ -56,7 +56,7 @@ class BaseAskLLM(ABC):
         config: Config,
         local_mode: bool = False,
         bot_id: str = "nova",
-        user_id: str = "default",
+        user_id: str = "",  # Required - must be passed explicitly
         verbose: bool = False,
         debug: bool = False,
     ):
@@ -67,10 +67,12 @@ class BaseAskLLM(ABC):
             config: Application configuration
             local_mode: If True, skip database features
             bot_id: Bot personality to use
-            user_id: User profile ID
+            user_id: User profile ID (required)
             verbose: Enable verbose output (--verbose)
             debug: Enable debug output (--debug)
         """
+        if not user_id:
+            raise ValueError("user_id is required - set ASK_LLM_DEFAULT_USER or pass --user")
         self.resolved_model_alias = resolved_model_alias
         self.config = config
         self.model_definition = self.config.defined_models.get("models", {}).get(resolved_model_alias)
@@ -167,7 +169,12 @@ class BaseAskLLM(ABC):
             self.profile_manager = ProfileManager(config)
             
         except Exception as e:
-            logger.exception(f"Failed to initialize memory: {e}")
+            # Log without full traceback for connection errors (avoid 10-page stack traces)
+            error_str = str(e)
+            if "could not translate host name" in error_str or "Connection refused" in error_str:
+                logger.error(f"Failed to initialize memory: {e}")
+            else:
+                logger.exception(f"Failed to initialize memory: {e}")
             if self.verbose:
                 console.print(f"[yellow]Warning:[/yellow] Memory client failed: {e}")
     

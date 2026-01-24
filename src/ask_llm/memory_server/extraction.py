@@ -27,7 +27,7 @@ PROFILE_ATTRIBUTE_MIN_IMPORTANCE = 0.6
 
 def extract_profile_attributes_from_fact(
     fact: ExtractedFact | dict,
-    user_id: str = "default",
+    user_id: str,  # Required - must be passed explicitly
     config: Config | None = None,
 ) -> bool:
     """Extract profile attributes from a fact if the LLM identified it as one.
@@ -173,7 +173,7 @@ async def extract_facts_from_messages(
     messages: list[dict],
     config: Config | None = None,
     use_llm: bool = True,
-    user_id: str = "default",
+    user_id: str = "",  # Required - must be passed explicitly
     extract_profile_attributes: bool | None = None,
 ) -> list[dict]:
     """Extract facts from conversation messages.
@@ -182,12 +182,14 @@ async def extract_facts_from_messages(
         messages: List of message dicts with role/content.
         config: Config object (uses default if not provided).
         use_llm: Whether to use LLM extraction (falls back to heuristics if False).
-        user_id: User ID for profile attribute extraction.
+        user_id: User ID for profile attribute extraction (required).
         extract_profile_attributes: Whether to also create profile attributes from facts.
         
     Returns:
         List of extracted fact dicts.
     """
+    if not user_id:
+        raise ValueError("user_id is required for extract_facts_from_messages")
     config = config or Config()
     
     # Check if extraction is enabled

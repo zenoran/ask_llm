@@ -9,7 +9,7 @@ This package provides the command-line interface, split into logical modules:
 # Re-export main entry points from app module
 from .app import main, run_app, show_status, show_bots, show_users
 from .app import show_user_profile, run_user_profile_setup, ensure_user_profile
-from .app import parse_arguments, DEFAULT_USER_ID
+from .app import parse_arguments
 
 __all__ = [
     "main",
@@ -21,5 +21,4 @@ __all__ = [
     "show_user_profile",
     "run_user_profile_setup",
     "ensure_user_profile",
-    "DEFAULT_USER_ID",
 ]

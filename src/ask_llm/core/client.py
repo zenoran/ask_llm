@@ -30,7 +30,7 @@ class AskLLM(BaseAskLLM):
         config: Config,
         local_mode: bool = False,
         bot_id: str = "nova",
-        user_id: str = "default",
+        user_id: str = "",  # Required - must be passed explicitly
         verbose: bool = False,
         debug: bool = False,
     ):
@@ -41,7 +41,7 @@ class AskLLM(BaseAskLLM):
             config: Application configuration
             local_mode: Skip database features
             bot_id: Bot personality to use
-            user_id: User profile ID
+            user_id: User profile ID (required)
             verbose: Enable verbose logging (--verbose)
             debug: Enable debug logging (--debug)
         """

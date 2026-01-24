@@ -137,6 +137,40 @@ class ProfileManager:
     # Profile CRUD
     # =========================================================================
     
+    def list_profiles(self, entity_type: EntityType) -> list[EntityProfile]:
+        """List all profiles of a given type.
+        
+        Args:
+            entity_type: USER or BOT
+            
+        Returns:
+            List of profiles
+        """
+        with Session(self.engine) as session:
+            statement = select(EntityProfile).where(
+                EntityProfile.entity_type == entity_type
+            ).order_by(EntityProfile.entity_id)
+            return list(session.exec(statement).all())
+    
+    def get_profile(
+        self, 
+        entity_type: EntityType, 
+        entity_id: str
+    ) -> EntityProfile | None:
+        """Get a profile by type and ID without creating it.
+        
+        Returns:
+            Profile if found, None otherwise
+        """
+        entity_id = entity_id.lower().strip()
+        
+        with Session(self.engine) as session:
+            statement = select(EntityProfile).where(
+                EntityProfile.entity_type == entity_type,
+                EntityProfile.entity_id == entity_id
+            )
+            return session.exec(statement).first()
+    
     def get_or_create_profile(
         self, 
         entity_type: EntityType, 
@@ -319,6 +353,54 @@ class ProfileManager:
                 ProfileAttribute.entity_id == entity_id,
             ).order_by(ProfileAttribute.category, ProfileAttribute.key)
             return list(session.exec(statement).all())
+    
+    def search_and_delete_attributes(
+        self,
+        entity_type: EntityType,
+        entity_id: str,
+        query: str,
+        category: str | None = None,
+    ) -> tuple[int, list[str]]:
+        """Search for attributes matching query and delete them.
+        
+        Args:
+            entity_type: USER or BOT
+            entity_id: The entity ID
+            query: Search term to match against key or value
+            category: Optional category to filter by
+            
+        Returns:
+            Tuple of (count_deleted, list of deleted descriptions)
+        """
+        entity_id = entity_id.lower().strip()
+        query_lower = query.lower().strip()
+        
+        with Session(self.engine) as session:
+            # Get all attributes for this entity
+            statement = select(ProfileAttribute).where(
+                ProfileAttribute.entity_type == entity_type,
+                ProfileAttribute.entity_id == entity_id,
+            )
+            if category:
+                statement = statement.where(ProfileAttribute.category == category.lower().strip())
+            
+            attributes = list(session.exec(statement).all())
+            
+            # Find matches (search in key and value)
+            deleted = []
+            for attr in attributes:
+                key_match = query_lower in attr.key.lower()
+                value_match = query_lower in str(attr.value).lower()
+                if key_match or value_match:
+                    desc = f"{attr.category}.{attr.key}: {str(attr.value)[:50]}"
+                    session.delete(attr)
+                    deleted.append(desc)
+                    logger.debug(f"Deleted attribute {entity_type}/{entity_id}: {desc}")
+            
+            if deleted:
+                session.commit()
+            
+            return len(deleted), deleted
     
     def delete_attribute(
         self,
@@ -526,11 +608,17 @@ class ProfileManager:
 
 
 # Backwards compatibility
-def load_user_profile_summary(config: Any, user_id: str = "default") -> str:
+def load_user_profile_summary(config: Any, user_id: str) -> str:
     """Load and format user profile for system prompt injection.
     
     Backwards compatible function that works with both old and new systems.
+    
+    Args:
+        config: Config object.
+        user_id: User ID (required).
     """
+    if not user_id:
+        raise ValueError("user_id is required for load_user_profile_summary")
     try:
         manager = ProfileManager(config)
         return manager.get_user_profile_summary(user_id)

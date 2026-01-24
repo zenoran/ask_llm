@@ -7,6 +7,7 @@ from sqlmodel import Session, select
 from ask_llm.profiles import ProfileAttribute, EntityProfile
 
 config = Config()
+user_id = config.DEFAULT_USER  # Use configured user, not hardcoded "default"
 manager = ProfileManager(config)
 
 print("=== Entity Profiles ===")
@@ -16,8 +17,8 @@ with Session(manager.engine) as session:
     for p in user_profiles:
         print(f"  {p.entity_id}: {p.display_name or '(no name)'}")
 
-print("\n=== Attributes for user 'default' ===")
-attrs = manager.get_all_attributes(EntityType.USER, "default")
+print(f"\n=== Attributes for user '{user_id}' ===")
+attrs = manager.get_all_attributes(EntityType.USER, user_id)
 for a in attrs:
     print(f"  {a.category}.{a.key} = {a.value}")
     print(f"    confidence={a.confidence:.0%}, source={a.source}, created={a.created_at}")

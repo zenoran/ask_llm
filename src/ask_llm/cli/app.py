@@ -20,9 +20,6 @@ from rich.table import Table
 from rich.panel import Panel
 from typing import Iterator
 
-# Backward-compatible constant - prefer config.DEFAULT_USER
-DEFAULT_USER_ID = "default"
-
 console = Console()
 
 # Cache for service client
@@ -225,7 +222,7 @@ def show_status(config: Config, args: argparse.Namespace | None = None):
         table.add_row("  Model", model_display)
         
         # Determine effective user
-        user_id = getattr(args, 'user', DEFAULT_USER_ID)
+        user_id = getattr(args, 'user', None) or config.DEFAULT_USER
         if getattr(args, 'local', False):
             user_display = f"[dim]N/A (--local mode)[/dim]"
         else:
@@ -523,7 +520,7 @@ def show_bots(config: Config):
     console.print()
 
 
-def show_user_profile(config: Config, user_id: str = DEFAULT_USER_ID):
+def show_user_profile(config: Config, user_id: str):
     """Display user profile."""
     if not has_database_credentials(config):
         console.print("[yellow]User profiles require database connection.[/yellow]")
@@ -616,7 +613,7 @@ def show_users(config: Config):
     console.print()
 
 
-def run_user_profile_setup(config: Config, user_id: str = DEFAULT_USER_ID) -> bool:
+def run_user_profile_setup(config: Config, user_id: str) -> bool:
     """Run interactive user profile setup wizard."""
     if not has_database_credentials(config):
         console.print("[yellow]User profiles require database connection.[/yellow]")
@@ -672,7 +669,7 @@ def run_user_profile_setup(config: Config, user_id: str = DEFAULT_USER_ID) -> bo
         return False
 
 
-def ensure_user_profile(config: Config, user_id: str = DEFAULT_USER_ID) -> bool:
+def ensure_user_profile(config: Config, user_id: str) -> bool:
     """Ensure user profile exists, prompting for setup if needed.
     
     Returns True if profile exists or setup succeeded, False if setup was cancelled.
@@ -721,7 +718,7 @@ def parse_arguments(config_obj: Config) -> argparse.Namespace:
     parser.add_argument("-b", "--bot", type=str, default=None, help="Bot to use (nova, spark, mira). Use --list-bots to see all.")
     parser.add_argument("--list-bots", action="store_true", help="List available bots and exit")
     parser.add_argument("--status", action="store_true", help="Show memory system status and configuration")
-    parser.add_argument("--user", type=str, default=DEFAULT_USER_ID, help="User profile to use (creates if not exists)")
+    parser.add_argument("--user", type=str, default=None, help="User profile to use (creates if not exists). Defaults to config.DEFAULT_USER")
     parser.add_argument("--list-users", action="store_true", help="List all user profiles")
     parser.add_argument("--user-profile", action="store_true", help="Show current user profile")
     parser.add_argument("--user-profile-set", metavar="FIELD=VALUE", help="Set a user profile field (e.g., name=\"Nick\")")
@@ -1020,7 +1017,7 @@ def run_app(args: argparse.Namespace, config_obj: Config, resolved_alias: str):
         bot_id = bot.slug
     
     # Use config default if --user not specified
-    user_id = args.user if args.user != DEFAULT_USER_ID else config_obj.DEFAULT_USER
+    user_id = args.user if args.user else config_obj.DEFAULT_USER
     
     # Check if we're using service mode - explicit flag or config default
     # --local takes precedence and disables service mode

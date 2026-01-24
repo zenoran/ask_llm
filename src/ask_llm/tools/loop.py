@@ -36,7 +36,7 @@ class ToolLoop:
         profile_manager: "ProfileManager | None" = None,
         search_client: "SearchClient | None" = None,
         model_lifecycle: "ModelLifecycleManager | None" = None,
-        user_id: str = "default",
+        user_id: str = "",  # Required - must be passed explicitly
         bot_id: str = "nova",
         max_iterations: int = DEFAULT_MAX_ITERATIONS,
     ):
@@ -46,10 +46,12 @@ class ToolLoop:
             profile_manager: Manager for profile operations.
             search_client: Client for web search operations.
             model_lifecycle: Manager for model lifecycle operations.
-            user_id: Current user ID.
+            user_id: Current user ID (required).
             bot_id: Current bot ID.
             max_iterations: Maximum tool call iterations per turn.
         """
+        if not user_id:
+            raise ValueError("user_id is required for ToolLoop")
         self.executor = ToolExecutor(
             memory_client=memory_client,
             profile_manager=profile_manager,
@@ -172,7 +174,7 @@ def query_with_tools(
     profile_manager: "ProfileManager | None" = None,
     search_client: "SearchClient | None" = None,
     model_lifecycle: "ModelLifecycleManager | None" = None,
-    user_id: str = "default",
+    user_id: str = "",  # Required - must be passed explicitly
     bot_id: str = "nova",
     max_iterations: int = DEFAULT_MAX_ITERATIONS,
     stream: bool = True,
@@ -186,7 +188,7 @@ def query_with_tools(
         profile_manager: Profile manager for user/bot profile tools.
         search_client: Search client for web search tools.
         model_lifecycle: Model lifecycle manager for model switching tools.
-        user_id: Current user ID.
+        user_id: Current user ID (required).
         bot_id: Current bot ID.
         max_iterations: Max tool iterations.
         stream: Whether to stream the final response.
@@ -195,6 +197,8 @@ def query_with_tools(
         Tuple of (final_response, tool_context_summary).
         tool_context_summary contains the tool results that should be saved to history.
     """
+    if not user_id:
+        raise ValueError("user_id is required for query_with_tools")
     loop = ToolLoop(
         memory_client=memory_client,
         profile_manager=profile_manager,

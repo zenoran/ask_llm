@@ -41,13 +41,13 @@ start_memory_server() {
     ASK_LLM_LOG_PREFIX="mcp" \
     ASK_LLM_MEMORY_SERVER_VERBOSE=${VERBOSE_FLAG:+1} \
     ASK_LLM_MEMORY_SERVER_DEBUG=${DEBUG_FLAG:+1} \
-    uv run llm-mcp-server --transport http --host "$MEMORY_HOST" --port "$MEMORY_PORT" &
+    uv run --extra mcp llm-mcp-server --transport http --host "$MEMORY_HOST" --port "$MEMORY_PORT" &
     echo $! > "$MEMORY_PID_FILE"
   else
     ASK_LLM_LOG_PREFIX="mcp" \
     ASK_LLM_MEMORY_SERVER_VERBOSE=${VERBOSE_FLAG:+1} \
     ASK_LLM_MEMORY_SERVER_DEBUG=${DEBUG_FLAG:+1} \
-    nohup uv run llm-mcp-server --transport http --host "$MEMORY_HOST" --port "$MEMORY_PORT" \
+    nohup uv run --extra mcp llm-mcp-server --transport http --host "$MEMORY_HOST" --port "$MEMORY_PORT" \
       > "$LOG_DIR/memory-server.log" 2>&1 &
     echo $! > "$MEMORY_PID_FILE"
   fi
@@ -73,12 +73,12 @@ start_llm_service() {
   if [[ "$LOG_MODE" == "stdout" ]]; then
     ASK_LLM_LOG_PREFIX="llm" \
     ASK_LLM_MEMORY_SERVER_URL="$MEMORY_URL" \
-    uv run llm-service --host "$SERVICE_HOST" --port "$SERVICE_PORT" $VERBOSE_FLAG $DEBUG_FLAG &
+    uv run --extra service llm-service --host "$SERVICE_HOST" --port "$SERVICE_PORT" $VERBOSE_FLAG $DEBUG_FLAG &
     echo $! > "$SERVICE_PID_FILE"
   else
     ASK_LLM_LOG_PREFIX="llm" \
     ASK_LLM_MEMORY_SERVER_URL="$MEMORY_URL" \
-    nohup uv run llm-service --host "$SERVICE_HOST" --port "$SERVICE_PORT" $VERBOSE_FLAG $DEBUG_FLAG \
+    nohup uv run --extra service llm-service --host "$SERVICE_HOST" --port "$SERVICE_PORT" $VERBOSE_FLAG $DEBUG_FLAG \
       > "$LOG_DIR/llm-service.log" 2>&1 &
     echo $! > "$SERVICE_PID_FILE"
   fi
@@ -140,13 +140,13 @@ stop_service() {
 
 status() {
   if is_running "$MEMORY_PID_FILE"; then
-    echo "Memory server: running (pid $(cat "$MEMORY_PID_FILE"))"
+    echo "Memory server: running (pid $(cat "$MEMORY_PID_FILE")) on port ${MEMORY_PORT}"
   else
     echo "Memory server: stopped"
   fi
 
   if is_running "$SERVICE_PID_FILE"; then
-    echo "llm-service: running (pid $(cat "$SERVICE_PID_FILE"))"
+    echo "llm-service: running (pid $(cat "$SERVICE_PID_FILE")) on port ${SERVICE_PORT}"
   else
     echo "llm-service: stopped"
   fi

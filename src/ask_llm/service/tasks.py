@@ -36,8 +36,12 @@ class Task:
     task_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     created_at: datetime = field(default_factory=datetime.utcnow)
     bot_id: str = "nova"
-    user_id: str = "default"
+    user_id: str = ""  # Required - caller must set this
     priority: int = 0  # Higher = more urgent
+    
+    def __post_init__(self):
+        if not self.user_id:
+            raise ValueError("user_id is required for Task")
     
     def to_dict(self) -> dict:
         return {
@@ -52,13 +56,16 @@ class Task:
     
     @classmethod
     def from_dict(cls, data: dict) -> "Task":
+        user_id = data.get("user_id")
+        if not user_id:
+            raise ValueError("user_id is required in Task data")
         return cls(
             task_id=data["task_id"],
             task_type=TaskType(data["task_type"]),
             payload=data["payload"],
             created_at=datetime.fromisoformat(data["created_at"]),
             bot_id=data.get("bot_id", "nova"),
-            user_id=data.get("user_id", "default"),
+            user_id=user_id,
             priority=data.get("priority", 0),
         )
 
@@ -91,7 +98,7 @@ def create_extraction_task(
     user_message: str,
     assistant_message: str,
     bot_id: str = "nova",
-    user_id: str = "default",
+    user_id: str = "",  # Required - must be passed explicitly
     message_ids: list[str] | None = None,
     model: str | None = None,
 ) -> Task:
@@ -101,6 +108,8 @@ def create_extraction_task(
         model: The model alias to use for extraction. Should be the same model
                used for the chat to avoid loading multiple models.
     """
+    if not user_id:
+        raise ValueError("user_id is required for create_extraction_task")
     return Task(
         task_type=TaskType.MEMORY_EXTRACTION,
         payload={

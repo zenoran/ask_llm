@@ -94,24 +94,28 @@ class MemoryClient:
         client = MemoryClient(config, bot_id="nova")
         
         # Server mode (connects to running MCP server)
-        client = MemoryClient(config, bot_id="nova", server_url="http://localhost:8001")
+        client = MemoryClient(config, bot_id="nova", user_id="nick", server_url="http://localhost:8001")
     """
     
     def __init__(
         self,
         config: Config,
-        bot_id: str = "default",
-        user_id: str = "default",
+        bot_id: str = "",  # Required - must be passed explicitly
+        user_id: str = "",  # Required - must be passed explicitly
         server_url: str | None = None,
     ):
         """Initialize memory client.
         
         Args:
             config: Application config.
-            bot_id: Bot namespace for memory isolation.
-            user_id: User ID for profile attribute extraction.
+            bot_id: Bot namespace for memory isolation (required).
+            user_id: User ID for profile attribute extraction (required).
             server_url: If provided, use server mode; otherwise use embedded mode.
         """
+        if not bot_id:
+            raise ValueError("bot_id is required for MemoryClient")
+        if not user_id:
+            raise ValueError("user_id is required for MemoryClient")
         self.config = config
         self.bot_id = bot_id
         self.user_id = user_id
@@ -1021,16 +1025,16 @@ class MemoryClient:
 
 def get_memory_client(
     config: Config,
-    bot_id: str = "default",
-    user_id: str = "default",
+    bot_id: str = "",  # Required - must be passed explicitly
+    user_id: str = "",  # Required - must be passed explicitly
     server_url: str | None = None,
 ) -> MemoryClient:
     """Factory function to create a memory client.
     
     Args:
         config: Application config.
-        bot_id: Bot namespace.
-        user_id: User ID for profile attribute extraction.
+        bot_id: Bot namespace (required).
+        user_id: User ID for profile attribute extraction (required).
         server_url: Optional MCP server URL for server mode.
         
     Returns:

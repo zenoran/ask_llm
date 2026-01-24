@@ -191,8 +191,8 @@ async def add_message(
 @mcp.tool()
 async def extract_facts(
     messages: list[dict],
-    bot_id: str = "default",
-    user_id: str = "default",
+    bot_id: str,  # Required - must be passed explicitly
+    user_id: str,  # Required - must be passed explicitly
     store: bool = True,
     use_llm: bool = True,
 ) -> list[dict]:
@@ -200,14 +200,18 @@ async def extract_facts(
 
     Args:
         messages: List of message dicts with role/content.
-        bot_id: Bot namespace.
-        user_id: User ID for profile attribute extraction.
+        bot_id: Bot namespace (required).
+        user_id: User ID for profile attribute extraction (required).
         store: Whether to persist extracted facts.
         use_llm: Whether to use LLM extraction (falls back to heuristics if False).
 
     Returns:
         List of extracted memory dicts.
     """
+    if not bot_id:
+        raise ValueError("bot_id is required for extract_facts")
+    if not user_id:
+        raise ValueError("user_id is required for extract_facts")
     from ask_llm.memory_server.extraction import extract_facts_from_messages
     
     facts = await extract_facts_from_messages(
