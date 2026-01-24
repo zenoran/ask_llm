@@ -94,14 +94,14 @@ class MemoryClient:
         client = MemoryClient(config, bot_id="nova")
         
         # Server mode (connects to running MCP server)
-        client = MemoryClient(config, bot_id="nova", user_id="nick", server_url="http://localhost:8001")
+        client = MemoryClient(config, bot_id="nova", server_url="http://localhost:8001")
     """
     
     def __init__(
         self,
         config: Config,
         bot_id: str = "",  # Required - must be passed explicitly
-        user_id: str = "",  # Required - must be passed explicitly
+        user_id: str | None = None,
         server_url: str | None = None,
     ):
         """Initialize memory client.
@@ -109,13 +109,11 @@ class MemoryClient:
         Args:
             config: Application config.
             bot_id: Bot namespace for memory isolation (required).
-            user_id: User ID for profile attribute extraction (required).
+            user_id: User ID for profile attribute extraction (optional; required for extract_facts).
             server_url: If provided, use server mode; otherwise use embedded mode.
         """
         if not bot_id:
             raise ValueError("bot_id is required for MemoryClient")
-        if not user_id:
-            raise ValueError("user_id is required for MemoryClient")
         self.config = config
         self.bot_id = bot_id
         self.user_id = user_id
@@ -739,6 +737,8 @@ class MemoryClient:
         self._ensure_initialized()
         
         if self.server_url:
+            if not self.user_id:
+                raise ValueError("user_id is required for extract_facts")
             results = self._call_server("extract_facts", {
                 "messages": messages,
                 "bot_id": self.bot_id,
@@ -751,6 +751,8 @@ class MemoryClient:
         # Embedded mode - call extraction directly
         from ask_llm.memory_server.extraction import extract_facts_from_messages
         
+        if not self.user_id:
+            raise ValueError("user_id is required for extract_facts")
         facts = _run_async(
             extract_facts_from_messages(
                 messages=messages,
@@ -1026,7 +1028,7 @@ class MemoryClient:
 def get_memory_client(
     config: Config,
     bot_id: str = "",  # Required - must be passed explicitly
-    user_id: str = "",  # Required - must be passed explicitly
+    user_id: str | None = None,
     server_url: str | None = None,
 ) -> MemoryClient:
     """Factory function to create a memory client.
@@ -1034,7 +1036,7 @@ def get_memory_client(
     Args:
         config: Application config.
         bot_id: Bot namespace (required).
-        user_id: User ID for profile attribute extraction (required).
+        user_id: User ID for profile attribute extraction (optional).
         server_url: Optional MCP server URL for server mode.
         
     Returns:

@@ -334,6 +334,13 @@ class ServiceLogger:
                 if user_prompt:
                     self._console.print(f"  [green]prompt:[/green] {user_prompt}")
 
+        # Debug: dump full request payload
+        if _debug and payload:
+            try:
+                self._logger.info("Request payload: %s", json.dumps(payload, ensure_ascii=False, default=str, indent=2))
+            except Exception:
+                self._logger.info("Request payload: %s", payload)
+
     def api_response(self, ctx: RequestContext, status: int = 200, tokens: int | None = None) -> None:
         """Log an API response."""
         req_id = f"[request_id]\\[{ctx.request_id}][/request_id]"
