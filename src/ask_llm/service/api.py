@@ -716,7 +716,7 @@ class BackgroundService:
         
         ctx.model = model_alias
         bot_id = request.bot_id or self._default_bot
-        user_id = request.user
+        user_id = request.user or self.config.DEFAULT_USER
         local_mode = not request.augment_memory
         
         # Debug: Show memory settings
@@ -876,7 +876,7 @@ class BackgroundService:
                 raise ValueError(f"Model '{request.model}' not found.")
         
         bot_id = request.bot_id or self._default_bot
-        user_id = request.user
+        user_id = request.user or self.config.DEFAULT_USER
         local_mode = not request.augment_memory
         
         # Get cached AskLLM instance
@@ -1452,8 +1452,6 @@ try:
         
         if request.stream:
             # Streaming response
-            if not request.user:
-                raise HTTPException(status_code=400, detail="'user' field is required in request body")
             try:
                 return StreamingResponse(
                     service.chat_completion_stream(request),
@@ -1469,10 +1467,7 @@ try:
                 log.exception("Streaming chat completion failed")
                 raise HTTPException(status_code=500, detail=str(e))
         
-        # Non-streaming: validate user
-        if not request.user:
-            raise HTTPException(status_code=400, detail="'user' field is required in request body")
-        
+        # Non-streaming
         try:
             response = await service.chat_completion(request)
             return response
