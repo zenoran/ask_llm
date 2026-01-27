@@ -9,12 +9,13 @@ with provider-specific implementations.
 """
 
 from .base import SearchClient, SearchResult, SearchProvider
-from .factory import get_search_client, is_search_available
+from .factory import get_search_client, get_search_unavailable_reason, is_search_available
 
 __all__ = [
     "SearchClient",
     "SearchResult", 
     "SearchProvider",
     "get_search_client",
+    "get_search_unavailable_reason",
     "is_search_available",
 ]

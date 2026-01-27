@@ -73,12 +73,12 @@ start_llm_service() {
   if [[ "$LOG_MODE" == "stdout" ]]; then
     ASK_LLM_LOG_PREFIX="llm" \
     ASK_LLM_MEMORY_SERVER_URL="$MEMORY_URL" \
-    uv run --extra service llm-service --host "$SERVICE_HOST" --port "$SERVICE_PORT" $VERBOSE_FLAG $DEBUG_FLAG &
+    uv run --extra service --extra search --extra memory llm-service --host "$SERVICE_HOST" --port "$SERVICE_PORT" $VERBOSE_FLAG $DEBUG_FLAG &
     echo $! > "$SERVICE_PID_FILE"
   else
     ASK_LLM_LOG_PREFIX="llm" \
     ASK_LLM_MEMORY_SERVER_URL="$MEMORY_URL" \
-    nohup uv run --extra service llm-service --host "$SERVICE_HOST" --port "$SERVICE_PORT" $VERBOSE_FLAG $DEBUG_FLAG \
+    nohup uv run --extra service --extra search --extra memory llm-service --host "$SERVICE_HOST" --port "$SERVICE_PORT" $VERBOSE_FLAG $DEBUG_FLAG \
       > "$LOG_DIR/llm-service.log" 2>&1 &
     echo $! > "$SERVICE_PID_FILE"
   fi

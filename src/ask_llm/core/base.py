@@ -301,6 +301,7 @@ class BaseAskLLM(ABC):
                     profile_manager=self.profile_manager,
                     search_client=self.search_client,
                     model_lifecycle=self.model_lifecycle,
+                    config=self.config,
                     user_id=self.user_id,
                     bot_id=self.bot_id,
                     stream=stream,

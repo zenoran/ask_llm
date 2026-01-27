@@ -290,10 +290,17 @@ echo -e "${GREEN}✓ pipx available${NC}"
 echo -e "${BLUE}Installing ask_llm...${NC}"
 
 # Build extras string based on flags
-EXTRAS=""
+# Always include 'memory' extra for sentence-transformers (required for embeddings)
+EXTRAS_LIST=("memory")
 if [ "$INSTALL_SERVICE" = true ]; then
-    EXTRAS="service"
+    EXTRAS_LIST+=("service")
 fi
+if [ "$INSTALL_SEARCH" = true ]; then
+    EXTRAS_LIST+=("search")
+fi
+
+# Join extras with commas
+EXTRAS=$(IFS=,; echo "${EXTRAS_LIST[*]}")
 
 # Uninstall first if already installed (clean slate for editable)
 if pipx list | grep -q "ask-llm"; then

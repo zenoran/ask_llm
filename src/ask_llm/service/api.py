@@ -208,6 +208,7 @@ class HealthResponse(BaseModel):
 
 class HistoryMessage(BaseModel):
     """A message in the conversation history."""
+    id: str | None = None
     role: str
     content: str
     timestamp: float
@@ -220,10 +221,19 @@ class HistoryResponse(BaseModel):
     total_count: int
 
 
+class HistorySearchResponse(BaseModel):
+    """Response for history search."""
+    bot_id: str
+    query: str
+    messages: list[HistoryMessage]
+    total_count: int
+
+
 class HistoryClearResponse(BaseModel):
     """Response for clearing history."""
     success: bool
     message: str
+    deleted_count: int = 0
 
 
 # Memory Management Models
@@ -358,6 +368,7 @@ class RawCompletionResponse(BaseModel):
 # User Profile Models
 class UserProfileAttribute(BaseModel):
     """A single profile attribute."""
+    id: int | None = None
     category: str
     key: str
     value: str
@@ -939,6 +950,7 @@ class BackgroundService:
                         profile_manager=ask_llm.profile_manager,
                         search_client=ask_llm.search_client,
                         model_lifecycle=ask_llm.model_lifecycle,
+                        config=ask_llm.config,
                         user_id=ask_llm.user_id,
                         bot_id=ask_llm.bot_id,
                     )
@@ -1559,6 +1571,7 @@ try:
             
             history_messages = [
                 HistoryMessage(
+                    id=msg.get("id"),
                     role=msg.get("role", ""),
                     content=msg.get("content", ""),
                     timestamp=msg.get("timestamp", 0.0)
@@ -1574,6 +1587,55 @@ try:
             )
         except Exception as e:
             log.error(f"Failed to get history: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.post("/v1/history/search", response_model=HistorySearchResponse, tags=["History"])
+    async def search_history(
+        query: str = Query(..., description="Search query"),
+        bot_id: str = Query(None, description="Bot ID (uses default if not specified)"),
+        limit: int = Query(50, description="Maximum number of messages to return"),
+    ):
+        """Search conversation history for a bot."""
+        service = get_service()
+        
+        effective_bot_id = bot_id or service._default_bot
+        
+        try:
+            client = service.get_memory_client(effective_bot_id)
+            if not client:
+                raise HTTPException(status_code=503, detail="Memory service unavailable")
+            
+            # Get all messages and filter by query
+            messages = client.get_messages(since_seconds=None)
+            query_lower = query.lower()
+            
+            matching = [
+                msg for msg in messages
+                if msg.get("role") != "system" and query_lower in msg.get("content", "").lower()
+            ]
+            
+            # Apply limit
+            if limit > 0 and len(matching) > limit:
+                matching = matching[-limit:]
+            
+            history_messages = [
+                HistoryMessage(
+                    id=msg.get("id"),
+                    role=msg.get("role", ""),
+                    content=msg.get("content", ""),
+                    timestamp=msg.get("timestamp", 0.0)
+                )
+                for msg in matching
+            ]
+            
+            return HistorySearchResponse(
+                bot_id=effective_bot_id,
+                query=query,
+                messages=history_messages,
+                total_count=len(history_messages)
+            )
+        except Exception as e:
+            log.error(f"Failed to search history: {e}")
             raise HTTPException(status_code=500, detail=str(e))
 
     @app.delete("/v1/history", response_model=HistoryClearResponse, tags=["History"])
@@ -1662,6 +1724,7 @@ try:
                 description=profile.description,
                 attributes=[
                     UserProfileAttribute(
+                        id=attr.id,
                         category=attr.category.value if hasattr(attr.category, 'value') else str(attr.category),
                         key=attr.key,
                         value=attr.value,
@@ -1678,6 +1741,43 @@ try:
             raise
         except Exception as e:
             log.error(f"Failed to get user profile: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.delete("/v1/users/attribute/{attribute_id}", tags=["Users"])
+    async def delete_user_attribute(attribute_id: int):
+        """Delete a user profile attribute by its ID."""
+        service = get_service()
+        
+        try:
+            from ..profiles import ProfileManager
+            
+            manager = ProfileManager(service.config)
+            
+            # First get the attribute to confirm it exists and show what we're deleting
+            attr = manager.get_attribute_by_id(attribute_id)
+            if not attr:
+                raise HTTPException(status_code=404, detail=f"Attribute with ID {attribute_id} not found")
+            
+            success = manager.delete_attribute_by_id(attribute_id)
+            if success:
+                return {
+                    "success": True,
+                    "message": f"Deleted attribute {attr.category}.{attr.key} from {attr.entity_type}/{attr.entity_id}",
+                    "deleted": {
+                        "id": attribute_id,
+                        "entity_type": str(attr.entity_type),
+                        "entity_id": attr.entity_id,
+                        "category": attr.category,
+                        "key": attr.key,
+                        "value": attr.value,
+                    }
+                }
+            else:
+                raise HTTPException(status_code=500, detail="Failed to delete attribute")
+        except HTTPException:
+            raise
+        except Exception as e:
+            log.error(f"Failed to delete user attribute: {e}")
             raise HTTPException(status_code=500, detail=str(e))
 
     # -------------------------------------------------------------------------

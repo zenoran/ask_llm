@@ -14,6 +14,7 @@ if TYPE_CHECKING:
     from ..profiles import ProfileManager
     from ..search.base import SearchClient
     from ..core.model_lifecycle import ModelLifecycleManager
+    from ..utils.config import Config
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +42,7 @@ class ToolExecutor:
         profile_manager: "ProfileManager | None" = None,
         search_client: "SearchClient | None" = None,
         model_lifecycle: "ModelLifecycleManager | None" = None,
+        config: "Config | None" = None,
         user_id: str = "",  # Required - must be passed explicitly
         bot_id: str = "nova",
     ):
@@ -60,6 +62,7 @@ class ToolExecutor:
         self.profile_manager = profile_manager
         self.search_client = search_client
         self.model_lifecycle = model_lifecycle
+        self.config = config
         self.user_id = user_id
         self.bot_id = bot_id
         self._call_count = 0
@@ -578,13 +581,31 @@ class ToolExecutor:
     # Web Search Tool Execution
     # =========================================================================
 
+    def _ensure_search_client(self) -> None:
+        """Lazy-init search client if possible."""
+        if self.search_client or not self.config:
+            return
+        try:
+            from ..search import get_search_client
+            self.search_client = get_search_client(self.config)
+        except Exception as e:
+            logger.warning(f"Failed to initialize search client: {e}")
+
     def _execute_web_search(self, tool_call: ToolCall) -> str:
         """Execute web_search tool."""
+        self._ensure_search_client()
         if not self.search_client:
+            error_msg = "Web search not available"
+            if self.config:
+                try:
+                    from ..search import get_search_unavailable_reason
+                    error_msg = get_search_unavailable_reason(self.config)
+                except Exception:
+                    pass
             return format_tool_result(
                 tool_call.name,
                 None,
-                error="Web search not available"
+                error=error_msg
             )
         
         query = tool_call.arguments.get("query", "")
@@ -610,11 +631,19 @@ class ToolExecutor:
 
     def _execute_news_search(self, tool_call: ToolCall) -> str:
         """Execute news_search tool."""
+        self._ensure_search_client()
         if not self.search_client:
+            error_msg = "News search not available"
+            if self.config:
+                try:
+                    from ..search import get_search_unavailable_reason
+                    error_msg = get_search_unavailable_reason(self.config)
+                except Exception:
+                    pass
             return format_tool_result(
                 tool_call.name,
                 None,
-                error="News search not available"
+                error=error_msg
             )
         
         query = tool_call.arguments.get("query", "")

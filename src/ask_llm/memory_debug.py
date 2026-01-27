@@ -9,7 +9,13 @@ Usage:
     llm-memory -m embedding "nick"               # Search via embeddings only
     llm-memory -m high-importance                # Show high-importance memories
     llm-memory --list-all -n 20                  # List top 20 memories
-    llm-memory --forget-recent 5                 # Soft-delete last 5 messages
+    llm-memory --delete <ID>                     # Delete a memory by UUID prefix
+    llm-memory --list-attrs                      # List user profile attributes with IDs
+    llm-memory --list-attrs nick                 # List attrs for specific user
+    llm-memory --delete-attr 42                  # Delete a profile attribute by integer ID
+    llm-memory --history                         # Show recent conversation history
+    llm-memory --search-history "topic"          # Search conversation history
+    llm-memory --forget-recent 5                 # Soft-delete last 5 messages (recoverable)
     llm-memory --forget-minutes 30               # Soft-delete messages from last 30 min
     llm-memory --restore                         # Restore soft-deleted messages
     llm-memory --regenerate-embeddings           # Regenerate all embeddings
@@ -450,6 +456,123 @@ def handle_delete_memory(bot_id: str, memory_id: str, skip_confirm: bool):
         console.print(f"[red]Failed to delete memory[/red]")
 
 
+def handle_delete_attribute(attribute_id: int, skip_confirm: bool):
+    """Delete a user profile attribute by ID."""
+    # First get info about the attribute
+    result = api_delete(f"/v1/users/attribute/{attribute_id}")
+    
+    if not result:
+        console.print(f"[red]Failed to delete attribute {attribute_id}[/red]")
+        return
+    
+    if result.get("success"):
+        deleted = result.get("deleted", {})
+        console.print(f"[green]✓ Deleted:[/green] {deleted.get('category', '?')}.{deleted.get('key', '?')} = {deleted.get('value', '?')}")
+        console.print(f"[dim]  From: {deleted.get('entity_type', '?')}/{deleted.get('entity_id', '?')}[/dim]")
+    else:
+        console.print(f"[red]Failed to delete attribute: {result.get('detail', 'Unknown error')}[/red]")
+
+
+def handle_list_attrs(user_id: str):
+    """List user profile attributes with IDs."""
+    data = api_get(f"/v1/users/{user_id}")
+    
+    if not data:
+        console.print(f"[red]Failed to get profile for user '{user_id}'[/red]")
+        return
+    
+    attributes = data.get("attributes", [])
+    if not attributes:
+        console.print(f"[yellow]No attributes found for user '{user_id}'[/yellow]")
+        return
+    
+    table = Table(title=f"Profile Attributes for {user_id}")
+    table.add_column("ID", style="cyan", justify="right", width=6)
+    table.add_column("Category", style="magenta", width=15)
+    table.add_column("Key", style="yellow", width=25)
+    table.add_column("Value", style="white", max_width=50)
+    table.add_column("Conf", justify="right", width=4)
+    
+    for attr in attributes:
+        value = str(attr.get("value", ""))
+        if len(value) > 50:
+            value = value[:47] + "..."
+        table.add_row(
+            str(attr.get("id", "?")),
+            attr.get("category", "?"),
+            attr.get("key", "?"),
+            value,
+            f"{attr.get('confidence', 1.0):.1f}",
+        )
+    
+    console.print(table)
+    console.print(f"\n[dim]Use --delete-attr <ID> to remove an attribute[/dim]")
+
+
+def handle_show_history(bot_id: str, limit: int):
+    """Show recent conversation history."""
+    data = api_get("/v1/history", {"bot_id": bot_id, "limit": limit})
+    
+    if not data:
+        console.print(f"[red]Failed to get history for bot '{bot_id}'[/red]")
+        return
+    
+    messages = data.get("messages", [])
+    if not messages:
+        console.print(f"[yellow]No history found for bot '{bot_id}'[/yellow]")
+        return
+    
+    table = Table(title=f"Conversation History ({len(messages)} messages)")
+    table.add_column("Time", style="dim", width=19)
+    table.add_column("Role", width=10)
+    table.add_column("Content", style="white", max_width=80)
+    
+    for msg in messages:
+        ts = msg.get("timestamp", 0)
+        time_str = datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S") if ts else "?"
+        role = msg.get("role", "?")
+        role_style = "cyan" if role == "user" else "green" if role == "assistant" else "yellow"
+        content = msg.get("content", "")
+        if len(content) > 100:
+            content = content[:97] + "..."
+        content = content.replace("\n", " ")
+        table.add_row(time_str, f"[{role_style}]{role}[/{role_style}]", content)
+    
+    console.print(table)
+
+
+def handle_search_history(bot_id: str, query: str, limit: int):
+    """Search conversation history."""
+    data = api_post("/v1/history/search", params={"bot_id": bot_id, "query": query, "limit": limit})
+    
+    if not data:
+        console.print(f"[red]Failed to search history for bot '{bot_id}'[/red]")
+        return
+    
+    messages = data.get("messages", [])
+    if not messages:
+        console.print(f"[yellow]No messages found matching '{query}'[/yellow]")
+        return
+    
+    table = Table(title=f"Search Results for '{query}' ({len(messages)} matches)")
+    table.add_column("Time", style="dim", width=19)
+    table.add_column("Role", width=10)
+    table.add_column("Content", style="white", max_width=80)
+    
+    for msg in messages:
+        ts = msg.get("timestamp", 0)
+        time_str = datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S") if ts else "?"
+        role = msg.get("role", "?")
+        role_style = "cyan" if role == "user" else "green" if role == "assistant" else "yellow"
+        content = msg.get("content", "")
+        if len(content) > 100:
+            content = content[:97] + "..."
+        content = content.replace("\n", " ")
+        table.add_row(time_str, f"[{role_style}]{role}[/{role_style}]", content)
+    
+    console.print(table)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Memory management for ask_llm")
     parser.add_argument("query", nargs="?", default="", help="Search query")
@@ -466,7 +589,9 @@ def main():
     
     # Memory deletion
     del_group = parser.add_argument_group("Memory deletion")
-    del_group.add_argument("--delete", "-d", metavar="ID", help="Delete a memory by ID (use first 8 chars)")
+    del_group.add_argument("--delete", "-d", metavar="ID", help="Delete a memory by ID (use first 8 chars of UUID)")
+    del_group.add_argument("--delete-attr", metavar="ID", type=int, help="Delete a user profile attribute by its integer ID (use --list-attrs to see IDs)")
+    del_group.add_argument("--list-attrs", metavar="USER", nargs="?", const="nick", help="List user profile attributes with IDs (default user: nick)")
     
     # Message management
     msg_group = parser.add_argument_group("Message management (soft-delete)")
@@ -474,6 +599,11 @@ def main():
     msg_group.add_argument("--forget-minutes", type=int, metavar="N", help="Ignore messages from last N minutes (reversible)")
     msg_group.add_argument("--restore", action="store_true", help="Restore all ignored messages")
     msg_group.add_argument("--yes", "-y", action="store_true", help="Skip confirmation prompts")
+    
+    # History management
+    hist_group = parser.add_argument_group("History management")
+    hist_group.add_argument("--history", action="store_true", help="Show recent conversation history")
+    hist_group.add_argument("--search-history", metavar="QUERY", help="Search conversation history")
     
     # Memory maintenance
     maint_group = parser.add_argument_group("Memory maintenance")
@@ -496,6 +626,16 @@ def main():
         handle_delete_memory(args.bot, args.delete, args.yes)
         return
     
+    # Handle delete attribute command
+    if args.delete_attr:
+        handle_delete_attribute(args.delete_attr, args.yes)
+        return
+    
+    # Handle list attributes command
+    if args.list_attrs:
+        handle_list_attrs(args.list_attrs)
+        return
+    
     # Handle message management commands first
     if args.forget_recent:
         handle_forget_recent(args.bot, args.forget_recent, args.yes)
@@ -507,6 +647,15 @@ def main():
     
     if args.restore:
         handle_restore(args.bot, args.yes)
+        return
+    
+    # History management
+    if args.history:
+        handle_show_history(args.bot, args.limit)
+        return
+    
+    if args.search_history:
+        handle_search_history(args.bot, args.search_history, args.limit)
         return
     
     # Memory maintenance

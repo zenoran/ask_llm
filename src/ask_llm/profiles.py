@@ -430,6 +430,44 @@ class ProfileManager:
                 return True
             return False
     
+    def delete_attribute_by_id(self, attribute_id: int) -> bool:
+        """Delete a specific attribute by its database ID.
+        
+        Args:
+            attribute_id: The primary key ID of the attribute
+            
+        Returns:
+            True if deleted, False if not found
+        """
+        with Session(self.engine) as session:
+            statement = select(ProfileAttribute).where(
+                ProfileAttribute.id == attribute_id,
+            )
+            attr = session.exec(statement).first()
+            
+            if attr:
+                desc = f"{attr.entity_type}/{attr.entity_id}: {attr.category}.{attr.key}"
+                session.delete(attr)
+                session.commit()
+                logger.debug(f"Deleted attribute by ID {attribute_id}: {desc}")
+                return True
+            return False
+    
+    def get_attribute_by_id(self, attribute_id: int) -> ProfileAttribute | None:
+        """Get a specific attribute by its database ID.
+        
+        Args:
+            attribute_id: The primary key ID of the attribute
+            
+        Returns:
+            The attribute if found, None otherwise
+        """
+        with Session(self.engine) as session:
+            statement = select(ProfileAttribute).where(
+                ProfileAttribute.id == attribute_id,
+            )
+            return session.exec(statement).first()
+    
     # =========================================================================
     # Profile Summary (for system prompts)
     # =========================================================================

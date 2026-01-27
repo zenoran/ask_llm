@@ -15,6 +15,7 @@ if TYPE_CHECKING:
     from ..profiles import ProfileManager
     from ..search.base import SearchClient
     from ..core.model_lifecycle import ModelLifecycleManager
+    from ..utils.config import Config
 
 # Use service logger if available, otherwise standard logging
 try:
@@ -32,6 +33,7 @@ def stream_with_tools(
     profile_manager: "ProfileManager | None" = None,
     search_client: "SearchClient | None" = None,
     model_lifecycle: "ModelLifecycleManager | None" = None,
+    config: "Config | None" = None,
     user_id: str = "",  # Required - must be passed explicitly
     bot_id: str = "nova",
     max_iterations: int = DEFAULT_MAX_ITERATIONS,
@@ -48,6 +50,7 @@ def stream_with_tools(
         profile_manager: Profile manager for profile tools.
         search_client: Search client for web search tools.
         model_lifecycle: Model lifecycle manager for model switching tools.
+        config: Application config (used for lazy search setup).
         user_id: Current user ID (required).
         bot_id: Current bot ID.
         max_iterations: Max tool iterations per turn.
@@ -64,6 +67,7 @@ def stream_with_tools(
         profile_manager=profile_manager,
         search_client=search_client,
         model_lifecycle=model_lifecycle,
+        config=config,
         user_id=user_id,
         bot_id=bot_id,
     )

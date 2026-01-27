@@ -101,17 +101,28 @@ def get_search_client(
     # Ensure max_results is an int at this point
     max_results = int(max_results)
     
-    # Create client
+    # Create client (with fallback to DuckDuckGo if primary fails)
     if provider == SearchProvider.TAVILY:
         from .tavily_client import TavilyClient, is_tavily_available
         
         if not is_tavily_available():
-            logger.error("Tavily requested but tavily-python not installed")
+            logger.warning("Tavily requested but tavily-python not installed, falling back to DuckDuckGo")
+            # Fall back to DuckDuckGo
+            from .ddgs_client import DuckDuckGoClient, is_ddgs_available
+            if is_ddgs_available():
+                timeout = getattr(config, "SEARCH_TIMEOUT", 10)
+                return DuckDuckGoClient(max_results=max_results, timeout=timeout)
+            logger.error("DuckDuckGo fallback also unavailable")
             return None
         
         api_key = getattr(config, "TAVILY_API_KEY", None)
         if not api_key:
-            logger.error("Tavily requested but TAVILY_API_KEY not configured")
+            logger.warning("Tavily requested but TAVILY_API_KEY not configured, falling back to DuckDuckGo")
+            from .ddgs_client import DuckDuckGoClient, is_ddgs_available
+            if is_ddgs_available():
+                timeout = getattr(config, "SEARCH_TIMEOUT", 10)
+                return DuckDuckGoClient(max_results=max_results, timeout=timeout)
+            logger.error("DuckDuckGo fallback also unavailable")
             return None
         
         include_answer = getattr(config, "SEARCH_INCLUDE_ANSWER", False)
@@ -138,3 +149,80 @@ def get_search_client(
     
     logger.error(f"Unknown search provider: {provider}")
     return None
+
+
+def get_search_unavailable_reason(
+    config: "Config",
+    provider: SearchProvider | str | None = None,
+) -> str:
+    """Return a human-readable reason why search isn't available.
+
+    Args:
+        config: Application config
+        provider: Optional provider override
+
+    Returns:
+        A message explaining how to enable search
+    """
+    # Normalize provider selection logic to match get_search_client
+    resolved_provider: SearchProvider | None = None
+
+    if provider is not None:
+        if isinstance(provider, str):
+            try:
+                resolved_provider = SearchProvider(provider.lower())
+            except ValueError:
+                resolved_provider = None
+        else:
+            resolved_provider = provider
+    else:
+        config_provider = getattr(config, "SEARCH_PROVIDER", None)
+        if config_provider:
+            try:
+                resolved_provider = SearchProvider(config_provider.lower())
+            except ValueError:
+                resolved_provider = None
+
+    if resolved_provider is None:
+        tavily_key = getattr(config, "TAVILY_API_KEY", None)
+        if tavily_key:
+            from .tavily_client import is_tavily_available
+            if not is_tavily_available():
+                return (
+                    "Tavily API key is set but tavily-python isn't installed. "
+                    "Install with: pipx runpip ask-llm install tavily-python"
+                )
+            return "Tavily is configured but unavailable. Check your API key and network."
+
+        from .ddgs_client import is_ddgs_available
+        if not is_ddgs_available():
+            return (
+                "DuckDuckGo search requires the ddgs package. "
+                "Install with: ./install.sh --with-search "
+                "or pipx runpip ask-llm install ddgs"
+            )
+        return "No search provider available. Configure Tavily or install ddgs."
+
+    if resolved_provider == SearchProvider.TAVILY:
+        from .tavily_client import is_tavily_available
+        api_key = getattr(config, "TAVILY_API_KEY", None)
+        if not api_key:
+            return "Tavily requires TAVILY_API_KEY to be set in your config."
+        if not is_tavily_available():
+            return (
+                "Tavily search requires tavily-python. "
+                "Install with: pipx runpip ask-llm install tavily-python"
+            )
+        return "Tavily is configured but unavailable. Check your API key and network."
+
+    if resolved_provider == SearchProvider.DUCKDUCKGO:
+        from .ddgs_client import is_ddgs_available
+        if not is_ddgs_available():
+            return (
+                "DuckDuckGo search requires the ddgs package. "
+                "Install with: ./install.sh --with-search "
+                "or pipx runpip ask-llm install ddgs"
+            )
+        return "DuckDuckGo search is configured but unavailable."
+
+    return "Web search not available."
