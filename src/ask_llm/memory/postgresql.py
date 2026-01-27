@@ -1390,6 +1390,67 @@ class PostgreSQLMemoryBackend(MemoryBackend):
                 logger.error(f"Failed to forget messages: {e}")
                 return 0
     
+    def ignore_message_by_id(self, message_id: str) -> bool:
+        """Move a specific message to the forgotten table by its ID.
+        
+        Supports both full UUID and prefix matching (first 8 chars).
+        Returns True if a message was forgotten, False otherwise.
+        """
+        with self.engine.connect() as conn:
+            try:
+                # Find the message (support prefix matching)
+                if len(message_id) < 36:
+                    select_sql = text(f"""
+                        SELECT id, role, content, timestamp, session_id, processed, created_at
+                        FROM {self._messages_table_name}
+                        WHERE id LIKE :id_pattern
+                        LIMIT 1
+                    """)
+                    row = conn.execute(select_sql, {"id_pattern": f"{message_id}%"}).fetchone()
+                else:
+                    select_sql = text(f"""
+                        SELECT id, role, content, timestamp, session_id, processed, created_at
+                        FROM {self._messages_table_name}
+                        WHERE id = :id
+                    """)
+                    row = conn.execute(select_sql, {"id": message_id}).fetchone()
+                
+                if not row:
+                    logger.debug(f"Message {message_id} not found")
+                    return False
+                
+                # Insert into forgotten table
+                insert_sql = text(f"""
+                    INSERT INTO {self._forgotten_table_name} 
+                    (id, role, content, timestamp, session_id, processed, created_at, forgotten_at)
+                    VALUES (:id, :role, :content, :timestamp, :session_id, :processed, :created_at, CURRENT_TIMESTAMP)
+                    ON CONFLICT (id) DO NOTHING
+                """)
+                conn.execute(insert_sql, {
+                    "id": row.id,
+                    "role": row.role,
+                    "content": row.content,
+                    "timestamp": row.timestamp,
+                    "session_id": row.session_id,
+                    "processed": row.processed,
+                    "created_at": row.created_at,
+                })
+                
+                # Delete from messages table
+                delete_sql = text(f"""
+                    DELETE FROM {self._messages_table_name}
+                    WHERE id = :id
+                """)
+                conn.execute(delete_sql, {"id": row.id})
+                conn.commit()
+                
+                logger.debug(f"Forgot message {row.id}")
+                return True
+            except Exception as e:
+                conn.rollback()
+                logger.error(f"Failed to forget message {message_id}: {e}")
+                return False
+    
     def restore_ignored_messages(self) -> int:
         """Restore all forgotten messages back to the messages table.
         

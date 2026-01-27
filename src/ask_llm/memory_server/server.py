@@ -376,6 +376,13 @@ async def ignore_messages_since_minutes(bot_id: str = "default", minutes: int = 
 
 
 @mcp.tool()
+async def ignore_message_by_id(bot_id: str = "default", message_id: str = "") -> bool:
+    """Move a specific message to the forgotten table by ID (soft delete)."""
+    storage = _get_storage()
+    return await storage.ignore_message_by_id(bot_id=bot_id, message_id=message_id)
+
+
+@mcp.tool()
 async def restore_ignored_messages(bot_id: str = "default") -> int:
     storage = _get_storage()
     return await storage.restore_ignored_messages(bot_id=bot_id)

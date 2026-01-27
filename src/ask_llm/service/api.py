@@ -279,6 +279,7 @@ class MemoryForgetRequest(BaseModel):
     """Request to forget messages."""
     count: int | None = None  # forget recent N
     minutes: int | None = None  # forget last N minutes
+    message_id: str | None = None  # forget specific message by ID
 
 
 class MemoryForgetResponse(BaseModel):
@@ -1945,12 +1946,23 @@ try:
             if not client:
                 raise HTTPException(status_code=503, detail="Memory service unavailable")
 
-            if request.count:
+            if request.message_id:
+                success = client.ignore_message_by_id(request.message_id)
+                if success:
+                    return MemoryForgetResponse(
+                        success=True,
+                        messages_ignored=1,
+                        memories_deleted=0,
+                        message=f"Ignored message {request.message_id[:8]}..."
+                    )
+                else:
+                    raise HTTPException(status_code=404, detail=f"Message {request.message_id} not found")
+            elif request.count:
                 result = client.forget_recent_messages(request.count)
             elif request.minutes:
                 result = client.forget_messages_since_minutes(request.minutes)
             else:
-                raise HTTPException(status_code=400, detail="Must specify count or minutes")
+                raise HTTPException(status_code=400, detail="Must specify count, minutes, or message_id")
 
             messages_ignored = int(result.get("messages_ignored", 0))
             memories_deleted = int(result.get("memories_deleted", 0))

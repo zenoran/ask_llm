@@ -325,6 +325,24 @@ def handle_forget_minutes(bot_id: str, minutes: int, skip_confirm: bool):
         console.print("[dim]Cancelled[/dim]")
 
 
+def handle_forget_by_id(bot_id: str, message_id: str, skip_confirm: bool):
+    """Ignore a specific message by ID."""
+    if not skip_confirm:
+        confirm = console.input(f"[bold yellow]Ignore message {message_id}? (y/N):[/bold yellow] ").strip().lower()
+        if confirm not in ('y', 'yes'):
+            console.print("[dim]Cancelled[/dim]")
+            return
+    
+    result = api_post("/v1/memory/forget", {"message_id": message_id}, {"bot_id": bot_id})
+    if result and result.get("success"):
+        console.print(f"[green]✓ {result.get('message', 'Message ignored')}[/green]")
+        console.print("[dim]Use --restore to undo[/dim]")
+    elif result and result.get("detail"):
+        console.print(f"[red]{result.get('detail')}[/red]")
+    else:
+        console.print(f"[red]Failed to ignore message[/red]")
+
+
 def handle_restore(bot_id: str, skip_confirm: bool):
     """Restore all ignored messages."""
     # Preview ignored messages first
@@ -523,9 +541,10 @@ def handle_show_history(bot_id: str, limit: int):
         return
     
     table = Table(title=f"Conversation History ({len(messages)} messages)")
+    table.add_column("ID", style="dim", width=8)
     table.add_column("Time", style="dim", width=19)
     table.add_column("Role", width=10)
-    table.add_column("Content", style="white", max_width=80)
+    table.add_column("Content", style="white", max_width=70)
     
     for msg in messages:
         ts = msg.get("timestamp", 0)
@@ -533,12 +552,14 @@ def handle_show_history(bot_id: str, limit: int):
         role = msg.get("role", "?")
         role_style = "cyan" if role == "user" else "green" if role == "assistant" else "yellow"
         content = msg.get("content", "")
-        if len(content) > 100:
-            content = content[:97] + "..."
+        if len(content) > 80:
+            content = content[:77] + "..."
         content = content.replace("\n", " ")
-        table.add_row(time_str, f"[{role_style}]{role}[/{role_style}]", content)
+        msg_id = msg.get("id", "")[:8] if msg.get("id") else "?"
+        table.add_row(msg_id, time_str, f"[{role_style}]{role}[/{role_style}]", content)
     
     console.print(table)
+    console.print(f"\n[dim]Use --forget-id <ID> to soft-delete a message[/dim]")
 
 
 def handle_search_history(bot_id: str, query: str, limit: int):
@@ -555,9 +576,10 @@ def handle_search_history(bot_id: str, query: str, limit: int):
         return
     
     table = Table(title=f"Search Results for '{query}' ({len(messages)} matches)")
+    table.add_column("ID", style="dim", width=8)
     table.add_column("Time", style="dim", width=19)
     table.add_column("Role", width=10)
-    table.add_column("Content", style="white", max_width=80)
+    table.add_column("Content", style="white", max_width=70)
     
     for msg in messages:
         ts = msg.get("timestamp", 0)
@@ -565,12 +587,14 @@ def handle_search_history(bot_id: str, query: str, limit: int):
         role = msg.get("role", "?")
         role_style = "cyan" if role == "user" else "green" if role == "assistant" else "yellow"
         content = msg.get("content", "")
-        if len(content) > 100:
-            content = content[:97] + "..."
+        if len(content) > 80:
+            content = content[:77] + "..."
         content = content.replace("\n", " ")
-        table.add_row(time_str, f"[{role_style}]{role}[/{role_style}]", content)
+        msg_id = msg.get("id", "")[:8] if msg.get("id") else "?"
+        table.add_row(msg_id, time_str, f"[{role_style}]{role}[/{role_style}]", content)
     
     console.print(table)
+    console.print(f"\n[dim]Use --forget-id <ID> to soft-delete a message[/dim]")
 
 
 def main():
@@ -597,6 +621,7 @@ def main():
     msg_group = parser.add_argument_group("Message management (soft-delete)")
     msg_group.add_argument("--forget-recent", type=int, metavar="N", help="Ignore the last N messages (reversible)")
     msg_group.add_argument("--forget-minutes", type=int, metavar="N", help="Ignore messages from last N minutes (reversible)")
+    msg_group.add_argument("--forget-id", metavar="ID", help="Ignore a specific message by ID (reversible)")
     msg_group.add_argument("--restore", action="store_true", help="Restore all ignored messages")
     msg_group.add_argument("--yes", "-y", action="store_true", help="Skip confirmation prompts")
     
@@ -643,6 +668,10 @@ def main():
     
     if args.forget_minutes:
         handle_forget_minutes(args.bot, args.forget_minutes, args.yes)
+        return
+    
+    if args.forget_id:
+        handle_forget_by_id(args.bot, args.forget_id, args.yes)
         return
     
     if args.restore:

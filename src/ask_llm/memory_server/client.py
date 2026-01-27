@@ -389,6 +389,17 @@ class MemoryClient:
         backend = storage.get_backend(self.bot_id)
         return int(backend.ignore_messages_since_minutes(minutes))
 
+    def ignore_message_by_id(self, message_id: str) -> bool:
+        """Move a specific message to the forgotten table by ID."""
+        self._ensure_initialized()
+        if self.server_url:
+            return bool(
+                self._call_server("ignore_message_by_id", {"bot_id": self.bot_id, "message_id": message_id})
+            )
+        storage = self._get_storage()
+        backend = storage.get_backend(self.bot_id)
+        return bool(backend.ignore_message_by_id(message_id))
+
     def restore_ignored_messages(self) -> int:
         self._ensure_initialized()
         if self.server_url:
