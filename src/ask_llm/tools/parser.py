@@ -79,6 +79,13 @@ ALT_PATTERNS = [
     re.compile(r'<\|im_start\|>tool_call\s*(\{[^\n]*\})', re.DOTALL | re.IGNORECASE),
     # ChatML with newline before JSON
     re.compile(r'<\|im_start\|>tool_call\s*\n\s*(\{.*?\})', re.DOTALL | re.IGNORECASE),
+    # Markdown code block with JSON tool call (common with smaller models)
+    # Matches: ```json, ```python, or just ``` followed by tool JSON
+    re.compile(r'```(?:json|python)?\s*\n?\s*(\{"name"\s*:\s*"[^"]+"\s*,\s*"arguments"\s*:\s*\{[^}]*\}\s*\})\s*\n?```', re.DOTALL | re.IGNORECASE),
+    # Inline markdown code (single backticks): `{"name": "...", "arguments": {...}}`
+    re.compile(r'`(\{"name"\s*:\s*"[^"]+"\s*,\s*"arguments"\s*:\s*\{[^}]*\}\s*\})`', re.DOTALL | re.IGNORECASE),
+    # Raw JSON tool call without any wrapper (last resort - only if it looks like a tool call)
+    re.compile(r'^(\{"name"\s*:\s*"(?:get_user_profile|search_memories|store_memory|delete_memory|search_history|forget_history|set_user_attribute|delete_user_attribute|web_search|news_search|list_models|get_current_model|switch_model|get_current_time)"\s*,\s*"arguments"\s*:\s*\{[^}]*\}\s*\})$', re.DOTALL | re.MULTILINE),
 ]
 
 
@@ -153,14 +160,56 @@ def parse_tool_calls(text: str) -> tuple[list[ToolCall], str]:
     return tool_calls, remaining_text
 
 
+# Pattern to detect markdown code blocks that might contain tool calls
+# Matches ```json or ```python followed by {"name": ...
+# Patterns to detect tool calls in various formats
+MARKDOWN_TOOL_PATTERN = re.compile(
+    r'```(?:json|python)?\s*\n?\s*\{"name"\s*:',
+    re.IGNORECASE
+)
+
+# Pattern to detect inline code tool calls: `{"name": ...}`
+INLINE_CODE_TOOL_PATTERN = re.compile(
+    r'`\{"name"\s*:',
+    re.IGNORECASE
+)
+
+# Known tool names for detecting raw JSON tool calls
+KNOWN_TOOLS = {
+    "get_user_profile", "search_memories", "store_memory", "delete_memory",
+    "search_history", "forget_history", "set_user_attribute", "delete_user_attribute",
+    "web_search", "news_search", "list_models", "get_current_model", "switch_model",
+    "get_current_time"
+}
+
+
 def has_tool_call(text: str) -> bool:
     """Quick check if text contains a tool call marker."""
     lower = text.lower()
-    return (
+    if (
         "<tool_call>" in lower 
         or "<function_call>" in lower
         or "<|im_start|>tool_call" in lower
-    )
+    ):
+        return True
+    
+    # Check for markdown code block tool calls (common with smaller models)
+    if MARKDOWN_TOOL_PATTERN.search(text):
+        return True
+    
+    # Check for inline code tool calls: `{"name": ...}`
+    if INLINE_CODE_TOOL_PATTERN.search(text):
+        return True
+    
+    # Check for raw JSON that looks like a tool call (when response is just the JSON)
+    stripped = text.strip()
+    if stripped.startswith('{"name"') and '"arguments"' in stripped:
+        # Verify it's a known tool
+        for tool in KNOWN_TOOLS:
+            if f'"{tool}"' in stripped:
+                return True
+    
+    return False
 
 
 def format_tool_result(tool_name: str, result: Any, error: str | None = None) -> str:

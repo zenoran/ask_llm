@@ -376,6 +376,13 @@ async def ignore_messages_since_minutes(bot_id: str = "default", minutes: int = 
 
 
 @mcp.tool()
+async def get_message_by_id(bot_id: str = "default", message_id: str = "") -> dict | None:
+    """Get a specific message by ID (supports prefix match)."""
+    storage = _get_storage()
+    return await storage.get_message_by_id(bot_id=bot_id, message_id=message_id)
+
+
+@mcp.tool()
 async def ignore_message_by_id(bot_id: str = "default", message_id: str = "") -> bool:
     """Move a specific message to the forgotten table by ID (soft delete)."""
     storage = _get_storage()

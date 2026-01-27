@@ -3,24 +3,37 @@
 Memory management CLI tool for ask_llm.
 Thin client that proxies all operations through the llm-service.
 
+Two types of data are managed:
+  1. MEMORIES - Extracted facts with importance scores and embeddings
+  2. MESSAGES - Raw conversation history (message logs)
+
 Usage:
-    llm-memory --stats                           # Show memory statistics
-    llm-memory "what do you know about me"       # Search all methods
+    # === MEMORIES (extracted facts) ===
+    llm-memory "what do you know about me"       # Search memories
     llm-memory -m embedding "nick"               # Search via embeddings only
-    llm-memory -m high-importance                # Show high-importance memories
-    llm-memory --list-all -n 20                  # List top 20 memories
-    llm-memory --delete <ID>                     # Delete a memory by UUID prefix
-    llm-memory --list-attrs                      # List user profile attributes with IDs
-    llm-memory --list-attrs nick                 # List attrs for specific user
-    llm-memory --delete-attr 42                  # Delete a profile attribute by integer ID
-    llm-memory --history                         # Show recent conversation history
-    llm-memory --search-history "topic"          # Search conversation history
-    llm-memory --forget-recent 5                 # Soft-delete last 5 messages (recoverable)
-    llm-memory --forget-minutes 30               # Soft-delete messages from last 30 min
-    llm-memory --restore                         # Restore soft-deleted messages
-    llm-memory --regenerate-embeddings           # Regenerate all embeddings
+    llm-memory --list-memories                   # List memories by importance
+    llm-memory --delete-memory <ID>              # Delete a memory by UUID prefix
     llm-memory --consolidate                     # Merge redundant memories
-    llm-memory --consolidate-dry-run             # Preview consolidation
+    llm-memory --regenerate-embeddings           # Regenerate all embeddings
+
+    # === USER PROFILE ===
+    llm-memory --list-attrs                      # List profile attributes
+    llm-memory --delete-attr 42                  # Delete a profile attribute
+
+    # === MESSAGE HISTORY (conversation logs) ===
+    llm-memory --msg                             # Show recent messages
+    llm-memory --msg-search "topic"              # Search message history
+    llm-memory --msg-forget 5                    # Soft-delete last 5 messages
+    llm-memory --msg-forget-since 30             # Soft-delete from last 30 min
+    llm-memory --msg-forget-id <ID>              # Soft-delete specific message
+    llm-memory --msg-restore                     # Restore soft-deleted messages
+    llm-memory --msg-summarize                   # Summarize old sessions
+    llm-memory --msg-summarize-preview           # Preview summarization
+    llm-memory --msg-summaries                   # List existing summaries
+    llm-memory --msg-delete-summary <ID>         # Delete a summary
+
+    # === GENERAL ===
+    llm-memory --stats                           # Show combined statistics
 """
 
 import argparse
@@ -118,21 +131,21 @@ def display_messages_preview(messages: list[dict], max_content_length: int = 80)
     table.add_column("Time", style="dim", width=19)
     table.add_column("Role", width=10)
     table.add_column("Content", overflow="ellipsis")
-    
+
     for msg in messages:
         ts = msg.get("timestamp")
         time_str = datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S") if ts else "?"
-        
+
         role = msg.get("role", "?")
         role_style = "cyan" if role == "user" else "green" if role == "assistant" else "yellow"
-        
+
         content = msg.get("content", "")
         if len(content) > max_content_length:
             content = content[:max_content_length] + "..."
         content = content.replace("\n", " ").replace("\r", "")
-        
+
         table.add_row(time_str, f"[{role_style}]{role}[/{role_style}]", content)
-    
+
     console.print(table)
 
 
@@ -145,7 +158,7 @@ def display_results(results: list, method: str, show_ids: bool = True):
     table.add_column("Imp", justify="right", style="yellow", width=4)
     table.add_column("Tags", style="magenta", width=20)
     table.add_column("Content", style="white", max_width=70)
-    
+
     for r in results:
         content = r.get("content", "")
         content = content[:100] + "..." if len(content) > 100 else content
@@ -155,9 +168,9 @@ def display_results(results: list, method: str, show_ids: bool = True):
         if isinstance(tags, str):
             import json
             tags = json.loads(tags) if tags else ["misc"]
-        
+
         memory_id = r.get("id", "")[:8] if r.get("id") else "?"
-        
+
         row = []
         if show_ids:
             row.append(memory_id)
@@ -168,46 +181,58 @@ def display_results(results: list, method: str, show_ids: bool = True):
             content,
         ])
         table.add_row(*row)
-    
+
     console.print(table)
     console.print(f"[dim]Found {len(results)} results via {method}[/dim]")
     if show_ids:
-        console.print(f"[dim]Use --delete <ID> to remove a memory[/dim]\n")
+        console.print("[dim]Use --delete-memory <ID> to remove a memory[/dim]\n")
 
+
+# =============================================================================
+# Memory Operations (extracted facts)
+# =============================================================================
 
 def show_stats(bot_id: str):
-    """Show memory statistics."""
+    """Show memory and message statistics."""
     data = api_get("/v1/memory/stats", {"bot_id": bot_id})
     if not data:
         return
 
     messages = data.get("messages", {})
     memories = data.get("memories", {})
-    
+
     mem_total = memories.get("total_count", memories.get("total", 0))
-    mem_with_emb = memories.get("with_embeddings", mem_total)  # Fallback to total if not reported
     msg_total = messages.get("total_count", messages.get("total", 0))
     msg_forgotten = messages.get("forgotten_count", messages.get("ignored", 0))
-    
+
+    # Get summary count
+    summary_count = 0
+    try:
+        summ_data = api_get("/v1/history/summaries", {"bot_id": bot_id})
+        if summ_data:
+            summary_count = summ_data.get("total_count", 0)
+    except Exception:
+        pass
+
     console.print(Panel(f"""
-[bold]Memories:[/bold] {mem_total} total
-[bold]Messages:[/bold] {msg_total} total ({msg_forgotten} forgotten/recoverable)
-""", title=f"Memory Statistics - {data.get('bot_id', bot_id)}"))
+[bold]Memories:[/bold] {mem_total} extracted facts
+[bold]Messages:[/bold] {msg_total} total ({msg_forgotten} forgotten, {summary_count} summaries)
+""", title=f"Statistics - {data.get('bot_id', bot_id)}"))
 
     # Tag distribution (if available)
     tag_counts = memories.get("tag_counts", {})
     if tag_counts:
-        table = Table(title="Tag Distribution")
+        table = Table(title="Memory Tag Distribution")
         table.add_column("Tag", style="cyan")
         table.add_column("Count", justify="right")
         for tag, count in sorted(tag_counts.items(), key=lambda x: -x[1]):
             table.add_row(tag, str(count))
         console.print(table)
-    
+
     # Importance distribution (if available)
     importance_dist = memories.get("importance_distribution", {})
     if importance_dist:
-        table = Table(title="Importance Distribution")
+        table = Table(title="Memory Importance Distribution")
         table.add_column("Range", style="cyan")
         table.add_column("Count", justify="right")
         for range_name, count in sorted(importance_dist.items(), reverse=True):
@@ -215,8 +240,8 @@ def show_stats(bot_id: str):
         console.print(table)
 
 
-def list_all_memories(bot_id: str, limit: int):
-    """List all memories ordered by importance."""
+def list_memories(bot_id: str, limit: int):
+    """List memories ordered by importance."""
     data = api_get("/v1/memory", {"bot_id": bot_id, "limit": limit})
     if not data:
         return
@@ -225,14 +250,14 @@ def list_all_memories(bot_id: str, limit: int):
     if not results:
         console.print("[yellow]No memories found.[/yellow]")
         return
-    
+
     table = Table(title=f"Top {limit} Memories by Importance")
     table.add_column("ID", style="dim", width=8)
     table.add_column("Imp", justify="right", style="cyan", width=4)
     table.add_column("Tags", style="magenta", width=20)
     table.add_column("Content", style="white", max_width=60)
     table.add_column("Acc", justify="right", width=3)
-    
+
     for mem in results:
         content = mem.get("content", "")
         content = content[:100] + "..." if len(content) > 100 else content
@@ -245,15 +270,15 @@ def list_all_memories(bot_id: str, limit: int):
             content,
             str(mem.get("access_count", 0)),
         )
-    
+
     console.print(table)
-    console.print(f"[dim]Use --delete <ID> to remove a memory[/dim]")
+    console.print("[dim]Use --delete-memory <ID> to remove a memory[/dim]")
 
 
 def search_memories(bot_id: str, query: str, method: str, limit: int, min_importance: float):
     """Search memories using specified method."""
     console.print(f"[bold]Query:[/bold] \"{query}\"\n")
-    
+
     if method == "all":
         # Show results from multiple methods
         for m in ["embedding", "high-importance"]:
@@ -283,101 +308,74 @@ def search_memories(bot_id: str, query: str, method: str, limit: int, min_import
             console.print("[dim]No results[/dim]")
 
 
-def handle_forget_recent(bot_id: str, count: int, skip_confirm: bool):
-    """Ignore the last N messages and delete associated long-term memories."""
-    # Preview messages first
-    data = api_get("/v1/memory/preview/recent", {"bot_id": bot_id, "count": count})
-    if not data or not data.get("messages"):
-        console.print("[yellow]No messages to ignore[/yellow]")
+def handle_delete_memory(bot_id: str, memory_id: str, skip_confirm: bool):
+    """Delete a specific memory by ID."""
+    # First, try to find the memory to show what will be deleted
+    data = api_post("/v1/memory/search", {
+        "query": "",
+        "method": "embedding",
+        "limit": 100,
+        "bot_id": bot_id,
+    })
+
+    matching = None
+    if data and data.get("results"):
+        for mem in data["results"]:
+            if mem.get("id", "").startswith(memory_id):
+                matching = mem
+                break
+
+    if not matching:
+        # Try listing all memories
+        data = api_get("/v1/memory", {"bot_id": bot_id, "limit": 100})
+        if data and data.get("results"):
+            for mem in data["results"]:
+                if mem.get("id", "").startswith(memory_id):
+                    matching = mem
+                    break
+
+    if not matching:
+        console.print(f"[red]Memory '{memory_id}' not found[/red]")
         return
-    
-    messages = data["messages"]
-    console.print(f"[bold]Messages to ignore ({len(messages)}):[/bold]\n")
-    display_messages_preview(messages)
-    
-    if skip_confirm or console.input("\n[bold yellow]Ignore these messages? (y/N):[/bold yellow] ").strip().lower() in ('y', 'yes'):
-        result = api_post("/v1/memory/forget", {"count": count}, {"bot_id": bot_id})
-        if result:
-            console.print(f"[green]{result.get('message', 'Done')}[/green]")
-            console.print("[dim]Use --restore to undo[/dim]")
-    else:
-        console.print("[dim]Cancelled[/dim]")
 
+    full_id = matching.get("id", memory_id)
+    content = matching.get("content", "")[:100]
+    tags = matching.get("tags", [])
 
-def handle_forget_minutes(bot_id: str, minutes: int, skip_confirm: bool):
-    """Ignore messages from the last N minutes and delete associated long-term memories."""
-    # Preview messages first
-    data = api_get("/v1/memory/preview/minutes", {"bot_id": bot_id, "minutes": minutes})
-    if not data or not data.get("messages"):
-        console.print("[yellow]No messages in that time range[/yellow]")
-        return
-    
-    messages = data["messages"]
-    console.print(f"[bold]Messages from last {minutes} minutes to ignore ({len(messages)}):[/bold]\n")
-    display_messages_preview(messages)
-    
-    if skip_confirm or console.input("\n[bold yellow]Ignore these messages? (y/N):[/bold yellow] ").strip().lower() in ('y', 'yes'):
-        result = api_post("/v1/memory/forget", {"minutes": minutes}, {"bot_id": bot_id})
-        if result:
-            console.print(f"[green]{result.get('message', 'Done')}[/green]")
-            console.print("[dim]Use --restore to undo[/dim]")
-    else:
-        console.print("[dim]Cancelled[/dim]")
+    console.print("[bold]Memory to delete:[/bold]")
+    console.print(f"  ID: [dim]{full_id}[/dim]")
+    console.print(f"  Tags: [magenta]{', '.join(tags) if tags else 'none'}[/magenta]")
+    console.print(f"  Content: {content}{'...' if len(matching.get('content', '')) > 100 else ''}")
+    console.print()
 
-
-def handle_forget_by_id(bot_id: str, message_id: str, skip_confirm: bool):
-    """Ignore a specific message by ID."""
     if not skip_confirm:
-        confirm = console.input(f"[bold yellow]Ignore message {message_id}? (y/N):[/bold yellow] ").strip().lower()
+        confirm = console.input("[bold yellow]Delete this memory? (y/N):[/bold yellow] ").strip().lower()
         if confirm not in ('y', 'yes'):
             console.print("[dim]Cancelled[/dim]")
             return
-    
-    result = api_post("/v1/memory/forget", {"message_id": message_id}, {"bot_id": bot_id})
+
+    result = api_delete(f"/v1/memory/{full_id}", {"bot_id": bot_id})
     if result and result.get("success"):
-        console.print(f"[green]✓ {result.get('message', 'Message ignored')}[/green]")
-        console.print("[dim]Use --restore to undo[/dim]")
-    elif result and result.get("detail"):
-        console.print(f"[red]{result.get('detail')}[/red]")
+        console.print("[green]Memory deleted[/green]")
     else:
-        console.print(f"[red]Failed to ignore message[/red]")
-
-
-def handle_restore(bot_id: str, skip_confirm: bool):
-    """Restore all ignored messages."""
-    # Preview ignored messages first
-    data = api_get("/v1/memory/preview/ignored", {"bot_id": bot_id})
-    if not data or not data.get("messages"):
-        console.print("[yellow]No ignored messages to restore[/yellow]")
-        return
-    
-    messages = data["messages"]
-    console.print(f"[bold]Ignored messages to restore ({len(messages)}):[/bold]\n")
-    display_messages_preview(messages)
-    
-    if skip_confirm or console.input("\n[bold yellow]Restore these messages? (y/N):[/bold yellow] ").strip().lower() in ('y', 'yes'):
-        result = api_post("/v1/memory/restore", params={"bot_id": bot_id})
-        if result:
-            console.print(f"[green]{result.get('message', 'Done')}[/green]")
-    else:
-        console.print("[dim]Cancelled[/dim]")
+        console.print("[red]Failed to delete memory[/red]")
 
 
 def handle_regenerate_embeddings(bot_id: str):
     """Regenerate embeddings for all memories."""
     console.print(f"[bold]Regenerating embeddings for bot: {bot_id}[/bold]\n")
-    
+
     with console.status("[bold green]Generating embeddings..."):
         result = api_post("/v1/memory/regenerate-embeddings", params={"bot_id": bot_id}, timeout=LONG_TIMEOUT)
     console.print()  # Newline after spinner clears
-    
+
     if not result:
         return
-    
+
     if result.get("success"):
-        console.print(f"[green]✓ Updated: {result.get('updated', 0)}[/green]")
+        console.print(f"[green]Updated: {result.get('updated', 0)}[/green]")
         if result.get("failed", 0) > 0:
-            console.print(f"[yellow]! Failed: {result.get('failed', 0)}[/yellow]")
+            console.print(f"[yellow]Failed: {result.get('failed', 0)}[/yellow]")
         if result.get("embedding_dim"):
             console.print(f"  Embedding dimension: {result['embedding_dim']}")
     else:
@@ -389,7 +387,7 @@ def handle_consolidate(bot_id: str, dry_run: bool = False):
     """Find and merge redundant memories."""
     mode_str = "[yellow](DRY RUN)[/yellow] " if dry_run else ""
     console.print(f"[bold]{mode_str}Memory Consolidation for bot: {bot_id}[/bold]\n")
-    
+
     with console.status("[bold green]Finding and consolidating similar memories..."):
         result = api_post(
             "/v1/memory/consolidate",
@@ -398,22 +396,22 @@ def handle_consolidate(bot_id: str, dry_run: bool = False):
             timeout=LONG_TIMEOUT,
         )
     console.print()  # Newline after spinner clears
-    
+
     if not result:
         return
-    
+
     console.print()
     if dry_run:
-        console.print(f"[yellow]Would merge:[/yellow]")
+        console.print("[yellow]Would merge:[/yellow]")
     else:
-        console.print(f"[green]Results:[/green]")
-    
+        console.print("[green]Results:[/green]")
+
     console.print(f"  Clusters found: {result.get('clusters_found', 0)}")
     console.print(f"  Clusters merged: {result.get('clusters_merged', 0)}")
     console.print(f"  Memories consolidated: {result.get('memories_consolidated', 0)}")
     if not dry_run:
         console.print(f"  New memories created: {result.get('new_memories_created', 0)}")
-    
+
     errors = result.get("errors", [])
     if errors:
         console.print(f"\n[yellow]Errors ({len(errors)}):[/yellow]")
@@ -421,96 +419,30 @@ def handle_consolidate(bot_id: str, dry_run: bool = False):
             console.print(f"  - {err}")
 
 
-def handle_delete_memory(bot_id: str, memory_id: str, skip_confirm: bool):
-    """Delete a specific memory by ID."""
-    # First, try to find the memory to show what will be deleted
-    data = api_post("/v1/memory/search", {
-        "query": "",
-        "method": "embedding",
-        "limit": 100,
-        "bot_id": bot_id,
-    })
-    
-    matching = None
-    if data and data.get("results"):
-        for mem in data["results"]:
-            if mem.get("id", "").startswith(memory_id):
-                matching = mem
-                break
-    
-    if not matching:
-        # Try listing all memories
-        data = api_get("/v1/memory", {"bot_id": bot_id, "limit": 100})
-        if data and data.get("results"):
-            for mem in data["results"]:
-                if mem.get("id", "").startswith(memory_id):
-                    matching = mem
-                    break
-    
-    if not matching:
-        console.print(f"[red]Memory '{memory_id}' not found[/red]")
-        return
-    
-    full_id = matching.get("id", memory_id)
-    content = matching.get("content", "")[:100]
-    tags = matching.get("tags", [])
-    
-    console.print(f"[bold]Memory to delete:[/bold]")
-    console.print(f"  ID: [dim]{full_id}[/dim]")
-    console.print(f"  Tags: [magenta]{', '.join(tags) if tags else 'none'}[/magenta]")
-    console.print(f"  Content: {content}{'...' if len(matching.get('content', '')) > 100 else ''}")
-    console.print()
-    
-    if not skip_confirm:
-        confirm = console.input("[bold yellow]Delete this memory? (y/N):[/bold yellow] ").strip().lower()
-        if confirm not in ('y', 'yes'):
-            console.print("[dim]Cancelled[/dim]")
-            return
-    
-    result = api_delete(f"/v1/memory/{full_id}", {"bot_id": bot_id})
-    if result and result.get("success"):
-        console.print(f"[green]✓ Memory deleted[/green]")
-    else:
-        console.print(f"[red]Failed to delete memory[/red]")
-
-
-def handle_delete_attribute(attribute_id: int, skip_confirm: bool):
-    """Delete a user profile attribute by ID."""
-    # First get info about the attribute
-    result = api_delete(f"/v1/users/attribute/{attribute_id}")
-    
-    if not result:
-        console.print(f"[red]Failed to delete attribute {attribute_id}[/red]")
-        return
-    
-    if result.get("success"):
-        deleted = result.get("deleted", {})
-        console.print(f"[green]✓ Deleted:[/green] {deleted.get('category', '?')}.{deleted.get('key', '?')} = {deleted.get('value', '?')}")
-        console.print(f"[dim]  From: {deleted.get('entity_type', '?')}/{deleted.get('entity_id', '?')}[/dim]")
-    else:
-        console.print(f"[red]Failed to delete attribute: {result.get('detail', 'Unknown error')}[/red]")
-
+# =============================================================================
+# User Profile Operations
+# =============================================================================
 
 def handle_list_attrs(user_id: str):
     """List user profile attributes with IDs."""
     data = api_get(f"/v1/users/{user_id}")
-    
+
     if not data:
         console.print(f"[red]Failed to get profile for user '{user_id}'[/red]")
         return
-    
+
     attributes = data.get("attributes", [])
     if not attributes:
         console.print(f"[yellow]No attributes found for user '{user_id}'[/yellow]")
         return
-    
+
     table = Table(title=f"Profile Attributes for {user_id}")
     table.add_column("ID", style="cyan", justify="right", width=6)
     table.add_column("Category", style="magenta", width=15)
     table.add_column("Key", style="yellow", width=25)
     table.add_column("Value", style="white", max_width=50)
     table.add_column("Conf", justify="right", width=4)
-    
+
     for attr in attributes:
         value = str(attr.get("value", ""))
         if len(value) > 50:
@@ -522,65 +454,85 @@ def handle_list_attrs(user_id: str):
             value,
             f"{attr.get('confidence', 1.0):.1f}",
         )
-    
+
     console.print(table)
-    console.print(f"\n[dim]Use --delete-attr <ID> to remove an attribute[/dim]")
+    console.print("\n[dim]Use --delete-attr <ID> to remove an attribute[/dim]")
 
 
-def handle_show_history(bot_id: str, limit: int):
-    """Show recent conversation history."""
-    data = api_get("/v1/history", {"bot_id": bot_id, "limit": limit})
-    
-    if not data:
-        console.print(f"[red]Failed to get history for bot '{bot_id}'[/red]")
+def handle_delete_attribute(attribute_id: int, skip_confirm: bool):
+    """Delete a user profile attribute by ID."""
+    result = api_delete(f"/v1/users/attribute/{attribute_id}")
+
+    if not result:
+        console.print(f"[red]Failed to delete attribute {attribute_id}[/red]")
         return
-    
+
+    if result.get("success"):
+        deleted = result.get("deleted", {})
+        console.print(f"[green]Deleted:[/green] {deleted.get('category', '?')}.{deleted.get('key', '?')} = {deleted.get('value', '?')}")
+        console.print(f"[dim]  From: {deleted.get('entity_type', '?')}/{deleted.get('entity_id', '?')}[/dim]")
+    else:
+        console.print(f"[red]Failed to delete attribute: {result.get('detail', 'Unknown error')}[/red]")
+
+
+# =============================================================================
+# Message History Operations
+# =============================================================================
+
+def handle_show_messages(bot_id: str, limit: int):
+    """Show recent conversation messages."""
+    data = api_get("/v1/history", {"bot_id": bot_id, "limit": limit})
+
+    if not data:
+        console.print(f"[red]Failed to get messages for bot '{bot_id}'[/red]")
+        return
+
     messages = data.get("messages", [])
     if not messages:
-        console.print(f"[yellow]No history found for bot '{bot_id}'[/yellow]")
+        console.print(f"[yellow]No messages found for bot '{bot_id}'[/yellow]")
         return
-    
-    table = Table(title=f"Conversation History ({len(messages)} messages)")
+
+    table = Table(title=f"Message History ({len(messages)} messages)")
     table.add_column("ID", style="dim", width=8)
     table.add_column("Time", style="dim", width=19)
     table.add_column("Role", width=10)
     table.add_column("Content", style="white", max_width=70)
-    
+
     for msg in messages:
         ts = msg.get("timestamp", 0)
         time_str = datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S") if ts else "?"
         role = msg.get("role", "?")
-        role_style = "cyan" if role == "user" else "green" if role == "assistant" else "yellow"
+        role_style = "cyan" if role == "user" else "green" if role == "assistant" else "magenta" if role == "summary" else "yellow"
         content = msg.get("content", "")
         if len(content) > 80:
             content = content[:77] + "..."
         content = content.replace("\n", " ")
         msg_id = msg.get("id", "")[:8] if msg.get("id") else "?"
         table.add_row(msg_id, time_str, f"[{role_style}]{role}[/{role_style}]", content)
-    
+
     console.print(table)
-    console.print(f"\n[dim]Use --forget-id <ID> to soft-delete a message[/dim]")
+    console.print("\n[dim]Use --msg-forget-id <ID> to soft-delete a message[/dim]")
 
 
-def handle_search_history(bot_id: str, query: str, limit: int):
-    """Search conversation history."""
+def handle_search_messages(bot_id: str, query: str, limit: int):
+    """Search message history."""
     data = api_post("/v1/history/search", params={"bot_id": bot_id, "query": query, "limit": limit})
-    
+
     if not data:
-        console.print(f"[red]Failed to search history for bot '{bot_id}'[/red]")
+        console.print(f"[red]Failed to search messages for bot '{bot_id}'[/red]")
         return
-    
+
     messages = data.get("messages", [])
     if not messages:
         console.print(f"[yellow]No messages found matching '{query}'[/yellow]")
         return
-    
-    table = Table(title=f"Search Results for '{query}' ({len(messages)} matches)")
+
+    table = Table(title=f"Message Search: '{query}' ({len(messages)} matches)")
     table.add_column("ID", style="dim", width=8)
     table.add_column("Time", style="dim", width=19)
     table.add_column("Role", width=10)
     table.add_column("Content", style="white", max_width=70)
-    
+
     for msg in messages:
         ts = msg.get("timestamp", 0)
         time_str = datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S") if ts else "?"
@@ -592,125 +544,509 @@ def handle_search_history(bot_id: str, query: str, limit: int):
         content = content.replace("\n", " ")
         msg_id = msg.get("id", "")[:8] if msg.get("id") else "?"
         table.add_row(msg_id, time_str, f"[{role_style}]{role}[/{role_style}]", content)
-    
-    console.print(table)
-    console.print(f"\n[dim]Use --forget-id <ID> to soft-delete a message[/dim]")
 
+    console.print(table)
+    console.print("\n[dim]Use --msg-forget-id <ID> to soft-delete a message[/dim]")
+
+
+def handle_msg_forget(bot_id: str, count: int, skip_confirm: bool):
+    """Soft-delete the last N messages."""
+    # Preview messages first
+    data = api_get("/v1/memory/preview/recent", {"bot_id": bot_id, "count": count})
+    if not data or not data.get("messages"):
+        console.print("[yellow]No messages to forget[/yellow]")
+        return
+
+    messages = data["messages"]
+    console.print(f"[bold]Messages to forget ({len(messages)}):[/bold]\n")
+    display_messages_preview(messages)
+
+    if skip_confirm or console.input("\n[bold yellow]Forget these messages? (y/N):[/bold yellow] ").strip().lower() in ('y', 'yes'):
+        result = api_post("/v1/memory/forget", {"count": count}, {"bot_id": bot_id})
+        if result:
+            console.print(f"[green]{result.get('message', 'Done')}[/green]")
+            console.print("[dim]Use --msg-restore to undo[/dim]")
+    else:
+        console.print("[dim]Cancelled[/dim]")
+
+
+def handle_msg_forget_since(bot_id: str, minutes: int, skip_confirm: bool):
+    """Soft-delete messages from the last N minutes."""
+    # Preview messages first
+    data = api_get("/v1/memory/preview/minutes", {"bot_id": bot_id, "minutes": minutes})
+    if not data or not data.get("messages"):
+        console.print("[yellow]No messages in that time range[/yellow]")
+        return
+
+    messages = data["messages"]
+    console.print(f"[bold]Messages from last {minutes} minutes to forget ({len(messages)}):[/bold]\n")
+    display_messages_preview(messages)
+
+    if skip_confirm or console.input("\n[bold yellow]Forget these messages? (y/N):[/bold yellow] ").strip().lower() in ('y', 'yes'):
+        result = api_post("/v1/memory/forget", {"minutes": minutes}, {"bot_id": bot_id})
+        if result:
+            console.print(f"[green]{result.get('message', 'Done')}[/green]")
+            console.print("[dim]Use --msg-restore to undo[/dim]")
+    else:
+        console.print("[dim]Cancelled[/dim]")
+
+
+def handle_msg_get(bot_id: str, message_id: str):
+    """Get and display a specific message by ID."""
+    result = api_get("/v1/memory/message", {"bot_id": bot_id, "message_id": message_id})
+    
+    if not result:
+        console.print(f"[red]Failed to retrieve message {message_id}[/red]")
+        return
+    
+    # Handle error response
+    if isinstance(result, dict) and result.get("error"):
+        console.print(f"[red]{result.get('error')}[/red]")
+        return
+    
+    # The message might be in result["message"] or result itself
+    if isinstance(result, dict) and "message" in result:
+        msg = result["message"]
+    else:
+        msg = result
+    
+    if not msg or not isinstance(msg, dict):
+        console.print(f"[yellow]Message {message_id} not found[/yellow]")
+        return
+    
+    # Display message details
+    role = msg.get("role", "unknown")
+    content = msg.get("content", "")
+    timestamp = msg.get("timestamp", 0)
+    
+    from datetime import datetime
+    time_str = datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M:%S") if timestamp else "unknown"
+    
+    # Role color
+    role_color = {"user": "cyan", "assistant": "green", "system": "yellow", "summary": "magenta"}.get(role, "white")
+    
+    console.print(f"[bold]Message ID:[/bold] {msg.get('id', '?')}")
+    console.print(f"[bold]Role:[/bold] [{role_color}]{role}[/{role_color}]")
+    console.print(f"[bold]Timestamp:[/bold] {time_str}")
+    if msg.get("session_id"):
+        console.print(f"[bold]Session:[/bold] {msg.get('session_id')[:8]}")
+    if msg.get("summary_metadata"):
+        meta = msg.get("summary_metadata")
+        if isinstance(meta, str):
+            import json
+            try:
+                meta = json.loads(meta)
+            except:
+                pass
+        if isinstance(meta, dict):
+            console.print(f"[bold]Summary of:[/bold] {meta.get('message_count', '?')} messages")
+    
+    console.print(f"\n[bold]Content:[/bold]")
+    console.print(Panel(content, border_style="dim"))
+
+
+def handle_msg_forget_id(bot_id: str, message_id: str, skip_confirm: bool):
+    """Soft-delete a specific message by ID."""
+    if not skip_confirm:
+        confirm = console.input(f"[bold yellow]Forget message {message_id}? (y/N):[/bold yellow] ").strip().lower()
+        if confirm not in ('y', 'yes'):
+            console.print("[dim]Cancelled[/dim]")
+            return
+
+    result = api_post("/v1/memory/forget", {"message_id": message_id}, {"bot_id": bot_id})
+    if result and result.get("success"):
+        console.print(f"[green]{result.get('message', 'Message forgotten')}[/green]")
+        console.print("[dim]Use --msg-restore to undo[/dim]")
+    elif result and result.get("detail"):
+        console.print(f"[red]{result.get('detail')}[/red]")
+    else:
+        console.print("[red]Failed to forget message[/red]")
+
+
+def handle_msg_restore(bot_id: str, skip_confirm: bool):
+    """Restore all forgotten messages."""
+    # Preview forgotten messages first
+    data = api_get("/v1/memory/preview/ignored", {"bot_id": bot_id})
+    if not data or not data.get("messages"):
+        console.print("[yellow]No forgotten messages to restore[/yellow]")
+        return
+
+    messages = data["messages"]
+    console.print(f"[bold]Forgotten messages to restore ({len(messages)}):[/bold]\n")
+    display_messages_preview(messages)
+
+    if skip_confirm or console.input("\n[bold yellow]Restore these messages? (y/N):[/bold yellow] ").strip().lower() in ('y', 'yes'):
+        result = api_post("/v1/memory/restore", params={"bot_id": bot_id})
+        if result:
+            console.print(f"[green]{result.get('message', 'Done')}[/green]")
+    else:
+        console.print("[dim]Cancelled[/dim]")
+
+
+def handle_msg_summarize_preview(bot_id: str):
+    """Preview what sessions would be summarized."""
+    data = api_get("/v1/history/summarize/preview", {"bot_id": bot_id})
+
+    if not data:
+        console.print(f"[red]Failed to get summarization preview for bot '{bot_id}'[/red]")
+        return
+
+    sessions = data.get("sessions", [])
+    if not sessions:
+        console.print("[yellow]No sessions eligible for summarization.[/yellow]")
+        console.print("[dim]Sessions must be older than 30 minutes and have at least 4 messages.[/dim]")
+        return
+
+    console.print(Panel("[bold yellow]DRY RUN[/bold yellow] - Message Summarization Preview"))
+    console.print(f"\nFound [bold]{len(sessions)}[/bold] sessions eligible for summarization:\n")
+
+    total_messages = 0
+    for i, session in enumerate(sessions, 1):
+        start = session.get("start_time", "?")
+        end = session.get("end_time", "?")
+        msg_count = session.get("message_count", 0)
+        first_msg = session.get("first_message", "")[:60]
+        last_msg = session.get("last_message", "")[:60]
+
+        total_messages += msg_count
+
+        console.print(f"[bold]Session {i}[/bold] ({start} - {end})")
+        console.print(f"  Messages: {msg_count}")
+        console.print(f"  First: \"{first_msg}...\"")
+        console.print(f"  Last: \"{last_msg}...\"")
+        console.print()
+
+    console.print(f"[bold]Would summarize {total_messages} messages into {len(sessions)} summaries.[/bold]")
+    console.print("[dim]Run with --msg-summarize to execute.[/dim]")
+
+
+def check_model_loaded() -> tuple[bool, str | None, list[str]]:
+    """Check if a model is loaded in the service.
+    
+    Returns:
+        Tuple of (is_loaded, current_model, available_models)
+    """
+    status = api_get("/status")
+    if not status:
+        return False, None, []
+    
+    current_model = status.get("current_model")
+    available_models = status.get("available_models", [])
+    return current_model is not None, current_model, available_models
+
+
+def handle_msg_summarize(bot_id: str, skip_confirm: bool):
+    """Summarize eligible message sessions."""
+    # First check if a model is loaded
+    model_loaded, current_model, available_models = check_model_loaded()
+    
+    if not model_loaded:
+        console.print("[yellow]No LLM model is currently loaded.[/yellow]")
+        console.print("[dim]Summarization works best with an LLM. Without one, heuristic summaries will be used.[/dim]\n")
+        
+        if available_models:
+            console.print("[bold]Available models:[/bold]")
+            for model in available_models[:5]:
+                console.print(f"  - {model}")
+            if len(available_models) > 5:
+                console.print(f"  ... and {len(available_models) - 5} more")
+            console.print()
+            console.print("[dim]To load a model, run: llm \"hello\" (any query will load the default model)[/dim]")
+            console.print()
+        
+        if not skip_confirm:
+            proceed = console.input("[bold yellow]Continue with heuristic summarization? (y/N):[/bold yellow] ").strip().lower()
+            if proceed not in ('y', 'yes'):
+                console.print("[dim]Cancelled. Load a model first for better summaries.[/dim]")
+                return
+    else:
+        console.print(f"[dim]Using model: {current_model}[/dim]\n")
+    
+    # Get preview
+    preview_data = api_get("/v1/history/summarize/preview", {"bot_id": bot_id})
+
+    if not preview_data:
+        console.print(f"[red]Failed to get summarization preview for bot '{bot_id}'[/red]")
+        return
+
+    sessions = preview_data.get("sessions", [])
+    if not sessions:
+        console.print("[yellow]No sessions eligible for summarization.[/yellow]")
+        return
+
+    total_messages = sum(s.get("message_count", 0) for s in sessions)
+
+    console.print(f"[bold]Found {len(sessions)} sessions ({total_messages} messages) to summarize.[/bold]\n")
+
+    # Show ALL sessions
+    for i, session in enumerate(sessions, 1):
+        start = session.get("start_time", "?")
+        end = session.get("end_time", "?")
+        msg_count = session.get("message_count", 0)
+        console.print(f"  Session {i}: {start} - {end} ({msg_count} messages)")
+
+    console.print()
+
+    if not skip_confirm:
+        confirm = console.input("[bold yellow]Summarize these sessions? (y/N):[/bold yellow] ").strip().lower()
+        if confirm not in ('y', 'yes'):
+            console.print("[dim]Cancelled[/dim]")
+            return
+
+    # Execute summarization (without heuristic fallback first)
+    console.print()
+    use_heuristic = False
+    
+    with console.status("[bold green]Summarizing sessions with LLM..."):
+        result = api_post("/v1/history/summarize", params={"bot_id": bot_id, "use_heuristic": use_heuristic}, timeout=LONG_TIMEOUT)
+
+    if not result:
+        console.print("[red]Summarization failed. Check that the llm-service is running.[/red]")
+        console.print("[dim]Run: ./server.sh status[/dim]")
+        return
+
+    sessions_done = result.get("sessions_summarized", 0)
+    messages_done = result.get("messages_summarized", 0)
+    errors = result.get("errors", [])
+
+    # Check if there were LLM failures
+    if errors:
+        console.print(f"\n[yellow]LLM summarization failed for {len(errors)} session(s):[/yellow]")
+        for err in errors[:3]:  # Show first 3 errors
+            console.print(f"  [red]- {err}[/red]")
+        if len(errors) > 3:
+            console.print(f"  [dim]... and {len(errors) - 3} more[/dim]")
+        console.print()
+        
+        if not skip_confirm:
+            fallback = console.input("[bold yellow]Use heuristic summarization for failed sessions? (y/N):[/bold yellow] ").strip().lower()
+            if fallback in ('y', 'yes'):
+                console.print()
+                with console.status("[bold green]Summarizing with heuristic fallback..."):
+                    result2 = api_post("/v1/history/summarize", params={"bot_id": bot_id, "use_heuristic": True}, timeout=LONG_TIMEOUT)
+                
+                if result2:
+                    sessions_done += result2.get("sessions_summarized", 0)
+                    messages_done += result2.get("messages_summarized", 0)
+
+    if sessions_done > 0:
+        console.print(f"[green]Summarized {sessions_done} sessions ({messages_done} messages)[/green]")
+    else:
+        console.print("[yellow]No sessions were summarized.[/yellow]")
+
+
+def handle_msg_summaries(bot_id: str):
+    """List existing message summaries."""
+    data = api_get("/v1/history/summaries", {"bot_id": bot_id})
+
+    if not data:
+        console.print(f"[red]Failed to get summaries for bot '{bot_id}'[/red]")
+        return
+
+    summaries = data.get("summaries", [])
+    if not summaries:
+        console.print("[yellow]No summaries found.[/yellow]")
+        console.print("[dim]Use --msg-summarize to create summaries of old sessions.[/dim]")
+        return
+
+    table = Table(title=f"Message Summaries ({len(summaries)} total)")
+    table.add_column("ID", style="dim", width=8)
+    table.add_column("Session Time", style="dim", width=30)
+    table.add_column("Msgs", justify="right", width=4)
+    table.add_column("Method", width=10)
+    table.add_column("Summary", style="white", max_width=50)
+
+    for summ in summaries:
+        summ_id = summ.get("id", "")[:8] if summ.get("id") else "?"
+        start = summ.get("session_start_time", "?")
+        end = summ.get("session_end_time", "?")
+        session_time = f"{start} - {end}"
+        msg_count = summ.get("message_count", 0)
+        method = summ.get("method", "?")
+        content = summ.get("content", "")
+        if len(content) > 50:
+            content = content[:47] + "..."
+        content = content.replace("\n", " ")
+
+        method_style = "green" if method == "llm" else "yellow"
+
+        table.add_row(summ_id, session_time, str(msg_count), f"[{method_style}]{method}[/{method_style}]", content)
+
+    console.print(table)
+    console.print("\n[dim]Use --msg-delete-summary <ID> to remove a summary[/dim]")
+
+
+def handle_msg_delete_summary(bot_id: str, summary_id: str, skip_confirm: bool):
+    """Delete a summary and restore the original messages."""
+    if not skip_confirm:
+        confirm = console.input(f"[bold yellow]Delete summary {summary_id} and restore original messages? (y/N):[/bold yellow] ").strip().lower()
+        if confirm not in ('y', 'yes'):
+            console.print("[dim]Cancelled[/dim]")
+            return
+
+    result = api_delete(f"/v1/history/summary/{summary_id}", {"bot_id": bot_id})
+
+    if not result:
+        console.print("[red]Failed to delete summary[/red]")
+        return
+
+    if result.get("success"):
+        msgs_restored = result.get("messages_restored", 0)
+        console.print(f"[green]Deleted summary, restored {msgs_restored} messages[/green]")
+    else:
+        console.print(f"[red]{result.get('detail', 'Failed to delete summary')}[/red]")
+
+
+# =============================================================================
+# Main CLI
+# =============================================================================
 
 def main():
-    parser = argparse.ArgumentParser(description="Memory management for ask_llm")
-    parser.add_argument("query", nargs="?", default="", help="Search query")
+    parser = argparse.ArgumentParser(
+        description="Memory and message history management for ask_llm",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  llm-memory "user preferences"       Search memories
+  llm-memory --list-memories          List all memories
+  llm-memory --msg                    Show recent messages
+  llm-memory --msg-summarize          Summarize old sessions
+  llm-memory --stats                  Show statistics
+""",
+    )
+    parser.add_argument("query", nargs="?", default="", help="Search query for memories")
     parser.add_argument("--bot", "-b", default="nova", help="Bot ID (default: nova)")
-    
-    # Search options
-    search_group = parser.add_argument_group("Search options")
-    search_group.add_argument("--method", "-m", choices=["text", "embedding", "high-importance", "messages", "all"], 
-                        default="all", help="Search method to use")
-    search_group.add_argument("--limit", "-n", type=int, default=10, help="Max results (default: 10)")
-    search_group.add_argument("--min-importance", type=float, default=0.0, help="Min importance filter")
-    search_group.add_argument("--list-all", action="store_true", help="List all memories (ignores query)")
-    search_group.add_argument("--stats", action="store_true", help="Show memory statistics")
-    
-    # Memory deletion
-    del_group = parser.add_argument_group("Memory deletion")
-    del_group.add_argument("--delete", "-d", metavar="ID", help="Delete a memory by ID (use first 8 chars of UUID)")
-    del_group.add_argument("--delete-attr", metavar="ID", type=int, help="Delete a user profile attribute by its integer ID (use --list-attrs to see IDs)")
-    del_group.add_argument("--list-attrs", metavar="USER", nargs="?", const="nick", help="List user profile attributes with IDs (default user: nick)")
-    
-    # Message management
-    msg_group = parser.add_argument_group("Message management (soft-delete)")
-    msg_group.add_argument("--forget-recent", type=int, metavar="N", help="Ignore the last N messages (reversible)")
-    msg_group.add_argument("--forget-minutes", type=int, metavar="N", help="Ignore messages from last N minutes (reversible)")
-    msg_group.add_argument("--forget-id", metavar="ID", help="Ignore a specific message by ID (reversible)")
-    msg_group.add_argument("--restore", action="store_true", help="Restore all ignored messages")
-    msg_group.add_argument("--yes", "-y", action="store_true", help="Skip confirmation prompts")
-    
-    # History management
-    hist_group = parser.add_argument_group("History management")
-    hist_group.add_argument("--history", action="store_true", help="Show recent conversation history")
-    hist_group.add_argument("--search-history", metavar="QUERY", help="Search conversation history")
-    
-    # Memory maintenance
-    maint_group = parser.add_argument_group("Memory maintenance")
-    maint_group.add_argument("--regenerate-embeddings", action="store_true", help="Regenerate embeddings for all memories")
-    maint_group.add_argument("--consolidate", action="store_true", help="Find and merge redundant memories")
-    maint_group.add_argument("--consolidate-dry-run", action="store_true", help="Show what would be consolidated without making changes")
-    
+    parser.add_argument("--yes", "-y", action="store_true", help="Skip confirmation prompts")
+    parser.add_argument("--limit", "-n", type=int, default=10, help="Max results (default: 10)")
+
+    # General
+    gen_group = parser.add_argument_group("General")
+    gen_group.add_argument("--stats", action="store_true", help="Show memory and message statistics")
+
+    # Memory operations (extracted facts)
+    mem_group = parser.add_argument_group("Memories (extracted facts)")
+    mem_group.add_argument("--method", "-m", choices=["text", "embedding", "high-importance", "all"],
+                           default="all", help="Memory search method")
+    mem_group.add_argument("--min-importance", type=float, default=0.0, help="Min importance filter")
+    mem_group.add_argument("--list-memories", "-l", action="store_true", help="List memories by importance")
+    mem_group.add_argument("--delete-memory", metavar="ID", help="Delete a memory by ID prefix")
+    mem_group.add_argument("--consolidate", action="store_true", help="Merge redundant memories")
+    mem_group.add_argument("--consolidate-dry-run", action="store_true", help="Preview memory consolidation")
+    mem_group.add_argument("--regenerate-embeddings", action="store_true", help="Regenerate memory embeddings")
+
+    # User profile
+    profile_group = parser.add_argument_group("User Profile")
+    profile_group.add_argument("--list-attrs", metavar="USER", nargs="?", const="nick",
+                               help="List profile attributes (default user: nick)")
+    profile_group.add_argument("--delete-attr", metavar="ID", type=int,
+                               help="Delete a profile attribute by ID")
+
+    # Message history operations
+    msg_group = parser.add_argument_group("Message History (conversation logs)")
+    msg_group.add_argument("--msg", action="store_true", help="Show recent messages")
+    msg_group.add_argument("--msg-search", metavar="QUERY", help="Search message history")
+    msg_group.add_argument("--msg-forget", type=int, metavar="N", help="Forget last N messages (reversible)")
+    msg_group.add_argument("--msg-forget-since", type=int, metavar="MIN", help="Forget messages from last N minutes")
+    msg_group.add_argument("--msg-get", metavar="ID", help="Get a message by ID (supports prefix match)")
+    msg_group.add_argument("--msg-forget-id", metavar="ID", help="Forget a specific message by ID")
+    msg_group.add_argument("--msg-restore", action="store_true", help="Restore forgotten messages")
+    msg_group.add_argument("--msg-summarize", action="store_true", help="Summarize old message sessions")
+    msg_group.add_argument("--msg-summarize-preview", action="store_true", help="Preview message summarization")
+    msg_group.add_argument("--msg-summaries", action="store_true", help="List message summaries")
+    msg_group.add_argument("--msg-delete-summary", metavar="ID", help="Delete a summary by ID")
+
     args = parser.parse_args()
-    
+
     # Check service availability
     if not check_service_available():
         console.print("[red]Error: llm-service is not running.[/red]")
         console.print("[dim]Start it with: llm-service[/dim]")
         sys.exit(1)
-    
+
     console.print(f"\n[bold cyan]Memory Tool[/bold cyan] - Bot: [yellow]{args.bot}[/yellow]\n")
-    
-    # Handle delete command first
-    if args.delete:
-        handle_delete_memory(args.bot, args.delete, args.yes)
-        return
-    
-    # Handle delete attribute command
-    if args.delete_attr:
-        handle_delete_attribute(args.delete_attr, args.yes)
-        return
-    
-    # Handle list attributes command
-    if args.list_attrs:
-        handle_list_attrs(args.list_attrs)
-        return
-    
-    # Handle message management commands first
-    if args.forget_recent:
-        handle_forget_recent(args.bot, args.forget_recent, args.yes)
-        return
-    
-    if args.forget_minutes:
-        handle_forget_minutes(args.bot, args.forget_minutes, args.yes)
-        return
-    
-    if args.forget_id:
-        handle_forget_by_id(args.bot, args.forget_id, args.yes)
-        return
-    
-    if args.restore:
-        handle_restore(args.bot, args.yes)
-        return
-    
-    # History management
-    if args.history:
-        handle_show_history(args.bot, args.limit)
-        return
-    
-    if args.search_history:
-        handle_search_history(args.bot, args.search_history, args.limit)
-        return
-    
-    # Memory maintenance
-    if args.regenerate_embeddings:
-        handle_regenerate_embeddings(args.bot)
-        return
-    
-    if args.consolidate or args.consolidate_dry_run:
-        handle_consolidate(args.bot, dry_run=args.consolidate_dry_run)
-        return
-    
-    # Show stats
+
+    # === General ===
     if args.stats:
         show_stats(args.bot)
         return
-    
-    # List all memories
-    if args.list_all:
-        list_all_memories(args.bot, args.limit)
+
+    # === Memory operations ===
+    if args.list_memories:
+        list_memories(args.bot, args.limit)
         return
-    
-    # Search
+
+    if args.delete_memory:
+        handle_delete_memory(args.bot, args.delete_memory, args.yes)
+        return
+
+    if args.consolidate or args.consolidate_dry_run:
+        handle_consolidate(args.bot, dry_run=args.consolidate_dry_run)
+        return
+
+    if args.regenerate_embeddings:
+        handle_regenerate_embeddings(args.bot)
+        return
+
+    # === User profile ===
+    if args.list_attrs:
+        handle_list_attrs(args.list_attrs)
+        return
+
+    if args.delete_attr:
+        handle_delete_attribute(args.delete_attr, args.yes)
+        return
+
+    # === Message history operations ===
+    if args.msg:
+        handle_show_messages(args.bot, args.limit)
+        return
+
+    if args.msg_search:
+        handle_search_messages(args.bot, args.msg_search, args.limit)
+        return
+
+    if args.msg_forget:
+        handle_msg_forget(args.bot, args.msg_forget, args.yes)
+        return
+
+    if args.msg_forget_since:
+        handle_msg_forget_since(args.bot, args.msg_forget_since, args.yes)
+        return
+
+    if args.msg_get:
+        handle_msg_get(args.bot, args.msg_get)
+        return
+
+    if args.msg_forget_id:
+        handle_msg_forget_id(args.bot, args.msg_forget_id, args.yes)
+        return
+
+    if args.msg_restore:
+        handle_msg_restore(args.bot, args.yes)
+        return
+
+    if args.msg_summarize_preview:
+        handle_msg_summarize_preview(args.bot)
+        return
+
+    if args.msg_summarize:
+        handle_msg_summarize(args.bot, args.yes)
+        return
+
+    if args.msg_summaries:
+        handle_msg_summaries(args.bot)
+        return
+
+    if args.msg_delete_summary:
+        handle_msg_delete_summary(args.bot, args.msg_delete_summary, args.yes)
+        return
+
+    # === Memory search (default action) ===
     if not args.query and args.method != "high-importance":
-        console.print("[red]Error:[/red] Query required for search (use --list-all to see all memories, or --stats)")
+        parser.print_help()
+        console.print("\n[yellow]Tip:[/yellow] Use a query to search memories, or --msg to view messages")
         sys.exit(1)
-    
+
     search_memories(args.bot, args.query, args.method, args.limit, args.min_importance)
 
 

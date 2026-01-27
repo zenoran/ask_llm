@@ -389,6 +389,16 @@ class MemoryClient:
         backend = storage.get_backend(self.bot_id)
         return int(backend.ignore_messages_since_minutes(minutes))
 
+    def get_message_by_id(self, message_id: str) -> dict | None:
+        """Get a specific message by ID (supports prefix match)."""
+        self._ensure_initialized()
+        if self.server_url:
+            result = self._call_server("get_message_by_id", {"bot_id": self.bot_id, "message_id": message_id})
+            return result if result else None
+        storage = self._get_storage()
+        backend = storage.get_backend(self.bot_id)
+        return backend.get_message_by_id(message_id)
+
     def ignore_message_by_id(self, message_id: str) -> bool:
         """Move a specific message to the forgotten table by ID."""
         self._ensure_initialized()

@@ -450,6 +450,10 @@ class MemoryStorage:
         backend = self._get_backend(bot_id)
         return backend.ignore_messages_since_minutes(minutes)
 
+    async def get_message_by_id(self, bot_id: str = "default", message_id: str = "") -> dict | None:
+        backend = self._get_backend(bot_id)
+        return backend.get_message_by_id(message_id)
+
     async def ignore_message_by_id(self, bot_id: str = "default", message_id: str = "") -> bool:
         backend = self._get_backend(bot_id)
         return backend.ignore_message_by_id(message_id)

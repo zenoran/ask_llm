@@ -10,11 +10,15 @@ BaseAskLLM provides the shared logic for both CLI (AskLLM) and service
 Subclasses override _initialize_client() for their specific client types.
 """
 
+import json
 import logging
+import os
 import threading
 import uuid
 from abc import ABC, abstractmethod
+from datetime import datetime
 from difflib import SequenceMatcher
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from rich.console import Console
@@ -322,7 +326,11 @@ class BaseAskLLM(ABC):
                 # Memory extraction for non-tool bots
                 if self.memory and not self.bot.uses_tools:
                     self._trigger_memory_extraction(prompt, assistant_response)
-            
+
+            # Write debug turn log if enabled
+            if self.debug:
+                self._write_debug_turn_log(context_messages, prompt, assistant_response)
+
             return assistant_response
         
         except KeyboardInterrupt:
@@ -468,7 +476,7 @@ class BaseAskLLM(ABC):
             try:
                 from ..service import ServiceClient
                 from ..service.tasks import create_extraction_task
-                
+
                 client = ServiceClient()
                 if client.is_available():
                     task = create_extraction_task(
@@ -482,10 +490,88 @@ class BaseAskLLM(ABC):
                     client.submit_task(task)
             except Exception as e:
                 logger.debug(f"Memory extraction failed: {e}")
-        
+
         thread = threading.Thread(target=extract, daemon=True)
         thread.start()
         thread.join(timeout=0.5)
+
+    def _write_debug_turn_log(
+        self,
+        context_messages: list[Message],
+        user_prompt: str,
+        assistant_response: str,
+    ):
+        """Write the current turn's request/response data to a debug log file.
+
+        Only called when --debug is enabled. Overwrites the file on each turn
+        to show the most recent request/response for review.
+
+        Args:
+            context_messages: Full list of messages sent to the LLM
+            user_prompt: The user's input for this turn
+            assistant_response: The assistant's response
+        """
+        try:
+            # Use repo's .logs folder
+            repo_root = Path(__file__).parent.parent.parent.parent  # src/ask_llm/core -> repo root
+            logs_dir = repo_root / ".logs"
+            logs_dir.mkdir(parents=True, exist_ok=True)
+
+            log_file = logs_dir / "debug_turn.txt"
+
+            # Build the log content
+            lines = []
+            lines.append("=" * 80)
+            lines.append(f"DEBUG TURN LOG - {datetime.now().isoformat()}")
+            lines.append(f"Model: {self.resolved_model_alias}")
+            lines.append(f"Bot: {self.bot_id} ({self.bot.name})")
+            lines.append(f"User: {self.user_id}")
+            lines.append("=" * 80)
+            lines.append("")
+
+            # Request data - all context messages
+            lines.append("─" * 40)
+            lines.append("REQUEST MESSAGES")
+            lines.append("─" * 40)
+            for i, msg in enumerate(context_messages):
+                lines.append(f"\n[{i}] Role: {msg.role}")
+                lines.append(f"    Timestamp: {msg.timestamp}")
+                lines.append(f"    Content ({len(msg.content)} chars):")
+                lines.append("    " + "─" * 36)
+                # Indent content for readability
+                for content_line in msg.content.split("\n"):
+                    lines.append(f"    {content_line}")
+                lines.append("")
+
+            # Response data
+            lines.append("─" * 40)
+            lines.append("RESPONSE")
+            lines.append("─" * 40)
+            lines.append(f"Length: {len(assistant_response)} chars")
+            lines.append("")
+            lines.append(assistant_response)
+            lines.append("")
+
+            # Also dump as JSON for machine parsing
+            lines.append("─" * 40)
+            lines.append("JSON FORMAT (for parsing)")
+            lines.append("─" * 40)
+            json_data = {
+                "timestamp": datetime.now().isoformat(),
+                "model": self.resolved_model_alias,
+                "bot_id": self.bot_id,
+                "user_id": self.user_id,
+                "request": [msg.to_dict() for msg in context_messages],
+                "response": assistant_response,
+            }
+            lines.append(json.dumps(json_data, indent=2, ensure_ascii=False))
+
+            # Write to file (overwrite)
+            log_file.write_text("\n".join(lines), encoding="utf-8")
+            logger.debug(f"Debug turn log written to: {log_file}")
+
+        except Exception as e:
+            logger.warning(f"Failed to write debug turn log: {e}")
     
     def refine_prompt(self, prompt: str, history: list | None = None) -> str:
         """Refine the user's prompt using context."""

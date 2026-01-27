@@ -87,3 +87,4 @@ cython_debug/
 .pypirc
 .run/llm-service.pid
 .run/memory-server.pid
+.logs/

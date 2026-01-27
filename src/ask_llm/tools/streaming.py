@@ -40,8 +40,9 @@ def stream_with_tools(
 ) -> Iterator[str]:
     """Stream LLM response with tool calling support.
     
-    Accumulates the full response, then checks for tool calls.
-    If a tool call is found, executes it and continues with follow-up.
+    Strategy: Stream all content immediately UNLESS we detect a definitive
+    tool call pattern. For small models that output tool calls in various
+    formats, we check the complete response at the end.
     
     Args:
         messages: Initial conversation messages.
@@ -78,91 +79,162 @@ def stream_with_tools(
         if iteration > 1:
             log.debug(f"Tool loop iteration {iteration}/{max_iterations}")
         
-        # Stream chunks while watching for tool calls
-        # Buffer text to detect <tool_call> before yielding
-        buffer = ""
-        tool_call_started = False
-        full_response_parts = []
+        # STREAMING APPROACH:
+        # 1. Buffer initial tokens to check if response STARTS with a tool call
+        # 2. If it looks like text, switch to immediate streaming
+        # 3. If it looks like a tool call, buffer everything and process
+        #
+        # Tool calls from models typically start with markers like:
+        # - <tool_call>
+        # - ```json or ```python or ``` followed by {"name":
+        # - `{"name":
+        #
+        # Normal responses start with regular text.
+        
+        initial_buffer = ""
+        initial_chunks = []
+        streaming_mode = False  # True = stream immediately, False = still deciding
+        full_response = ""
+        
+        # How many chars to buffer before deciding
+        DECISION_THRESHOLD = 50
+        
+        def looks_like_tool_start(text: str) -> bool:
+            """Check if text looks like it's starting a tool call."""
+            stripped = text.strip()
+            lower = stripped.lower()
+            
+            # Definite tool markers
+            if lower.startswith('<tool_call>') or lower.startswith('<function_call>'):
+                return True
+            if lower.startswith('<|im_start|>tool'):
+                return True
+            
+            # Code block that might be a tool call
+            if stripped.startswith('```'):
+                # Check if it's followed by {"name" pattern
+                rest = stripped[3:].lstrip()
+                if rest.startswith('json') or rest.startswith('python'):
+                    rest = rest[4:].lstrip() if rest.startswith('json') else rest[6:].lstrip()
+                if rest.startswith('{"name"') or rest.startswith("{'name'"):
+                    return True
+                # Just ``` followed by { could be tool call
+                if rest.startswith('{'):
+                    return True
+            
+            # Inline code with tool JSON
+            if stripped.startswith('`{"name"') or stripped.startswith("`{'name'"):
+                return True
+            
+            # Raw JSON tool call (no wrapper)
+            if stripped.startswith('{"name"') and '"arguments"' in stripped:
+                return True
+            
+            return False
+        
+        def looks_like_regular_text(text: str) -> bool:
+            """Check if text clearly looks like regular prose, not a tool call."""
+            stripped = text.strip()
+            if not stripped:
+                return False
+            
+            # If it starts with a letter or common punctuation, it's likely text
+            first_char = stripped[0]
+            if first_char.isalpha():
+                return True
+            if first_char in '!?.,;:()[]"\'—–-':
+                return True
+            # Emoji or other unicode that's not { or < or `
+            if first_char not in '{<`':
+                return True
+            
+            return False
         
         for chunk in stream_fn(current_messages):
-            buffer += chunk
+            full_response += chunk
             
-            if tool_call_started:
-                # Already in a tool call - just accumulate, don't yield
+            if streaming_mode:
+                # Already decided to stream - just yield
+                yield chunk
                 continue
             
-            # Look for tool call start
-            lower_buffer = buffer.lower()
+            # Still deciding - buffer
+            initial_buffer += chunk
+            initial_chunks.append(chunk)
             
-            if "<tool_call>" in lower_buffer:
-                # Found complete tool call start
-                tool_call_started = True
-                idx = lower_buffer.find("<tool_call>")
-                if idx > 0:
-                    # Yield text before the tool call
-                    pre_tool = buffer[:idx]
-                    yield pre_tool
-                    full_response_parts.append(pre_tool)
-                # Keep tool call in buffer
-                buffer = buffer[idx:]
+            # Check if we can make a decision
+            stripped = initial_buffer.strip()
+            
+            if looks_like_tool_start(stripped):
+                # Looks like a tool call - buffer everything
+                log.debug("Response looks like tool call - buffering")
+                # Don't yield anything yet, continue buffering
                 continue
             
-            # Check if buffer ends with potential tool call start
-            # Be conservative - hold back anything that could be <tool_call>
-            hold_back = 0
-            for i in range(min(len(buffer), 11)):  # len("<tool_call>") = 11
-                suffix = buffer[-(i+1):].lower()
-                if "<tool_call>"[:i+1].startswith(suffix) or suffix.startswith("<tool_call>"[:i+1]):
-                    hold_back = i + 1
-                    break
+            if looks_like_regular_text(stripped):
+                # Looks like regular text - switch to streaming mode
+                log.debug("Response looks like regular text - streaming")
+                streaming_mode = True
+                # Yield all buffered chunks
+                for buffered_chunk in initial_chunks:
+                    yield buffered_chunk
+                initial_chunks = []
+                continue
             
-            # Yield everything except the potential tool tag start
-            if hold_back > 0 and len(buffer) > hold_back:
-                safe_to_yield = buffer[:-hold_back]
-                yield safe_to_yield
-                full_response_parts.append(safe_to_yield)
-                buffer = buffer[-hold_back:]
-            elif hold_back == 0 and buffer:
-                # No potential tool start - yield all
-                yield buffer
-                full_response_parts.append(buffer)
-                buffer = ""
-            # else: buffer is all potential tool start, keep buffering
+            # Haven't decided yet - check if we've buffered enough
+            if len(stripped) >= DECISION_THRESHOLD:
+                # Buffered enough without seeing tool markers - assume it's text
+                log.debug("Decision threshold reached - streaming")
+                streaming_mode = True
+                for buffered_chunk in initial_chunks:
+                    yield buffered_chunk
+                initial_chunks = []
         
-        # End of stream - handle remaining buffer
-        full_response = "".join(full_response_parts) + buffer
         log.debug(f"Response received: {len(full_response)} chars")
         
-        # Check if there's a complete tool call
-        if not tool_call_started or "</tool_call>" not in buffer.lower():
-            # No complete tool call - yield any remaining buffer (it's safe text)
-            if buffer and not tool_call_started:
-                yield buffer
-            elif buffer and tool_call_started:
-                # Incomplete tool call - this is malformed, yield it anyway
-                log.warning("Incomplete tool call at end of response")
-                yield buffer
-            log.debug("No tool call found - done")
-            return
+        # If we never switched to streaming mode, we buffered everything
+        if not streaming_mode:
+            # Check if it's actually a tool call
+            if has_tool_call(full_response):
+                log.debug("Tool call confirmed in buffered response")
+                
+                tool_calls, remaining_text = parse_tool_calls(full_response)
+                
+                if not tool_calls:
+                    log.warning("Tool call markers found but parsing failed - yielding as text")
+                    for chunk in initial_chunks:
+                        yield chunk
+                    return
+                
+                log.info(f"🔧 Calling tool: {tool_calls[0].name}")
+                
+                # Yield any text before the tool call
+                if remaining_text.strip():
+                    yield remaining_text
+                
+                # Execute the tool
+                tool_result = executor.execute(tool_calls[0])
+                log.debug(f"Tool result: {len(tool_result)} chars")
+                
+                # Build continuation messages
+                current_messages.append(Message(role="assistant", content=full_response))
+                current_messages.append(Message(role="user", content=tool_result))
+                
+                # Continue to next iteration for follow-up
+                continue
+            else:
+                # Not a tool call after all - yield buffered content
+                log.debug("Not a tool call - yielding buffered content")
+                for chunk in initial_chunks:
+                    yield chunk
+                return
         
-        # There's a complete tool call - parse it
-        tool_calls, remaining_text = parse_tool_calls(full_response)
+        # Streaming mode was active - response is complete, check for tool calls
+        # (In case there's a tool call AFTER regular text, which would be unusual)
+        if has_tool_call(full_response):
+            log.warning("Tool call found after streaming - this is unusual")
+            # Already yielded text, can't un-yield. Just log and return.
         
-        if not tool_calls:
-            log.warning("Tool call markers found but parsing failed")
-            yield buffer  # Yield the unparseable content
-            return
-        
-        log.info(f"🔧 Calling tool: {tool_calls[0].name}")
-        
-        # Execute the tool
-        tool_result = executor.execute(tool_calls[0])
-        log.debug(f"Tool result: {len(tool_result)} chars")
-        
-        # Build continuation messages
-        current_messages.append(Message(role="assistant", content=full_response))
-        current_messages.append(Message(role="user", content=tool_result))
-        
-        # Continue to next iteration
+        return
     
     log.warning(f"Max tool iterations ({max_iterations}) reached")

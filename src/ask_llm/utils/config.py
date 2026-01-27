@@ -119,6 +119,24 @@ class Config(BaseSettings):
         description="If true, tool-enabled bots do not include conversation history in the prompt (prevents stale tool results polluting context)",
     )
 
+    # --- History Summarization Settings --- #
+    SUMMARIZATION_SESSION_GAP_SECONDS: int = Field(
+        default=3600,
+        description="Gap in seconds between messages to consider them separate sessions (1 hour default)"
+    )
+    SUMMARIZATION_MIN_MESSAGES: int = Field(
+        default=4,
+        description="Minimum messages in a session before it's eligible for summarization"
+    )
+    SUMMARIZATION_MAX_IN_CONTEXT: int = Field(
+        default=5,
+        description="Maximum number of summaries to include in context window"
+    )
+    SUMMARIZATION_MODEL: str = Field(
+        default="dolphin-qwen-3b",
+        description="Model alias to use for summarization (uses loaded service model by default)"
+    )
+
     # --- LLM Generation Settings --- #
     MAX_TOKENS: int = Field(default=1024*4, description="Default maximum tokens to generate")
     MAX_CONTEXT_TOKENS: int = Field(default=0, description="Maximum context tokens for input (0 = use LLAMA_CPP_N_CTX - MAX_TOKENS)")
@@ -132,6 +150,7 @@ class Config(BaseSettings):
     # --- UI/Interaction Settings --- #
     VERBOSE: bool = Field(default=False, description="Verbose mode for debugging")
     DEBUG: bool = Field(default=False, description="Enable raw debug logging output")
+    DEBUG_TURN_LOG: bool = Field(default=False, description="Write debug turn log to .logs/debug_turn.txt on each query")
     PLAIN_OUTPUT: bool = Field(default=False, description="Use plain text output without Rich formatting")
     NO_STREAM: bool = Field(default=False, description="Disable streaming output")
     INTERACTIVE_MODE: bool = Field(default=False, description="Whether the app is in interactive mode (set based on args)")

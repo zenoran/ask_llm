@@ -53,8 +53,14 @@ class Message:
 
     def to_api_format(self) -> dict:
         """Convert to API-compatible format (without timestamp)"""
+        # Map internal roles to API-compatible roles
+        # 'summary' is stored internally but should be sent as 'system' to the LLM
+        api_role = self.role
+        if api_role == "summary":
+            api_role = "system"
+
         # Ensure content is never None (OpenAI API rejects null content)
-        d = {"role": self.role, "content": self.content or ""}
+        d = {"role": api_role, "content": self.content or ""}
         
         # Include tool_calls for assistant messages that made tool calls
         if self.tool_calls:

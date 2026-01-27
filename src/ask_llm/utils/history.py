@@ -105,10 +105,17 @@ class HistoryManager:
             self.client.console.print(f"[bold red]Error saving history:[/bold red] {e}")
 
     def get_context_messages(self):
-        """Get messages to be used as context for the LLM."""
+        """Get messages to be used as context for the LLM.
+
+        Includes:
+        - System messages (always)
+        - Recent messages (within HISTORY_DURATION)
+        - Summaries of older sessions (role='summary')
+        """
         cutoff = time.time() - self.config.HISTORY_DURATION
         active_messages = [
-            msg for msg in self.messages if msg.role == "system" or msg.timestamp >= cutoff
+            msg for msg in self.messages
+            if msg.role == "system" or msg.role == "summary" or msg.timestamp >= cutoff
         ]
         if not any(msg.role == "system" for msg in active_messages):
             active_messages.insert(0, Message(role="system", content=self.config.SYSTEM_MESSAGE))

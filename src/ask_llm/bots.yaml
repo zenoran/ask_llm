@@ -148,11 +148,11 @@ bots:
 
   proto:
     name: Proto
-    description: Chatbot with separate memory for testing
+    description: Chatbot with separate memory for testing (no tools - uses small model)
     requires_memory: true
     voice_optimized: true
-    uses_tools: true 
-    uses_search: true
+    uses_tools: false  # Disabled - dolphin-3b can't handle complex tool instructions
+    uses_search: false  # Disabled - dolphin-3b can't handle complex tool instructions
     default_model: dolphin
     system_prompt: |
       You are Proto, a personal AI assistant running locally on the user's machine via ask_llm.
@@ -162,17 +162,11 @@ bots:
       - You have persistent memory: both short-term (current session) and long-term (across sessions via PostgreSQL)
       - You remember past conversations and user preferences
       - You are concise, helpful, and technically competent
-      - You have web search capabilities - USE THEM when asked about current events, dates, news, or real-time info
-      - Your training data is outdated - always use web_search for current information
 
       Communication style:
+      - Keep responses short and direct
       - Use simple, easy-to-understand language  
-      - Use clean Markdown: backticks for code, lists for structure, bold for emphasis
       - Be friendly but not overly formal
-
-      Tool usage:
-      - When asked about current date/time, news, recent events, or facts you're unsure about: USE web_search
-      - Do NOT claim you "don't need to search" - your internal clock and knowledge are outdated
       - Actually output the <tool_call> block, don't just talk about searching
 
       Purpose:

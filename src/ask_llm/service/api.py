@@ -11,13 +11,16 @@ Or: uvicorn ask_llm.service.server:app --host 0.0.0.0 --port 8642
 """
 
 import asyncio
+import json
 import logging
+import os
 import threading
 import time
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime
 from enum import Enum
+from pathlib import Path
 from queue import PriorityQueue
 from typing import Any, AsyncIterator, Literal
 from urllib.parse import urlparse
@@ -50,6 +53,93 @@ def _is_tcp_listening(host: str, port: int) -> bool:
             return sock.connect_ex((host, port)) == 0
     except OSError:
         return False
+
+
+def _write_debug_turn_log(
+    prepared_messages: list,
+    user_prompt: str,
+    response: str,
+    model: str,
+    bot_id: str,
+    user_id: str,
+) -> None:
+    """Write the current turn's request/response data to a debug log file.
+
+    Called when debug logging is enabled. Overwrites the file on each turn
+    to show the most recent request/response for review.
+    """
+    try:
+        # Use repo's .logs folder
+        repo_root = Path(__file__).parent.parent.parent.parent  # src/ask_llm/service -> repo root
+        logs_dir = repo_root / ".logs"
+        logs_dir.mkdir(parents=True, exist_ok=True)
+
+        log_file = logs_dir / "debug_turn.txt"
+
+        # Build the log content
+        lines = []
+        lines.append("=" * 80)
+        lines.append(f"DEBUG TURN LOG - {datetime.now().isoformat()}")
+        lines.append(f"Model: {model}")
+        lines.append(f"Bot: {bot_id}")
+        lines.append(f"User: {user_id}")
+        lines.append("=" * 80)
+        lines.append("")
+
+        # Request data - all context messages
+        lines.append("─" * 40)
+        lines.append("REQUEST MESSAGES")
+        lines.append("─" * 40)
+        for i, msg in enumerate(prepared_messages):
+            role = msg.role if hasattr(msg, 'role') else msg.get('role', 'unknown')
+            content = msg.content if hasattr(msg, 'content') else msg.get('content', '')
+            timestamp = msg.timestamp if hasattr(msg, 'timestamp') else msg.get('timestamp', 0)
+            lines.append(f"\n[{i}] Role: {role}")
+            lines.append(f"    Timestamp: {timestamp}")
+            lines.append(f"    Content ({len(content)} chars):")
+            lines.append("    " + "─" * 36)
+            # Indent content for readability
+            for content_line in str(content).split("\n"):
+                lines.append(f"    {content_line}")
+            lines.append("")
+
+        # Response data
+        lines.append("─" * 40)
+        lines.append("RESPONSE")
+        lines.append("─" * 40)
+        lines.append(f"Length: {len(response)} chars")
+        lines.append("")
+        lines.append(response)
+        lines.append("")
+
+        # Also dump as JSON for machine parsing
+        lines.append("─" * 40)
+        lines.append("JSON FORMAT (for parsing)")
+        lines.append("─" * 40)
+
+        def msg_to_dict(msg):
+            if hasattr(msg, 'to_dict'):
+                return msg.to_dict()
+            elif hasattr(msg, 'role'):
+                return {"role": msg.role, "content": msg.content, "timestamp": getattr(msg, 'timestamp', 0)}
+            return dict(msg) if isinstance(msg, dict) else str(msg)
+
+        json_data = {
+            "timestamp": datetime.now().isoformat(),
+            "model": model,
+            "bot_id": bot_id,
+            "user_id": user_id,
+            "request": [msg_to_dict(msg) for msg in prepared_messages],
+            "response": response,
+        }
+        lines.append(json.dumps(json_data, indent=2, ensure_ascii=False, default=str))
+
+        # Write to file (overwrite)
+        log_file.write_text("\n".join(lines), encoding="utf-8")
+        log.debug(f"Debug turn log written to: {log_file}")
+
+    except Exception as e:
+        log.warning(f"Failed to write debug turn log: {e}")
 
 
 _memory_mcp_thread: threading.Thread | None = None
@@ -348,7 +438,7 @@ class ConsolidateResponse(BaseModel):
 
 class RawCompletionRequest(BaseModel):
     """Request for raw LLM completion without bot/memory overhead.
-    
+
     Use this for utility tasks like memory consolidation, summarization, etc.
     """
     prompt: str
@@ -364,6 +454,59 @@ class RawCompletionResponse(BaseModel):
     model: str
     tokens: int | None = None
     elapsed_ms: float
+
+
+# History Summarization Models
+class SummarizableSession(BaseModel):
+    """A session eligible for summarization."""
+    start_timestamp: float
+    end_timestamp: float
+    start_time: str
+    end_time: str
+    message_count: int
+    first_message: str
+    last_message: str
+
+
+class SummarizePreviewResponse(BaseModel):
+    """Response for summarization preview."""
+    bot_id: str
+    sessions: list[SummarizableSession]
+    total_messages: int
+
+
+class SummarizeResponse(BaseModel):
+    """Response for summarization operation."""
+    success: bool
+    sessions_summarized: int
+    messages_summarized: int
+    errors: list[str] = []
+
+
+class SummaryInfo(BaseModel):
+    """Information about a single summary."""
+    id: str
+    content: str
+    timestamp: float
+    session_start_time: str | None
+    session_end_time: str | None
+    message_count: int
+    method: str
+
+
+class ListSummariesResponse(BaseModel):
+    """Response for listing summaries."""
+    bot_id: str
+    summaries: list[SummaryInfo]
+    total_count: int
+
+
+class DeleteSummaryResponse(BaseModel):
+    """Response for deleting a summary."""
+    success: bool
+    summary_id: str | None = None
+    messages_restored: int = 0
+    detail: str | None = None
 
 
 # User Profile Models
@@ -773,21 +916,32 @@ class BackgroundService:
                 log.llm_context(prepared_messages)
                 
                 # Execute the query with prepared messages
-                response, tool_context = ask_llm._execute_llm_query(
+                response, tool_context = ask_llm.execute_llm_query(
                     prepared_messages,
                     plaintext_output=True,
                     stream=False,
                 )
-                
+
+                # Write debug turn log if enabled (check config or env var)
+                if self.config.DEBUG_TURN_LOG or os.environ.get("ASK_LLM_DEBUG_TURN_LOG"):
+                    _write_debug_turn_log(
+                        prepared_messages=prepared_messages,
+                        user_prompt=user_prompt,
+                        response=response,
+                        model=model_alias,
+                        bot_id=bot_id,
+                        user_id=user_id,
+                    )
+
                 # Check if cancelled during generation
                 if cancel_event.is_set():
                     log.info("Generation cancelled - newer request received")
                     cancelled = True
                     return ""
-                
+
                 # Finalize (add to history, trigger memory extraction)
                 ask_llm.finalize_response(user_prompt, response, tool_context)
-                
+
                 return response
             
             response_text = await loop.run_in_executor(self._llm_executor, _do_query)
@@ -979,6 +1133,17 @@ class BackgroundService:
                     elapsed_ms = (timing_holder[1] - timing_holder[0]) * 1000
                     log.llm_response(full_response_holder[0], elapsed_ms=elapsed_ms)
                     ask_llm.finalize_response(user_prompt, full_response_holder[0])
+
+                    # Write debug turn log if enabled (check config or env var)
+                    if self.config.DEBUG_TURN_LOG or os.environ.get("ASK_LLM_DEBUG_TURN_LOG"):
+                        _write_debug_turn_log(
+                            prepared_messages=messages,
+                            user_prompt=user_prompt,
+                            response=full_response_holder[0],
+                            model=model_alias,
+                            bot_id=bot_id,
+                            user_id=user_id,
+                        )
                     
             except Exception as e:
                 if not cancel_event.is_set():
@@ -1901,6 +2066,31 @@ try:
             log.error(f"Failed to list memories: {e}")
             raise HTTPException(status_code=500, detail=str(e))
 
+    @app.get("/v1/memory/message", tags=["Memory"])
+    async def get_message_by_id(
+        message_id: str = Query(..., description="Message ID (supports prefix match)"),
+        bot_id: str = Query(None, description="Bot ID"),
+    ):
+        """Get a specific message by ID."""
+        service = get_service()
+        effective_bot_id = bot_id or service._default_bot
+        
+        try:
+            client = service.get_memory_client(effective_bot_id)
+            if not client:
+                raise HTTPException(status_code=503, detail="Memory service unavailable")
+
+            # Get the message
+            message = client.get_message_by_id(message_id)
+            
+            if message:
+                return {"message": message}
+            else:
+                return {"error": f"Message '{message_id}' not found"}
+        except Exception as e:
+            log.error(f"Failed to get message: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
+
     @app.delete("/v1/memory/{memory_id}", response_model=MemoryDeleteResponse, tags=["Memory"])
     async def delete_memory(
         memory_id: str,
@@ -2204,11 +2394,12 @@ try:
             start = time.perf_counter()
             client = service._client_cache[model_alias]
             
-            # Build simple messages
+            # Build messages as Message objects (required by client.query)
+            from ..models.message import Message
             messages = []
             if request.system:
-                messages.append({"role": "system", "content": request.system})
-            messages.append({"role": "user", "content": request.prompt})
+                messages.append(Message(role="system", content=request.system))
+            messages.append(Message(role="user", content=request.prompt))
             
             # Query the model directly
             response = client.query(
@@ -2231,6 +2422,202 @@ try:
             
         except Exception as e:
             log.error(f"Raw completion failed: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    # =========================================================================
+    # History Summarization Endpoints
+    # =========================================================================
+
+    @app.get("/v1/history/summarize/preview", response_model=SummarizePreviewResponse, tags=["History"])
+    async def preview_summarizable_sessions(
+        bot_id: str = Query(None, description="Bot ID"),
+    ):
+        """Preview sessions that would be summarized (dry run)."""
+        from datetime import datetime
+        from ..memory.summarization import HistorySummarizer
+
+        service = get_service()
+        effective_bot_id = bot_id or service._default_bot
+
+        try:
+            summarizer = HistorySummarizer(service.config, effective_bot_id)
+            sessions = summarizer.preview_summarizable_sessions()
+
+            session_infos = []
+            total_messages = 0
+
+            for session in sessions:
+                total_messages += session.message_count
+
+                # Get first and last user messages for preview
+                user_msgs = [m for m in session.messages if m.get("role") == "user"]
+                first_msg = user_msgs[0].get("content", "")[:100] if user_msgs else ""
+                last_msg = user_msgs[-1].get("content", "")[:100] if len(user_msgs) > 1 else first_msg
+
+                session_infos.append(SummarizableSession(
+                    start_timestamp=session.start_timestamp,
+                    end_timestamp=session.end_timestamp,
+                    start_time=datetime.fromtimestamp(session.start_timestamp).strftime("%Y-%m-%d %H:%M"),
+                    end_time=datetime.fromtimestamp(session.end_timestamp).strftime("%H:%M"),
+                    message_count=session.message_count,
+                    first_message=first_msg,
+                    last_message=last_msg,
+                ))
+
+            return SummarizePreviewResponse(
+                bot_id=effective_bot_id,
+                sessions=session_infos,
+                total_messages=total_messages,
+            )
+        except Exception as e:
+            log.error(f"Failed to preview summarizable sessions: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.post("/v1/history/summarize", response_model=SummarizeResponse, tags=["History"])
+    async def summarize_history(
+        bot_id: str = Query(None, description="Bot ID"),
+        use_heuristic: bool = Query(False, description="Fall back to heuristic if LLM fails"),
+    ):
+        """Summarize eligible history sessions."""
+        from ..memory.summarization import HistorySummarizer, format_session_for_summarization, SUMMARIZATION_PROMPT
+        from ..models.message import Message
+
+        service = get_service()
+        effective_bot_id = bot_id or service._default_bot
+
+        # Create a summarize function that uses the loaded client directly
+        # This avoids the HTTP self-call deadlock
+        def summarize_with_loaded_client(session) -> str | None:
+            """Summarize using the already-loaded LLM client."""
+            if not service._client_cache:
+                log.warning("No model loaded for summarization")
+                return None
+            
+            # Get the loaded client
+            model_alias = list(service._client_cache.keys())[0]
+            client = service._client_cache[model_alias]
+            
+            # Build the prompt
+            conversation_text = format_session_for_summarization(session)
+            prompt = SUMMARIZATION_PROMPT.format(messages=conversation_text)
+            
+            # Check for token limits (rough estimate: 4 chars per token)
+            estimated_tokens = len(prompt) // 4
+            if estimated_tokens > 6000:  # Leave room for response
+                log.warning(f"Session too large ({estimated_tokens} estimated tokens), needs chunking")
+                return None  # Will trigger chunked summarization
+            
+            try:
+                messages = [
+                    Message(role="system", content="You are a helpful assistant that summarizes conversations concisely."),
+                    Message(role="user", content=prompt),
+                ]
+                response = client.query(
+                    messages=messages,
+                    max_tokens=200,
+                    temperature=0.3,
+                    plaintext_output=True,  # No rich formatting for background tasks
+                    stream=False,  # Don't stream for summarization
+                )
+                
+                # Check for error responses in content
+                if response:
+                    error_indicators = ["Error:", "exception occurred", "exceed context window", "tokens exceed"]
+                    for indicator in error_indicators:
+                        if indicator.lower() in response.lower():
+                            log.error(f"LLM returned error: {response[:100]}...")
+                            return None
+                
+                return response.strip() if response else None
+            except Exception as e:
+                log.error(f"LLM summarization failed: {e}")
+                return None
+
+        try:
+            summarizer = HistorySummarizer(
+                service.config, 
+                effective_bot_id,
+                summarize_fn=summarize_with_loaded_client,
+            )
+            result = summarizer.summarize_eligible_sessions(use_heuristic_fallback=use_heuristic)
+
+            return SummarizeResponse(
+                success=True,
+                sessions_summarized=result.get("sessions_summarized", 0),
+                messages_summarized=result.get("messages_summarized", 0),
+                errors=result.get("errors", []),
+            )
+        except Exception as e:
+            log.error(f"Failed to summarize history: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.get("/v1/history/summaries", response_model=ListSummariesResponse, tags=["History"])
+    async def list_summaries(
+        bot_id: str = Query(None, description="Bot ID"),
+    ):
+        """List existing history summaries."""
+        from datetime import datetime
+        from ..memory.summarization import HistorySummarizer
+
+        service = get_service()
+        effective_bot_id = bot_id or service._default_bot
+
+        try:
+            summarizer = HistorySummarizer(service.config, effective_bot_id)
+            summaries = summarizer.list_summaries()
+
+            summary_infos = []
+            for summ in summaries:
+                start_ts = summ.get("session_start")
+                end_ts = summ.get("session_end")
+
+                summary_infos.append(SummaryInfo(
+                    id=summ.get("id", ""),
+                    content=summ.get("content", ""),
+                    timestamp=summ.get("timestamp", 0),
+                    session_start_time=datetime.fromtimestamp(start_ts).strftime("%Y-%m-%d %H:%M") if start_ts else None,
+                    session_end_time=datetime.fromtimestamp(end_ts).strftime("%H:%M") if end_ts else None,
+                    message_count=summ.get("message_count", 0),
+                    method=summ.get("method", "unknown"),
+                ))
+
+            return ListSummariesResponse(
+                bot_id=effective_bot_id,
+                summaries=summary_infos,
+                total_count=len(summary_infos),
+            )
+        except Exception as e:
+            log.error(f"Failed to list summaries: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.delete("/v1/history/summary/{summary_id}", response_model=DeleteSummaryResponse, tags=["History"])
+    async def delete_summary(
+        summary_id: str,
+        bot_id: str = Query(None, description="Bot ID"),
+    ):
+        """Delete a summary and restore the original messages."""
+        from ..memory.summarization import HistorySummarizer
+
+        service = get_service()
+        effective_bot_id = bot_id or service._default_bot
+
+        try:
+            summarizer = HistorySummarizer(service.config, effective_bot_id)
+            result = summarizer.delete_summary(summary_id)
+
+            if result.get("success"):
+                return DeleteSummaryResponse(
+                    success=True,
+                    summary_id=result.get("summary_id"),
+                    messages_restored=result.get("messages_restored", 0),
+                )
+            else:
+                return DeleteSummaryResponse(
+                    success=False,
+                    detail=result.get("error", "Failed to delete summary"),
+                )
+        except Exception as e:
+            log.error(f"Failed to delete summary: {e}")
             raise HTTPException(status_code=500, detail=str(e))
 
 except ImportError:

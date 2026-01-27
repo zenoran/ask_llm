@@ -56,10 +56,10 @@ _message_table_cache: dict[str, Table] = {}
 def get_message_table_pg(bot_id: str) -> Table:
     """Get or create a message Table for a specific bot (PostgreSQL version)."""
     table_name = f"{_sanitize_table_name(bot_id)}_messages"
-    
+
     if table_name in _message_table_cache:
         return _message_table_cache[table_name]
-    
+
     table = Table(
         table_name,
         metadata,
@@ -69,10 +69,12 @@ def get_message_table_pg(bot_id: str) -> Table:
         Column("timestamp", Float, nullable=False),
         Column("session_id", String(36), nullable=True),  # For grouping conversations
         Column("processed", Boolean, default=False),  # Whether memory extraction has run
+        Column("summarized", Boolean, default=False),  # Whether this message is included in a summary
+        Column("summary_metadata", JSON, nullable=True),  # For role='summary' rows only
         Column("created_at", DateTime, default=datetime.utcnow),
         extend_existing=True
     )
-    
+
     _message_table_cache[table_name] = table
     return table
 
@@ -223,6 +225,8 @@ class PostgreSQLMemoryBackend(MemoryBackend):
                     timestamp DOUBLE PRECISION NOT NULL,
                     session_id VARCHAR(36),
                     processed BOOLEAN DEFAULT FALSE,
+                    summarized BOOLEAN DEFAULT FALSE,
+                    summary_metadata JSONB,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
@@ -285,6 +289,13 @@ class PostgreSQLMemoryBackend(MemoryBackend):
                 ALTER TABLE {self._memories_table_name}
                 DROP COLUMN IF EXISTS memory_type
             """)
+
+            # Migration: add summarization columns to messages table
+            add_summarization_cols_sql = text(f"""
+                ALTER TABLE {self._messages_table_name}
+                ADD COLUMN IF NOT EXISTS summarized BOOLEAN DEFAULT FALSE,
+                ADD COLUMN IF NOT EXISTS summary_metadata JSONB
+            """)
             
             try:
                 conn.execute(messages_sql)
@@ -303,6 +314,10 @@ class PostgreSQLMemoryBackend(MemoryBackend):
                     conn.execute(drop_superseded_sql)
                 except Exception:
                     pass  # Column may already be dropped
+                try:
+                    conn.execute(add_summarization_cols_sql)
+                except Exception:
+                    pass  # Columns may already exist
                 conn.commit()
                 
                 # Create indexes
@@ -1390,6 +1405,48 @@ class PostgreSQLMemoryBackend(MemoryBackend):
                 logger.error(f"Failed to forget messages: {e}")
                 return 0
     
+    def get_message_by_id(self, message_id: str) -> dict | None:
+        """Get a specific message by its ID.
+        
+        Supports both full UUID and prefix matching (first 8 chars).
+        Returns the message dict or None if not found.
+        """
+        with self.engine.connect() as conn:
+            try:
+                # Find the message (support prefix matching)
+                if len(message_id) < 36:
+                    select_sql = text(f"""
+                        SELECT id, role, content, timestamp, session_id, processed, created_at, summary_metadata
+                        FROM {self._messages_table_name}
+                        WHERE id LIKE :id_pattern
+                        LIMIT 1
+                    """)
+                    row = conn.execute(select_sql, {"id_pattern": f"{message_id}%"}).fetchone()
+                else:
+                    select_sql = text(f"""
+                        SELECT id, role, content, timestamp, session_id, processed, created_at, summary_metadata
+                        FROM {self._messages_table_name}
+                        WHERE id = :id
+                    """)
+                    row = conn.execute(select_sql, {"id": message_id}).fetchone()
+                
+                if not row:
+                    return None
+                
+                return {
+                    "id": row.id,
+                    "role": row.role,
+                    "content": row.content,
+                    "timestamp": row.timestamp,
+                    "session_id": row.session_id,
+                    "processed": row.processed,
+                    "created_at": str(row.created_at) if row.created_at else None,
+                    "summary_metadata": row.summary_metadata,
+                }
+            except Exception as e:
+                logger.error(f"Failed to get message {message_id}: {e}")
+                return None
+    
     def ignore_message_by_id(self, message_id: str) -> bool:
         """Move a specific message to the forgotten table by its ID.
         
@@ -1862,35 +1919,70 @@ class PostgreSQLShortTermManager:
             )
             return session.execute(stmt).scalar() or 0
 
-    def get_messages(self, since_minutes: int | None = None) -> list:
+    def get_messages(self, since_minutes: int | None = None, include_summaries: bool = True) -> list:
         """Get messages, optionally filtered by time.
-        
+
+        When include_summaries is True (default), applies smart filtering:
+        - Recent messages (within since_minutes): included as-is
+        - Older messages: skipped if summarized=TRUE, but summaries (role='summary') are included
+
+        This allows summaries to condense older history while keeping recent context intact.
+
         Args:
             since_minutes: If provided, only return messages from the last N seconds
-                          (note: despite the name, this is actually in seconds for 
+                          (note: despite the name, this is actually in seconds for
                           backward compatibility with HISTORY_DURATION).
-        
+            include_summaries: If True, include summary rows for older sessions
+
         Returns:
             List of Message objects.
         """
         from ..models.message import Message
-        
-        with Session(self._backend.engine) as session:
-            stmt = (
-                select(self._backend.messages_table)
-                .order_by(self._backend.messages_table.c.timestamp.asc())
-            )
-            
-            if since_minutes is not None:
+
+        with self._backend.engine.connect() as conn:
+            if since_minutes is not None and include_summaries:
+                # Smart filtering: recent messages + older summaries
                 cutoff = time.time() - since_minutes
-                stmt = stmt.where(self._backend.messages_table.c.timestamp >= cutoff)
-            
-            rows = session.execute(stmt).fetchall()
-            
-            return [
-                Message(role=row.role, content=row.content, timestamp=row.timestamp)
-                for row in rows
-            ]
+
+                # Query: get recent messages OR summaries of older sessions
+                # Exclude old messages that have been summarized
+                sql = text(f"""
+                    SELECT role, content, timestamp
+                    FROM {self._backend._messages_table_name}
+                    WHERE
+                        -- Recent messages (within history window)
+                        (timestamp >= :cutoff)
+                        OR
+                        -- Summaries of older sessions
+                        (role = 'summary' AND timestamp < :cutoff)
+                    ORDER BY timestamp ASC
+                """)
+                rows = conn.execute(sql, {"cutoff": cutoff}).fetchall()
+
+                # Filter out recent messages that are summarized
+                # (shouldn't happen normally, but be safe)
+                return [
+                    Message(role=row.role, content=row.content, timestamp=row.timestamp)
+                    for row in rows
+                ]
+            else:
+                # Simple time-based filtering (original behavior)
+                stmt = (
+                    select(self._backend.messages_table)
+                    .order_by(self._backend.messages_table.c.timestamp.asc())
+                )
+
+                if since_minutes is not None:
+                    cutoff = time.time() - since_minutes
+                    stmt = stmt.where(self._backend.messages_table.c.timestamp >= cutoff)
+
+                with Session(self._backend.engine) as session:
+                    rows = session.execute(stmt).fetchall()
+
+                    return [
+                        Message(role=row.role, content=row.content, timestamp=row.timestamp)
+                        for row in rows
+                    ]
 
     def clear(self) -> bool:
         """Clear all messages for this bot."""
