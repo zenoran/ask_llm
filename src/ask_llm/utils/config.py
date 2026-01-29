@@ -57,7 +57,10 @@ class Config(BaseSettings):
     MODELS_CONFIG_PATH: str = Field(default=str(DEFAULT_MODELS_YAML), description="Path to the models YAML definition file")
     DEFAULT_MODEL_ALIAS: Optional[str] = Field(default=None, description="Alias from models.yaml to use if --model is not specified")
     DEFAULT_BOT: str = Field(default="nova", description="Default bot to use if --bot is not specified")
-    DEFAULT_USER: str = Field(description="User profile to use. Set via ASK_LLM_DEFAULT_USER env var. Required.")
+    DEFAULT_USER: Optional[str] = Field(
+        default=None,
+        description="User profile to use. Set via ASK_LLM_DEFAULT_USER env var.",
+    )
 
     # --- Memory Settings --- #
     MEMORY_N_RESULTS: int = Field(default=10, description="Number of relevant memories to retrieve during search (Set via ASK_LLM_MEMORY_N_RESULTS)")

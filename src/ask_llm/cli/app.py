@@ -851,6 +851,29 @@ def ensure_user_profile(config: Config, user_id: str) -> bool:
         return True  # Don't block on profile errors
 
 
+def ensure_default_user(config: Config, args: argparse.Namespace) -> None:
+    """Prompt for and persist DEFAULT_USER if missing and no --user is provided."""
+    if getattr(args, "user", None):
+        return
+    default_user = getattr(config, "DEFAULT_USER", None)
+    if default_user and str(default_user).strip():
+        return
+    if not sys.stdin.isatty():
+        console.print("[bold red]DEFAULT_USER is required to continue.[/bold red]")
+        console.print("[dim]Set ASK_LLM_DEFAULT_USER or pass --user.[/dim]")
+        sys.exit(1)
+    console.print("[yellow]No default user configured.[/yellow]")
+    user_id = Prompt.ask("Enter default user id", default="default").strip()
+    if not user_id:
+        console.print("[red]No user id provided. Aborting.[/red]")
+        sys.exit(1)
+    if not set_config_value("DEFAULT_USER", user_id, config):
+        console.print("[red]Failed to save DEFAULT_USER to config.[/red]")
+        sys.exit(1)
+    config.DEFAULT_USER = user_id
+    console.print(f"[green]Default user set to '{user_id}'.[/green]")
+
+
 def parse_arguments(config_obj: Config) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Query LLM models from the command line using model aliases defined in models.yaml")
     parser.add_argument("-m","--model",type=str,default=None,help=f"Model alias defined in {config_obj.MODELS_CONFIG_PATH}. Supports partial matching. (Default: bot's default or {config_obj.DEFAULT_MODEL_ALIAS or 'None'})")
@@ -992,14 +1015,19 @@ def main():
         sys.exit(0)
 
     elif getattr(args, 'user_profile', False):
-        show_user_profile(config_obj, args.user)
+        ensure_default_user(config_obj, args)
+        user_id = args.user if args.user else config_obj.DEFAULT_USER
+        show_user_profile(config_obj, user_id)
         sys.exit(0)
     
     elif getattr(args, 'user_profile_setup', False):
-        success = run_user_profile_setup(config_obj, args.user)
+        ensure_default_user(config_obj, args)
+        user_id = args.user if args.user else config_obj.DEFAULT_USER
+        success = run_user_profile_setup(config_obj, user_id)
         sys.exit(0 if success else 1)
     
     elif getattr(args, 'user_profile_set', None):
+        ensure_default_user(config_obj, args)
         if not has_database_credentials(config_obj):
             console.print("[yellow]User profiles require database connection.[/yellow]")
             console.print("[dim]Set ASK_LLM_POSTGRES_PASSWORD in ~/.config/ask-llm/.env[/dim]")
@@ -1010,6 +1038,7 @@ def main():
             field, value = args.user_profile_set.split("=", 1)
             field = field.strip()
             value = value.strip().strip('"').strip("'")
+            user_id = args.user if args.user else config_obj.DEFAULT_USER
             
             manager = ProfileManager(config_obj)
             
@@ -1027,7 +1056,7 @@ def main():
                 key = field
                 category = AttributeCategory.FACT
             
-            manager.set_attribute(EntityType.USER, args.user, category, key, value, source="explicit")
+            manager.set_attribute(EntityType.USER, user_id, category, key, value, source="explicit")
             console.print(f"[green]Set {category}.{key} = {value}[/green]")
         except ValueError:
             console.print("[red]Use format: --user-profile-set category.key=value[/red]")
@@ -1081,6 +1110,8 @@ def main():
             success = False
         sys.exit(0 if success else 1)
         return
+
+    ensure_default_user(config_obj, args)
     
     # Check if this is a history-only operation (doesn't need model)
     history_only = (args.delete_history or args.print_history is not None) and not args.question and not args.command
