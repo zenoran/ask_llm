@@ -67,6 +67,11 @@ def parse_arguments(config_obj: "Config") -> argparse.Namespace:
         action="store_true",
         help="List the current effective configuration settings."
     )
+    parser.add_argument(
+        "--config",
+        action="store_true",
+        help="Configure missing environment variables and validate connectivity."
+    )
     
     # Main query input
     parser.add_argument(

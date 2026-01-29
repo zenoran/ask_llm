@@ -6,6 +6,7 @@ from rich.console import Console
 from rich.prompt import Prompt
 from rich.columns import Columns
 from ask_llm.utils.config import Config, has_database_credentials
+from ask_llm.utils.env import load_env_file
 from ask_llm.utils.config import set_config_value
 from ask_llm.utils.input_handler import MultilineInputHandler
 from ask_llm.core import AskLLM
@@ -897,6 +898,7 @@ def parse_arguments(config_obj: Config) -> argparse.Namespace:
     parser.add_argument("--delete-model",type=str,metavar="ALIAS",help="Delete the specified model alias from the configuration file after confirmation.")
     parser.add_argument("--config-set", nargs=2, metavar=("KEY", "VALUE"), help="Set a configuration value (e.g., DEFAULT_MODEL_ALIAS) in the .env file.")
     parser.add_argument("--config-list", action="store_true", help="List the current effective configuration settings.")
+    parser.add_argument("--config", action="store_true", help="Configure missing environment variables and validate connectivity.")
     parser.add_argument("question", nargs="*", help="Your question for the LLM model")
     parser.add_argument("--verbose", action="store_true", help="Enable verbose output")
     parser.add_argument("-dh", "--delete-history", action="store_true", help="Clear chat history")
@@ -929,6 +931,7 @@ def main():
 
         # --- Instantiate Config --- 
         config_obj = Config()
+        load_env_file(Path(config_obj.model_config["env_file"]))
 
     except Exception as e:
         # Catch potential Pydantic validation errors or file issues during Config init
@@ -1015,6 +1018,10 @@ def main():
         console.print(f"\n[dim]To set a value: llm --config-set KEY value[/dim]")
         console.print(f"[dim]Or edit: {env_file_path}[/dim]")
         sys.exit(0)
+
+    elif getattr(args, 'config', False):
+        from ask_llm.cli.config_wizard import run_config_wizard
+        sys.exit(run_config_wizard(config_obj, console))
 
     elif getattr(args, 'status', False):
         show_status(config_obj, args)
