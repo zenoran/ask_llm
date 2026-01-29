@@ -27,12 +27,14 @@ console = Console()
 _service_client = None
 
 def get_service_client():
-    """Get or create the service client singleton."""
+    """Get or create the service client singleton, using configured SERVICE_HOST/PORT."""
     global _service_client
     if _service_client is None:
         try:
             from ask_llm.service import ServiceClient
-            _service_client = ServiceClient()
+            config = Config()
+            http_url = f"http://{config.SERVICE_HOST}:{config.SERVICE_PORT}"
+            _service_client = ServiceClient(http_url=http_url)
         except ImportError:
             _service_client = False  # Mark as unavailable
     return _service_client if _service_client else None
