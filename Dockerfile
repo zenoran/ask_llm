@@ -1,12 +1,20 @@
 # Multi-stage build for ask_llm
-FROM python:3.12-slim AS base
+FROM nvidia/cuda:13.1.1-devel-ubuntu24.04 AS base
+
+ENV DEBIAN_FRONTEND=noninteractive
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
+    python3 \
+    python3-venv \
+    python3-dev \
     curl \
     build-essential \
+    cmake \
+    ninja-build \
     libpq-dev \
     git \
+    cuda-compat-13-1 \
     && rm -rf /var/lib/apt/lists/*
 
 # Install uv
@@ -22,18 +30,33 @@ COPY src/ ./src/
 COPY install.sh server.sh ./
 RUN chmod +x install.sh server.sh
 
-# Create virtual environment and install dependencies
-# Use uv sync for all extras needed for service deployment
-RUN uv venv && \
-    . .venv/bin/activate && \
-    uv sync --extra mcp --extra service --extra search --extra memory
+# Create virtual environment and install dependencies using install.sh
+# install.sh handles CUDA-aware llama-cpp-python installation when available
+ARG WITH_CUDA=true
+ARG CUDA_ARCHS="120"
+ENV CUDA_ARCHS=$CUDA_ARCHS
+ENV LD_LIBRARY_PATH=/usr/local/cuda/compat:/usr/local/cuda/lib64:/usr/local/cuda/lib64/stubs
+ENV LIBRARY_PATH=/usr/local/cuda/compat:/usr/local/cuda/lib64/stubs
+RUN echo "/usr/local/cuda/compat" > /etc/ld.so.conf.d/cuda-compat.conf && ldconfig
+ENV UV_HTTP_TIMEOUT=300
+# Add CUDA stubs for linking during build (no GPU available in docker build)
+ENV LIBRARY_PATH=/usr/local/cuda/lib64/stubs:$LIBRARY_PATH
+RUN if [ "$WITH_CUDA" = "true" ]; then \
+        ./install.sh --dev; \
+    else \
+        ./install.sh --dev --no-cuda; \
+    fi
 
 # Runtime stage
-FROM python:3.12-slim AS runtime
+FROM nvidia/cuda:13.1.1-runtime-ubuntu24.04 AS runtime
+
+ENV DEBIAN_FRONTEND=noninteractive
 
 # Install runtime dependencies
 RUN apt-get update && apt-get install -y \
+    python3 \
     libpq5 \
+    libgomp1 \
     curl \
     && rm -rf /var/lib/apt/lists/*
 

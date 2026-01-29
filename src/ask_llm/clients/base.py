@@ -24,8 +24,18 @@ class LLMClient(ABC):
         self.model = model
         self.config = config
         self.bot_name: str | None = None  # Set by AskLLM after initialization
+        self.model_alias: str | None = None  # Set by AskLLM after initialization
         force_term = not self.config.PLAIN_OUTPUT
         self.console = Console(force_terminal=force_term)
+
+    def _format_panel_title(self, style: str = "green", is_service: bool = False) -> str:
+        """Format the panel title as 'bot_name [model] (service)'."""
+        display_name = self.bot_name or self.model
+        # Use \[ to escape opening bracket so Rich doesn't interpret [model] as markup
+        # Use dim style for model and service parts to emphasize bot name
+        model_part = f" [dim]\\[{self.model_alias}][/dim]" if self.model_alias else ""
+        service_part = " [dim](service)[/dim]" if is_service else ""
+        return f"[bold {style}]{display_name}[/bold {style}]{model_part}{service_part}"
 
     @abstractmethod
     def query(self, messages: List[Message], plaintext_output: bool = False, **kwargs: Any) -> str:
@@ -53,10 +63,9 @@ class LLMClient(ABC):
         self.console.print()
         self.console.print(f"[bold blue]User:[/bold blue] {content}")
 
-    def _print_assistant_message(self, content: str, panel_title: str | None = None, panel_border_style: str = "green", second_part: str | None = None):
+    def _print_assistant_message(self, content: str, panel_title: str | None = None, panel_border_style: str = "green", second_part: str | None = None, is_service: bool = False):
         """Prints assistant message. First part in panel, optional second part below."""
-        display_name = self.bot_name or self.model
-        title = panel_title or f"[bold {panel_border_style}]{display_name}[/bold {panel_border_style}]"
+        title = panel_title or self._format_panel_title(style=panel_border_style, is_service=is_service)
         assistant_panel = Panel(
             Markdown(content.strip()),
             title=title,
@@ -106,11 +115,11 @@ class LLMClient(ABC):
         plaintext_output: bool,
         panel_title: str | None = None,
         panel_border_style: str = "green",
+        is_service: bool = False,
     ) -> str:
         """Handles streaming output using shared streaming utilities."""
-        display_name = self.bot_name or self.model
-        title = panel_title or f"[bold {panel_border_style}]{display_name}[/bold {panel_border_style}]"
-        
+        title = panel_title or self._format_panel_title(style=panel_border_style, is_service=is_service)
+
         return render_streaming_response(
             stream_iterator=stream_iterator,
             console=self.console,

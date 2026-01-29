@@ -6,7 +6,6 @@ from rich.console import Console
 from rich.prompt import Prompt
 from rich.columns import Columns
 from ask_llm.utils.config import Config, has_database_credentials
-from ask_llm.utils.env import load_env_file
 from ask_llm.utils.config import set_config_value
 from ask_llm.utils.input_handler import MultilineInputHandler
 from ask_llm.core import AskLLM
@@ -28,14 +27,12 @@ console = Console()
 _service_client = None
 
 def get_service_client():
-    """Get or create the service client singleton, using configured SERVICE_HOST/PORT."""
+    """Get or create the service client singleton."""
     global _service_client
     if _service_client is None:
         try:
             from ask_llm.service import ServiceClient
-            config = Config()
-            http_url = f"http://{config.SERVICE_HOST}:{config.SERVICE_PORT}"
-            _service_client = ServiceClient(http_url=http_url)
+            _service_client = ServiceClient()
         except ImportError:
             _service_client = False  # Mark as unavailable
     return _service_client if _service_client else None
@@ -51,23 +48,23 @@ def query_via_service(
 ) -> bool:
     """
     Query via the background service if available.
-    
+
     Returns True if query was handled by service, False if service unavailable.
     """
     from rich.markdown import Markdown
     from rich.align import Align
-    
+
     client = get_service_client()
     if not client or not client.is_available():
         return False
-    
+
     messages = [{"role": "user", "content": prompt}]
-    
+
     # Get bot name for display
     bot_manager = BotManager(Config())
     bot = bot_manager.get_bot(bot_id) if bot_id else bot_manager.get_default_bot()
     bot_name = bot.name if bot else (bot_id or "Assistant")
-    
+
     # Determine panel style based on bot
     panel_styles = {
         "mira": ("magenta", "magenta"),
@@ -75,25 +72,61 @@ def query_via_service(
         "spark": ("yellow", "yellow"),
     }
     title_style, border_style = panel_styles.get(bot_id or "", ("green", "green"))
-    panel_title = f"[bold {title_style}]{bot_name}[/bold {title_style}]"
-    
+
+    def format_panel_title(actual_model: str | None) -> str:
+        """Format panel title with actual model used."""
+        # Use \[ to escape opening bracket so Rich doesn't interpret [model] as markup
+        # Use dim style for model and service parts to emphasize bot name
+        model_part = f" [dim]\\[{actual_model}][/dim]" if actual_model else ""
+        return f"[bold {title_style}]{bot_name}[/bold {title_style}]{model_part} [dim](service)[/dim]"
+
     try:
         if stream:
             # Stream response using shared streaming utilities
-            stream_iterator = client.chat_completion(
+            raw_iterator = client.chat_completion(
                 messages=messages,
                 model=model,
                 bot_id=bot_id,
                 user_id=user_id,
                 stream=True,
             )
-            
+
             # If service returned None (failed), fall back to local
-            if stream_iterator is None:
+            if raw_iterator is None:
                 return False
-            
+
+            # Extract model from first metadata chunk, then yield content
+            actual_model = model  # Default to requested model
+
+            def content_iterator() -> Iterator[str]:
+                nonlocal actual_model
+                for item in raw_iterator:
+                    if isinstance(item, dict) and "model" in item:
+                        # Metadata chunk with actual model
+                        actual_model = item["model"]
+                    elif isinstance(item, str):
+                        yield item
+
+            # We need to peek at the first item to get the model before rendering
+            content_iter = content_iterator()
+            first_content = None
+            try:
+                first_content = next(content_iter)
+            except StopIteration:
+                # No content at all
+                return False
+
+            # Now we have the actual_model set, create panel title
+            panel_title = format_panel_title(actual_model)
+
+            # Create a new iterator that includes the first content
+            def full_content_iterator() -> Iterator[str]:
+                if first_content:
+                    yield first_content
+                yield from content_iter
+
             result = render_streaming_response(
-                stream_iterator=stream_iterator,
+                stream_iterator=full_content_iterator(),
                 console=console,
                 panel_title=panel_title,
                 panel_border_style=border_style,
@@ -104,27 +137,34 @@ def query_via_service(
                 return False
             return True
         else:
-            response = client.chat_completion_full(
+            # Non-streaming: get full response to extract actual model
+            response = client.chat_completion(
                 messages=messages,
                 model=model,
                 bot_id=bot_id,
                 user_id=user_id,
+                stream=False,
             )
-            if response:
-                if plaintext_output:
-                    print(response)
-                else:
-                    # Use shared render function for split display
-                    render_complete_response(
-                        response=response,
-                        console=console,
-                        panel_title=panel_title,
-                        panel_border_style=border_style,
-                    )
-                return True
+            if response and "choices" in response:
+                content = response["choices"][0].get("message", {}).get("content")
+                actual_model = response.get("model", model)  # Use actual model from response
+                panel_title = format_panel_title(actual_model)
+
+                if content:
+                    if plaintext_output:
+                        print(content)
+                    else:
+                        # Use shared render function for split display
+                        render_complete_response(
+                            response=content,
+                            console=console,
+                            panel_title=panel_title,
+                            panel_border_style=border_style,
+                        )
+                    return True
     except Exception as e:
         logging.debug(f"Service query failed: {e}")
-    
+
     return False
 
 
@@ -165,13 +205,6 @@ def show_status(config: Config, args: argparse.Namespace | None = None):
         display = "<set>" if redact else str(config_value)
         return f"{label}={display} [dim](config)[/dim]"
 
-    def format_list(values: list[str], limit: int = 6) -> str:
-        if not values:
-            return "[dim]none[/dim]"
-        if len(values) <= limit:
-            return ", ".join(values)
-        return f"{', '.join(values[:limit])} [dim](+{len(values) - limit} more)[/dim]"
-
     # Check if USE_SERVICE is enabled
     use_service_env = os.getenv("ASK_LLM_USE_SERVICE", "").lower() in ("true", "1", "yes")
     use_service_config = getattr(config, "USE_SERVICE", False)
@@ -194,16 +227,6 @@ def show_status(config: Config, args: argparse.Namespace | None = None):
                 service_error = str(e)
     except Exception as e:
         service_error = str(e)
-
-    service_models = None
-    service_bots = None
-    if service_available and service_client:
-        try:
-            service_models = service_client.list_models()
-            service_bots = service_client.list_bots()
-        except Exception:
-            service_models = None
-            service_bots = None
 
     sections: list[tuple[str, Table]] = []
 
@@ -250,7 +273,6 @@ def show_status(config: Config, args: argparse.Namespace | None = None):
 
         # Determine effective bot
         bot_manager = BotManager(config)
-        local_bot_slugs = {b.slug for b in bot_manager.list_bots()}
         if args.bot:
             target_bot = bot_manager.get_bot(args.bot)
             if target_bot:
@@ -263,15 +285,6 @@ def show_status(config: Config, args: argparse.Namespace | None = None):
         else:
             target_bot = bot_manager.get_default_bot()
             bot_display = f"[bold cyan]{target_bot.name}[/bold cyan] ({target_bot.slug}) [dim]default[/dim]"
-        if target_bot and service_bots is not None:
-            local_has_bot = target_bot.slug in local_bot_slugs
-            service_has_bot = target_bot.slug in service_bots
-            if local_has_bot and service_has_bot:
-                bot_display = f"{bot_display} [dim](local + service)[/dim]"
-            elif service_has_bot:
-                bot_display = f"{bot_display} [dim](service)[/dim]"
-            elif local_has_bot:
-                bot_display = f"{bot_display} [dim](local)[/dim]"
         session_table.add_row("Bot", bot_display)
 
         # Determine effective model: -m flag > bot's default_model > config DEFAULT_MODEL_ALIAS
@@ -289,30 +302,17 @@ def show_status(config: Config, args: argparse.Namespace | None = None):
         if model_alias:
             # Check if model exists in defined models
             defined_models = config.defined_models.get("models", {})
-            local_has_model = model_alias in defined_models
-            service_has_model = service_models is not None and model_alias in service_models
-            model_scope = None
-            if service_models is not None:
-                if local_has_model and service_has_model:
-                    model_scope = "local + service"
-                elif service_has_model:
-                    model_scope = "service"
-                elif local_has_model:
-                    model_scope = "local"
             if model_alias in defined_models:
                 model_def = defined_models.get(model_alias, {})
                 model_type = model_def.get("type", "unknown")
-                scope_note = f", {model_scope}" if model_scope else ""
-                model_display = f"[bold green]{model_alias}[/bold green] [dim]({model_type}{scope_note})[/dim] {model_source}"
+                model_display = f"[bold green]{model_alias}[/bold green] [dim]({model_type})[/dim] {model_source}"
             else:
                 # Check for partial matches
                 matches = [a for a in defined_models.keys() if model_alias.lower() in a.lower()]
                 if matches:
-                    scope_note = f" [dim]({model_scope})[/dim]" if model_scope else ""
-                    model_display = f"[yellow]{model_alias}[/yellow] [dim](partial match: {matches[0]})[/dim]{scope_note} {model_source}"
+                    model_display = f"[yellow]{model_alias}[/yellow] [dim](partial match: {matches[0]})[/dim] {model_source}"
                 else:
-                    scope_note = f" [dim]({model_scope})[/dim]" if model_scope else ""
-                    model_display = f"[red]{model_alias}[/red] [dim](not found)[/dim]{scope_note} {model_source}"
+                    model_display = f"[red]{model_alias}[/red] [dim](not found)[/dim] {model_source}"
         else:
             model_display = "[dim]not set[/dim]"
         session_table.add_row("Model", model_display)
@@ -369,15 +369,8 @@ def show_status(config: Config, args: argparse.Namespace | None = None):
             service_table.add_row("Status", service_state)
             service_table.add_row("Version", f"{service_status.version or 'unknown'}")
             service_table.add_row("Tasks", f"{service_status.tasks_processed} processed / {service_status.tasks_pending} pending")
-            if getattr(service_status, "current_model", None):
-                service_table.add_row("Current Model", service_status.current_model)
             if service_status.models_loaded:
                 service_table.add_row("Models Loaded", ", ".join(service_status.models_loaded))
-            if getattr(service_status, "available_models", None):
-                service_table.add_row(
-                    "Models Available",
-                    f"{len(service_status.available_models)} total",
-                )
         elif service_available:
             service_table.add_row("Status", "[yellow]⚠ Service unhealthy[/yellow]")
         else:
@@ -509,16 +502,11 @@ def show_status(config: Config, args: argparse.Namespace | None = None):
     bot_manager = BotManager(config)
     default_bot = bot_manager.get_default_bot()
     local_bot = bot_manager.get_default_bot(local_mode=True)
-    local_bot_slugs = [b.slug for b in bot_manager.list_bots()]
     
     bots_table = make_table()
     bots_table.add_row("Default", f"[bold cyan]{default_bot.name}[/bold cyan] - {default_bot.description}")
     bots_table.add_row("Local (--local)", f"[bold yellow]{local_bot.name}[/bold yellow] - {local_bot.description}")
-    bots_table.add_row("Available", ", ".join(local_bot_slugs))
-    if service_bots is not None:
-        bots_table.add_row("Service", format_list(service_bots))
-        shared_bots = sorted(set(service_bots) & set(local_bot_slugs))
-        bots_table.add_row("Shared w/Local", format_list(shared_bots))
+    bots_table.add_row("Available", ", ".join(b.slug for b in bot_manager.list_bots()))
     sections.append(("Bots", bots_table))
 
     # --- Models Section ---
@@ -578,16 +566,6 @@ def show_status(config: Config, args: argparse.Namespace | None = None):
             models_table.add_row("Default Model", f"[red]✗ '{config.DEFAULT_MODEL_ALIAS}' not found in models.yaml[/red]")
     else:
         models_table.add_row("Default Model", "[yellow]⚠ Not configured[/yellow]")
-
-    if service_models is not None:
-        if service_models:
-            models_table.add_row("Service Models", f"[green]✓ {len(service_models)} available[/green]")
-            shared_models = sorted(set(service_models) & set(defined_models.keys()))
-            models_table.add_row("Shared w/Local", format_list(shared_models))
-        else:
-            models_table.add_row("Service Models", "[yellow]⚠ None reported[/yellow]")
-    elif service_available:
-        models_table.add_row("Service Models", "[yellow]⚠ Unable to fetch from service[/yellow]")
 
     # Models config file exists and is valid
     models_config_path = config.MODELS_CONFIG_PATH
@@ -708,7 +686,7 @@ def show_status(config: Config, args: argparse.Namespace | None = None):
             session_panel = Panel.fit(table, title=f"[bold]{title}[/bold]", border_style="grey39")
             service_title, service_table = sections[idx + 1]
             service_panel = Panel.fit(service_table, title=f"[bold]{service_title}[/bold]", border_style="grey39")
-            console.print(Columns([session_panel, service_panel], align="left", equal=False, expand=False))
+            console.print(Columns([session_panel, service_panel], equal=True, expand=True))
             console.print()
             idx += 2
             continue
@@ -960,7 +938,6 @@ def parse_arguments(config_obj: Config) -> argparse.Namespace:
     parser.add_argument("--delete-model",type=str,metavar="ALIAS",help="Delete the specified model alias from the configuration file after confirmation.")
     parser.add_argument("--config-set", nargs=2, metavar=("KEY", "VALUE"), help="Set a configuration value (e.g., DEFAULT_MODEL_ALIAS) in the .env file.")
     parser.add_argument("--config-list", action="store_true", help="List the current effective configuration settings.")
-    parser.add_argument("--config", action="store_true", help="Configure missing environment variables and validate connectivity.")
     parser.add_argument("question", nargs="*", help="Your question for the LLM model")
     parser.add_argument("--verbose", action="store_true", help="Enable verbose output")
     parser.add_argument("-dh", "--delete-history", action="store_true", help="Clear chat history")
@@ -993,7 +970,6 @@ def main():
 
         # --- Instantiate Config --- 
         config_obj = Config()
-        load_env_file(Path(config_obj.model_config["env_file"]))
 
     except Exception as e:
         # Catch potential Pydantic validation errors or file issues during Config init
@@ -1080,10 +1056,6 @@ def main():
         console.print(f"\n[dim]To set a value: llm --config-set KEY value[/dim]")
         console.print(f"[dim]Or edit: {env_file_path}[/dim]")
         sys.exit(0)
-
-    elif getattr(args, 'config', False):
-        from ask_llm.cli.config_wizard import run_config_wizard
-        sys.exit(run_config_wizard(config_obj, console))
 
     elif getattr(args, 'status', False):
         show_status(config_obj, args)

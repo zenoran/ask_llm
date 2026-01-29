@@ -3,6 +3,9 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        WITH_CUDA: ${WITH_CUDA:-true}
+        CUDA_ARCHS: ${CUDA_ARCHS:-120}
     container_name: ask_llm_app
     environment:
       # Database connection (external postgres.home server)

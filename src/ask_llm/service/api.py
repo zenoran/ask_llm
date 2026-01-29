@@ -28,6 +28,7 @@ from urllib.parse import urlparse
 from pydantic import BaseModel, Field
 
 from ..utils.config import Config
+from ..utils.paths import resolve_log_dir
 from ..bots import BotManager, get_bot, strip_emotes, StreamingEmoteFilter
 from .tasks import Task, TaskResult, TaskStatus, TaskType
 from .logging import (
@@ -69,9 +70,7 @@ def _write_debug_turn_log(
     to show the most recent request/response for review.
     """
     try:
-        # Use repo's .logs folder
-        repo_root = Path(__file__).parent.parent.parent.parent  # src/ask_llm/service -> repo root
-        logs_dir = repo_root / ".logs"
+        logs_dir = resolve_log_dir()
         logs_dir.mkdir(parents=True, exist_ok=True)
 
         log_file = logs_dir / "debug_turn.txt"

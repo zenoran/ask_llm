@@ -40,8 +40,6 @@ class ServiceStatus:
     tasks_processed: int = 0
     tasks_pending: int = 0
     models_loaded: list[str] | None = None
-    current_model: str | None = None
-    available_models: list[str] | None = None
     
     @property
     def healthy(self) -> bool:
@@ -89,7 +87,7 @@ class ServiceClient:
         Uses raw TCP socket connect which fails immediately on connection refused,
         avoiding HTTP timeout delays.
         """
-        # Try Unix socket first (Linux/macOS) - only for localhost
+        # Try Unix socket first (Linux/macOS)
         if self.socket_path.exists():
             try:
                 sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -101,23 +99,17 @@ class ServiceClient:
             except (socket.error, OSError, BlockingIOError) as e:
                 logger.debug(f"Unix socket unavailable: {e}")
         
-        # Parse host and port from http_url
-        from urllib.parse import urlparse
-        parsed = urlparse(self.http_url)
-        host = parsed.hostname or "127.0.0.1"
-        port = parsed.port or DEFAULT_HTTP_PORT
-        
         # Try raw TCP connect (fast - fails immediately if port not listening)
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(0.5)  # 500ms timeout for remote hosts
-            result = sock.connect_ex((host, port))
+            sock.settimeout(0.1)  # 100ms timeout max
+            result = sock.connect_ex(("127.0.0.1", DEFAULT_HTTP_PORT))
             sock.close()
             if result == 0:
-                logger.debug(f"Background service available via TCP {host}:{port}")
+                logger.debug(f"Background service available via TCP port {DEFAULT_HTTP_PORT}")
                 return True
             else:
-                logger.debug(f"TCP {host}:{port} not listening (errno={result})")
+                logger.debug(f"TCP port {DEFAULT_HTTP_PORT} not listening (errno={result})")
         except Exception as e:
             logger.debug(f"TCP check failed: {e}")
         
@@ -137,8 +129,6 @@ class ServiceClient:
                 tasks_processed=response.get("tasks_processed", 0),
                 tasks_pending=response.get("tasks_pending", 0),
                 models_loaded=response.get("models_loaded"),
-                current_model=response.get("current_model"),
-                available_models=response.get("available_models"),
             )
         except Exception as e:
             if not silent:
@@ -243,49 +233,26 @@ class ServiceClient:
         except Exception as e:
             logger.warning(f"Chat completion via service failed: {e}")
             return None
-
-    def list_models(self) -> list[str] | None:
-        """List models exposed by the service (via /v1/models)."""
-        if not self.is_available():
-            return None
-
-        try:
-            response = self._request("GET", "/v1/models")
-            data = response.get("data", [])
-            return sorted({item.get("id") for item in data if item.get("id")})
-        except Exception as e:
-            logger.debug(f"Failed to list service models: {e}")
-            return None
-
-    def list_bots(self) -> list[str] | None:
-        """List bots exposed by the service (via /v1/bots)."""
-        if not self.is_available():
-            return None
-
-        try:
-            response = self._request("GET", "/v1/bots")
-            data = response.get("data", [])
-            return sorted({item.get("slug") for item in data if item.get("slug")})
-        except Exception as e:
-            logger.debug(f"Failed to list service bots: {e}")
-            return None
     
     def _stream_chat_completion(self, payload: dict):
         """Stream chat completion from the service.
-        
+
         Yields content chunks. If the request fails, yields nothing and logs error.
+        The first yielded item is a dict with metadata: {"model": "actual_model_used"}.
+        Subsequent yields are content strings.
         """
         import urllib.request
         import urllib.error
-        
+
         url = f"{self.http_url}/v1/chat/completions"
         headers = {"Content-Type": "application/json"}
         body = json.dumps(payload).encode()
-        
+
         req = urllib.request.Request(url, data=body, headers=headers, method="POST")
-        
+
         try:
             with urllib.request.urlopen(req, timeout=60.0) as resp:
+                first_chunk = True
                 for line in resp:
                     line = line.decode().strip()
                     if line.startswith("data: "):
@@ -294,6 +261,12 @@ class ServiceClient:
                             break
                         try:
                             chunk = json.loads(data)
+                            # On first chunk, yield metadata with actual model used
+                            if first_chunk:
+                                actual_model = chunk.get("model")
+                                if actual_model:
+                                    yield {"model": actual_model}
+                                first_chunk = False
                             delta = chunk.get("choices", [{}])[0].get("delta", {})
                             content = delta.get("content", "")
                             if content:
@@ -493,26 +466,45 @@ class ServiceClient:
     def generate_embedding(self, text: str) -> list[float] | None:
         """
         Generate an embedding using the service's loaded model.
-        
+
         Args:
             text: Text to generate embedding for
-        
+
         Returns:
             Embedding vector, or None if service unavailable
         """
         if not self.is_available():
             return None
-        
+
         try:
             response = self._request("POST", "/v1/memory/embedding", data={
                 "text": text,
             })
-            
+
             if response and "embedding" in response:
                 return response["embedding"]
         except Exception as e:
             logger.warning(f"Embedding generation via service failed: {e}")
-        
+
+        return None
+
+    def list_models(self) -> list[str] | None:
+        """
+        List available models from the service.
+
+        Returns:
+            List of model IDs, or None if service unavailable
+        """
+        if not self.is_available():
+            return None
+
+        try:
+            response = self._request("GET", "/v1/models")
+            if response and "data" in response:
+                return [m.get("id") for m in response["data"] if m.get("id")]
+        except Exception as e:
+            logger.warning(f"List models via service failed: {e}")
+
         return None
 
 
@@ -521,11 +513,8 @@ _service_client: ServiceClient | None = None
 
 
 def get_service_client() -> ServiceClient:
-    """Get the global service client instance, using configured SERVICE_HOST/PORT."""
+    """Get the global service client instance."""
     global _service_client
     if _service_client is None:
-        from ask_llm.utils.config import Config
-        config = Config()
-        http_url = f"http://{config.SERVICE_HOST}:{config.SERVICE_PORT}"
-        _service_client = ServiceClient(http_url=http_url)
+        _service_client = ServiceClient()
     return _service_client

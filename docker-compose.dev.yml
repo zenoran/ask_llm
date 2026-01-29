@@ -11,6 +11,8 @@ services:
       - ./config:/root/.config/ask-llm
       - ./.logs:/app/.logs
       - ${MODELS_PATH:-./models}:/app/models
+      # Share host's GGUF model cache to avoid duplicate downloads
+      - ~/.cache/ask_llm/models:/root/.cache/ask_llm/models
 
     # Restart on failure for auto-reload
     restart: on-failure

@@ -1,6 +1,6 @@
 # ask_llm
 
-CLI tool for querying LLMs from your terminal. Supports OpenAI, Ollama, local GGUF models, and HuggingFace.
+CLI tool for querying LLMs from your terminal. Supports OpenAI, Ollama-compatible APIs, and local GGUF models.
 
 ## Install
 
@@ -11,11 +11,20 @@ curl -fsSL https://raw.githubusercontent.com/zenoran/ask_llm/master/install.sh |
 # With local GGUF support (CUDA)
 curl -fsSL https://raw.githubusercontent.com/zenoran/ask_llm/master/install.sh | bash -s -- --with-llama
 
-# With HuggingFace transformers
-curl -fsSL https://raw.githubusercontent.com/zenoran/ask_llm/master/install.sh | bash -s -- --with-hf
+# With web search (DuckDuckGo + Tavily)
+curl -fsSL https://raw.githubusercontent.com/zenoran/ask_llm/master/install.sh | bash -s -- --with-search
+
+# With background service
+curl -fsSL https://raw.githubusercontent.com/zenoran/ask_llm/master/install.sh | bash -s -- --with-service
 
 # Everything
 curl -fsSL https://raw.githubusercontent.com/zenoran/ask_llm/master/install.sh | bash -s -- --all
+
+# Development: editable install from local path
+./install.sh --local .
+
+# Development: sync .venv with all optional deps
+./install.sh --dev
 ```
 
 ## Setup
@@ -55,12 +64,16 @@ llm --list-bots                       # List available bots
 
 ## Features
 
-- Multiple LLM providers (OpenAI, Ollama, GGUF, HuggingFace)
+- Multiple LLM providers (OpenAI, Ollama-compatible, local GGUF)
 - Bot personalities with isolated memory
 - PostgreSQL + pgvector for semantic memory search
+- Web search integration (DuckDuckGo, Tavily)
+- Tool system for extensible capabilities
+- MCP (Model Context Protocol) memory server
 - Streaming responses with rich formatting
 - Conversation history with configurable duration
 - Model aliases for quick switching
+- Docker deployment support
 
 ## Commands
 
@@ -69,25 +82,48 @@ llm --list-bots                       # List available bots
 | `llm` | Main CLI for querying LLMs |
 | `ask-llm` | Alias for `llm` |
 | `llm-service` | Background service with OpenAI-compatible API |
-| `ask-llm-service` | Alias for `llm-service` |
+| `llm-mcp-server` | MCP memory server (used by server.sh) |
+| `./server.sh` | Manage MCP + LLM service stack (development) |
+| `./start.sh` | Docker container management |
 
 ### Background Service
 
-The optional background service provides:
-- Async task processing (memory extraction, embeddings)
-- OpenAI-compatible API at `http://localhost:8642/v1/chat/completions`
-- Interactive API docs at `http://localhost:8642/docs`
+The service stack consists of two components:
+- **MCP Memory Server** (`llm-mcp-server`) - Model Context Protocol server for memory operations (port 8001)
+- **LLM Service** (`llm-service`) - OpenAI-compatible API with async task processing (port 8642)
 
 ```bash
-# Install with service support
-pip install ask-llm[service]
-# or
-./install.sh --with-service
+# Development: Use server.sh to manage both services
+./server.sh start              # Start MCP + LLM service
+./server.sh stop               # Stop both services
+./server.sh restart            # Restart both
+./server.sh status             # Show status and ports
+./server.sh start --dev        # Dev mode with auto-reload
+./server.sh start --stdout     # Logs to stdout instead of files
 
-# Run the service
+# Or run services individually
 llm-service                    # Default port 8642
 llm-service --port 8080        # Custom port
 llm-service --host 0.0.0.0     # Listen on all interfaces
+```
+
+### Docker Deployment
+
+```bash
+# Production mode (source baked into image)
+./start.sh up                  # Start containers
+./start.sh down                # Stop containers
+./start.sh rebuild             # Rebuild and restart
+
+# Development mode (live source mounting)
+./start.sh dev                 # Mount ./src for live changes
+./start.sh restart             # Restart after code changes
+
+# Utilities
+./start.sh logs                # Follow container logs
+./start.sh status              # Show container status
+./start.sh shell               # Open bash in container
+./start.sh exec llm --status   # Run command in container
 ```
 
 ## Development
@@ -96,8 +132,18 @@ llm-service --host 0.0.0.0     # Listen on all interfaces
 git clone https://github.com/zenoran/ask_llm.git
 cd ask_llm
 uv venv && source .venv/bin/activate
-uv pip install -e ".[dev]"     # Install with dev extras
-uv pip install -e ".[service]" # Include background service
+
+# Sync all dependencies (recommended)
+./install.sh --dev
+
+# Or manually install extras
+uv sync --extra mcp --extra service --extra search --extra memory
+
+# Run the service stack
+./server.sh start --dev        # With auto-reload on code changes
+
+# Or use Docker
+./start.sh dev                 # Live source mounting
 ```
 
 ## Architecture
@@ -109,9 +155,25 @@ uv pip install -e ".[service]" # Include background service
 │                                 CLI (llm)                                    │
 │  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────┐ │
 │  │   Prompt    │→ │  Bot/User   │→ │   Memory    │→ │    LLM Client       │ │
-│  │   Input     │  │   Context   │  │  Retrieval  │  │ (OpenAI/GGUF/Ollama)│ │
+│  │   Input     │  │   Context   │  │  Retrieval  │  │  (OpenAI/GGUF)      │ │
 │  └─────────────┘  └─────────────┘  └─────────────┘  └─────────────────────┘ │
 │                                         ↓                      ↓            │
+│                         ┌───────────────────────────────────────────────┐   │
+│                         │              Tools / Search                   │   │
+│                         │  ┌─────────────┐  ┌─────────────────────────┐ │   │
+│                         │  │ DuckDuckGo  │  │  Tavily (optional)      │ │   │
+│                         │  └─────────────┘  └─────────────────────────┘ │   │
+│                         └───────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                         │
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         Service Stack (server.sh)                            │
+│  ┌─────────────────────────────┐  ┌─────────────────────────────────────┐   │
+│  │   MCP Memory Server (:8001) │  │      LLM Service (:8642)            │   │
+│  │   - Memory operations       │←→│   - OpenAI-compatible API           │   │
+│  │   - Fact extraction         │  │   - Async task processing           │   │
+│  └─────────────────────────────┘  └─────────────────────────────────────┘   │
+│                                         ↓                                    │
 │                              ┌──────────────────────────────────────────┐   │
 │                              │         PostgreSQL + pgvector           │   │
 │                              │  ┌─────────────┐  ┌─────────────────┐   │   │
@@ -180,13 +242,15 @@ The memory system is designed to evolve with you, not fossilize into static fact
 
 | Component | Location | Purpose |
 |-----------|----------|---------|
-| `cli.py` | Entry point | Argument parsing, query routing |
-| `core.py` | `AskLLM` class | Orchestrates clients, bots, memory |
+| `cli/` | CLI package | `app.py` (main), `parser.py`, `commands/` subcommands |
+| `core/` | Core package | `base.py` (BaseAskLLM), `pipeline.py`, `prompt_builder.py` |
 | `bots.py` | Bot manager | Personality loading, system prompts |
-| `clients/` | LLM clients | OpenAI, Ollama, GGUF, HuggingFace |
-| `memory/postgresql.py` | Memory backend | pgvector storage, decay, search |
-| `memory/embeddings.py` | Local embeddings | sentence-transformers (MiniLM) |
-| `memory/extraction/` | Fact extraction | LLM-based memory distillation |
+| `profiles.py` | Profile manager | User/bot profiles with entity types and attributes |
+| `clients/` | LLM clients | `openai_client.py`, `llama_cpp_client.py` |
+| `tools/` | Tool system | `definitions.py`, `executor.py`, `loop.py`, `parser.py` |
+| `search/` | Web search | `ddgs_client.py` (DuckDuckGo), `tavily_client.py` |
+| `memory/` | Memory backend | `postgresql.py`, `embeddings.py`, `extraction/` |
+| `memory_server/` | MCP server | Model Context Protocol memory service |
 | `service/` | Background API | FastAPI, async tasks, OpenAI-compat |
 
 ### Configuration

@@ -30,6 +30,7 @@ from ..memory_server.client import MemoryClient, get_memory_client
 from ..search import get_search_client, SearchClient
 from ..tools import get_tools_prompt, query_with_tools
 from ..utils.config import Config, has_database_credentials
+from ..utils.paths import resolve_log_dir
 from ..utils.history import HistoryManager, Message
 from .pipeline import RequestPipeline, PipelineContext
 from .prompt_builder import PromptBuilder, SectionPosition
@@ -140,7 +141,8 @@ class BaseAskLLM(ABC):
         
         self.bot = bot
         self.client.bot_name = self.bot.name
-        
+        self.client.model_alias = self.resolved_model_alias
+
         if self.verbose:
             logger.info(f"Using bot: {self.bot.name} ({self.bot_id})")
     
@@ -519,9 +521,7 @@ class BaseAskLLM(ABC):
             assistant_response: The assistant's response
         """
         try:
-            # Use repo's .logs folder
-            repo_root = Path(__file__).parent.parent.parent.parent  # src/ask_llm/core -> repo root
-            logs_dir = repo_root / ".logs"
+            logs_dir = resolve_log_dir()
             logs_dir.mkdir(parents=True, exist_ok=True)
 
             log_file = logs_dir / "debug_turn.txt"

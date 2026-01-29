@@ -219,7 +219,9 @@ except ImportError:
                     echo -e "${YELLOW}  CUDA version: $CUDA_VERSION${NC}"
                 fi
                 # Export CMAKE_ARGS for the build process
-                export CMAKE_ARGS="-DGGML_CUDA=on -DCMAKE_CUDA_ARCHITECTURES=60;70;75;80;86;89;90"
+                # Default to modern CUDA arch list; override with CUDA_ARCHS if needed.
+                CUDA_ARCHS="${CUDA_ARCHS:-75;80;86;89;90;120}"
+                export CMAKE_ARGS="-DGGML_CUDA=on -DCMAKE_CUDA_ARCHITECTURES=${CUDA_ARCHS}"
                 if [ "$FORCE_REBUILD" = true ]; then
                     uv pip install llama-cpp-python --reinstall --no-cache-dir
                 else
@@ -351,9 +353,10 @@ if [ "$INSTALL_LLAMA" = true ]; then
             if [ -n "$CUDA_VERSION" ]; then
                 echo -e "${YELLOW}  CUDA version: $CUDA_VERSION${NC}"
             fi
-            # Build for common architectures (Pascal through Hopper)
-            # sm_60=Pascal, sm_70=Volta, sm_75=Turing, sm_80=Ampere, sm_86=Ampere, sm_89=Ada, sm_90=Hopper
-            CMAKE_ARGS="-DGGML_CUDA=on -DCMAKE_CUDA_ARCHITECTURES=60;70;75;80;86;89;90" \
+            # Build for common modern architectures (Turing through Blackwell)
+            # sm_75=Turing, sm_80=Ampere, sm_86=Ampere, sm_89=Ada, sm_90=Hopper, sm_120=Blackwell
+            CUDA_ARCHS="${CUDA_ARCHS:-75;80;86;89;90;120}" \
+            CMAKE_ARGS="-DGGML_CUDA=on -DCMAKE_CUDA_ARCHITECTURES=${CUDA_ARCHS}" \
                 pipx runpip ask-llm install llama-cpp-python --force-reinstall --no-cache-dir
         else
             echo -e "${YELLOW}  No CUDA detected, installing CPU-only version...${NC}"
