@@ -40,6 +40,8 @@ class ServiceStatus:
     tasks_processed: int = 0
     tasks_pending: int = 0
     models_loaded: list[str] | None = None
+    current_model: str | None = None
+    available_models: list[str] | None = None
     
     @property
     def healthy(self) -> bool:
@@ -135,6 +137,8 @@ class ServiceClient:
                 tasks_processed=response.get("tasks_processed", 0),
                 tasks_pending=response.get("tasks_pending", 0),
                 models_loaded=response.get("models_loaded"),
+                current_model=response.get("current_model"),
+                available_models=response.get("available_models"),
             )
         except Exception as e:
             if not silent:
@@ -238,6 +242,32 @@ class ServiceClient:
                 return response
         except Exception as e:
             logger.warning(f"Chat completion via service failed: {e}")
+            return None
+
+    def list_models(self) -> list[str] | None:
+        """List models exposed by the service (via /v1/models)."""
+        if not self.is_available():
+            return None
+
+        try:
+            response = self._request("GET", "/v1/models")
+            data = response.get("data", [])
+            return sorted({item.get("id") for item in data if item.get("id")})
+        except Exception as e:
+            logger.debug(f"Failed to list service models: {e}")
+            return None
+
+    def list_bots(self) -> list[str] | None:
+        """List bots exposed by the service (via /v1/bots)."""
+        if not self.is_available():
+            return None
+
+        try:
+            response = self._request("GET", "/v1/bots")
+            data = response.get("data", [])
+            return sorted({item.get("slug") for item in data if item.get("slug")})
+        except Exception as e:
+            logger.debug(f"Failed to list service bots: {e}")
             return None
     
     def _stream_chat_completion(self, payload: dict):

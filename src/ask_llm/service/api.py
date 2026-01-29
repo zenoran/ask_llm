@@ -28,7 +28,7 @@ from urllib.parse import urlparse
 from pydantic import BaseModel, Field
 
 from ..utils.config import Config
-from ..bots import get_bot, strip_emotes, StreamingEmoteFilter
+from ..bots import BotManager, get_bot, strip_emotes, StreamingEmoteFilter
 from .tasks import Task, TaskResult, TaskStatus, TaskType
 from .logging import (
     ServiceLogger,
@@ -253,6 +253,19 @@ class ModelsResponse(BaseModel):
     """Response for /v1/models endpoint."""
     object: str = "list"
     data: list[ModelInfo]
+
+
+class BotInfo(BaseModel):
+    """Bot information for /v1/bots endpoint."""
+    slug: str
+    name: str
+    description: str | None = None
+
+
+class BotsResponse(BaseModel):
+    """Response for /v1/bots endpoint."""
+    object: str = "list"
+    data: list[BotInfo]
 
 
 class TaskSubmitRequest(BaseModel):
@@ -1610,6 +1623,17 @@ try:
             for alias in service._available_models
         ]
         return ModelsResponse(data=models)
+
+    @app.get("/v1/bots", response_model=BotsResponse, tags=["System"])
+    async def list_bots():
+        """List available bots configured on the service."""
+        service = get_service()
+        bot_manager = BotManager(service.config)
+        bots = [
+            BotInfo(slug=bot.slug, name=bot.name, description=bot.description)
+            for bot in bot_manager.list_bots()
+        ]
+        return BotsResponse(data=bots)
     
     @app.post("/v1/chat/completions", tags=["OpenAI Compatible"])
     async def chat_completions(request: ChatCompletionRequest):

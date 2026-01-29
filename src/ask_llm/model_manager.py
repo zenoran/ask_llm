@@ -127,24 +127,63 @@ class ModelManager:
         console.print(f"Available model aliases from [cyan]{self.config_path}[/cyan]:")
         defined_models = self.models_data.get("models", {})
         available_aliases = set(self.config.get_model_options())
+        local_aliases = set(defined_models.keys())
+        service_available = False
+        service_models: list[str] = []
+        service_url: str | None = None
+        try:
+            from ask_llm.service.client import get_service_client
+
+            service_client = get_service_client()
+            service_url = service_client.http_url
+            if service_client.is_available(force_check=True):
+                service_available = True
+                service_models = service_client.list_models() or []
+        except Exception:
+            service_available = False
         if not defined_models:
             console.print("  [yellow]No models defined in the configuration file.[/yellow]")
-            return
-        models_by_type = defaultdict(list)
-        for alias, info in defined_models.items():
-            models_by_type[info.get("type", PROVIDER_UNKNOWN)].append(alias)
-        for mtype in sorted(models_by_type):
-            title = f"[bold magenta]{mtype.upper()} Models[/bold magenta]"
+        if hasattr(console, 'rule'):
+            console.rule("[bold green]Local Models (config)[/bold green]")
+        else:
+            console.print(Rule("[bold green]Local Models (config)[/bold green]"))
+        if not defined_models:
+            console.print()
+        else:
+            models_by_type = defaultdict(list)
+            for alias, info in defined_models.items():
+                models_by_type[info.get("type", PROVIDER_UNKNOWN)].append(alias)
+            for mtype in sorted(models_by_type):
+                title = f"[bold magenta]{mtype.upper()} Models[/bold magenta]"
+                if hasattr(console, 'rule'):
+                    console.rule(title)
+                else:
+                    console.print(Rule(title))
+                for alias in sorted(models_by_type[mtype]):
+                    info = defined_models[alias]
+                    details = self._format_model_details(mtype, info)
+                    marker = "[green]✓[/green]" if alias in available_aliases else "[red]✗[/red]"
+                    note = self._get_dependency_note(mtype) if alias not in available_aliases else ""
+                    console.print(f"  {marker} [bold][bright_blue]{alias}[/bright_blue][/bold]: {details}{note}")
+                console.print()
+        if service_available or service_url:
             if hasattr(console, 'rule'):
-                console.rule(title)
+                console.rule("[bold cyan]Service Models[/bold cyan]")
             else:
-                console.print(Rule(title))
-            for alias in sorted(models_by_type[mtype]):
-                info = defined_models[alias]
-                details = self._format_model_details(mtype, info)
-                marker = "[green]✓[/green]" if alias in available_aliases else "[red]✗[/red]"
-                note = self._get_dependency_note(mtype) if alias not in available_aliases else ""
-                console.print(f"  {marker} [bold][bright_blue]{alias}[/bright_blue][/bold]: {details}{note}")
+                console.print(Rule("[bold cyan]Service Models[/bold cyan]"))
+            if service_available:
+                if service_models:
+                    for model_id in sorted(service_models):
+                        overlap_note = " [dim](also local config)[/dim]" if model_id in local_aliases else ""
+                        console.print(f"  [bold][bright_blue]{model_id}[/bright_blue][/bold]{overlap_note}")
+                else:
+                    console.print("  [yellow]No models reported by service.[/yellow]")
+                if service_url:
+                    console.print(f"  [dim]Source: {service_url}[/dim]")
+            else:
+                console.print("  [dim]Service not reachable.[/dim]")
+                if service_url:
+                    console.print(f"  [dim]Expected at: {service_url}[/dim]")
             console.print()
         if hasattr(console, 'rule'):
             console.rule(style="#777777")
@@ -534,4 +573,3 @@ def _parse_iso(ts_str: str) -> Optional[datetime]:
         return datetime.fromisoformat(ts_str.replace('Z', '+00:00'))
     except Exception:
         return None
-

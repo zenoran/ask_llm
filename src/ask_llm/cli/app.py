@@ -165,6 +165,13 @@ def show_status(config: Config, args: argparse.Namespace | None = None):
         display = "<set>" if redact else str(config_value)
         return f"{label}={display} [dim](config)[/dim]"
 
+    def format_list(values: list[str], limit: int = 6) -> str:
+        if not values:
+            return "[dim]none[/dim]"
+        if len(values) <= limit:
+            return ", ".join(values)
+        return f"{', '.join(values[:limit])} [dim](+{len(values) - limit} more)[/dim]"
+
     # Check if USE_SERVICE is enabled
     use_service_env = os.getenv("ASK_LLM_USE_SERVICE", "").lower() in ("true", "1", "yes")
     use_service_config = getattr(config, "USE_SERVICE", False)
@@ -187,6 +194,16 @@ def show_status(config: Config, args: argparse.Namespace | None = None):
                 service_error = str(e)
     except Exception as e:
         service_error = str(e)
+
+    service_models = None
+    service_bots = None
+    if service_available and service_client:
+        try:
+            service_models = service_client.list_models()
+            service_bots = service_client.list_bots()
+        except Exception:
+            service_models = None
+            service_bots = None
 
     sections: list[tuple[str, Table]] = []
 
@@ -233,6 +250,7 @@ def show_status(config: Config, args: argparse.Namespace | None = None):
 
         # Determine effective bot
         bot_manager = BotManager(config)
+        local_bot_slugs = {b.slug for b in bot_manager.list_bots()}
         if args.bot:
             target_bot = bot_manager.get_bot(args.bot)
             if target_bot:
@@ -245,6 +263,15 @@ def show_status(config: Config, args: argparse.Namespace | None = None):
         else:
             target_bot = bot_manager.get_default_bot()
             bot_display = f"[bold cyan]{target_bot.name}[/bold cyan] ({target_bot.slug}) [dim]default[/dim]"
+        if target_bot and service_bots is not None:
+            local_has_bot = target_bot.slug in local_bot_slugs
+            service_has_bot = target_bot.slug in service_bots
+            if local_has_bot and service_has_bot:
+                bot_display = f"{bot_display} [dim](local + service)[/dim]"
+            elif service_has_bot:
+                bot_display = f"{bot_display} [dim](service)[/dim]"
+            elif local_has_bot:
+                bot_display = f"{bot_display} [dim](local)[/dim]"
         session_table.add_row("Bot", bot_display)
 
         # Determine effective model: -m flag > bot's default_model > config DEFAULT_MODEL_ALIAS
@@ -262,17 +289,30 @@ def show_status(config: Config, args: argparse.Namespace | None = None):
         if model_alias:
             # Check if model exists in defined models
             defined_models = config.defined_models.get("models", {})
+            local_has_model = model_alias in defined_models
+            service_has_model = service_models is not None and model_alias in service_models
+            model_scope = None
+            if service_models is not None:
+                if local_has_model and service_has_model:
+                    model_scope = "local + service"
+                elif service_has_model:
+                    model_scope = "service"
+                elif local_has_model:
+                    model_scope = "local"
             if model_alias in defined_models:
                 model_def = defined_models.get(model_alias, {})
                 model_type = model_def.get("type", "unknown")
-                model_display = f"[bold green]{model_alias}[/bold green] [dim]({model_type})[/dim] {model_source}"
+                scope_note = f", {model_scope}" if model_scope else ""
+                model_display = f"[bold green]{model_alias}[/bold green] [dim]({model_type}{scope_note})[/dim] {model_source}"
             else:
                 # Check for partial matches
                 matches = [a for a in defined_models.keys() if model_alias.lower() in a.lower()]
                 if matches:
-                    model_display = f"[yellow]{model_alias}[/yellow] [dim](partial match: {matches[0]})[/dim] {model_source}"
+                    scope_note = f" [dim]({model_scope})[/dim]" if model_scope else ""
+                    model_display = f"[yellow]{model_alias}[/yellow] [dim](partial match: {matches[0]})[/dim]{scope_note} {model_source}"
                 else:
-                    model_display = f"[red]{model_alias}[/red] [dim](not found)[/dim] {model_source}"
+                    scope_note = f" [dim]({model_scope})[/dim]" if model_scope else ""
+                    model_display = f"[red]{model_alias}[/red] [dim](not found)[/dim]{scope_note} {model_source}"
         else:
             model_display = "[dim]not set[/dim]"
         session_table.add_row("Model", model_display)
@@ -329,8 +369,15 @@ def show_status(config: Config, args: argparse.Namespace | None = None):
             service_table.add_row("Status", service_state)
             service_table.add_row("Version", f"{service_status.version or 'unknown'}")
             service_table.add_row("Tasks", f"{service_status.tasks_processed} processed / {service_status.tasks_pending} pending")
+            if getattr(service_status, "current_model", None):
+                service_table.add_row("Current Model", service_status.current_model)
             if service_status.models_loaded:
                 service_table.add_row("Models Loaded", ", ".join(service_status.models_loaded))
+            if getattr(service_status, "available_models", None):
+                service_table.add_row(
+                    "Models Available",
+                    f"{len(service_status.available_models)} total",
+                )
         elif service_available:
             service_table.add_row("Status", "[yellow]⚠ Service unhealthy[/yellow]")
         else:
@@ -462,11 +509,16 @@ def show_status(config: Config, args: argparse.Namespace | None = None):
     bot_manager = BotManager(config)
     default_bot = bot_manager.get_default_bot()
     local_bot = bot_manager.get_default_bot(local_mode=True)
+    local_bot_slugs = [b.slug for b in bot_manager.list_bots()]
     
     bots_table = make_table()
     bots_table.add_row("Default", f"[bold cyan]{default_bot.name}[/bold cyan] - {default_bot.description}")
     bots_table.add_row("Local (--local)", f"[bold yellow]{local_bot.name}[/bold yellow] - {local_bot.description}")
-    bots_table.add_row("Available", ", ".join(b.slug for b in bot_manager.list_bots()))
+    bots_table.add_row("Available", ", ".join(local_bot_slugs))
+    if service_bots is not None:
+        bots_table.add_row("Service", format_list(service_bots))
+        shared_bots = sorted(set(service_bots) & set(local_bot_slugs))
+        bots_table.add_row("Shared w/Local", format_list(shared_bots))
     sections.append(("Bots", bots_table))
 
     # --- Models Section ---
@@ -526,6 +578,16 @@ def show_status(config: Config, args: argparse.Namespace | None = None):
             models_table.add_row("Default Model", f"[red]✗ '{config.DEFAULT_MODEL_ALIAS}' not found in models.yaml[/red]")
     else:
         models_table.add_row("Default Model", "[yellow]⚠ Not configured[/yellow]")
+
+    if service_models is not None:
+        if service_models:
+            models_table.add_row("Service Models", f"[green]✓ {len(service_models)} available[/green]")
+            shared_models = sorted(set(service_models) & set(defined_models.keys()))
+            models_table.add_row("Shared w/Local", format_list(shared_models))
+        else:
+            models_table.add_row("Service Models", "[yellow]⚠ None reported[/yellow]")
+    elif service_available:
+        models_table.add_row("Service Models", "[yellow]⚠ Unable to fetch from service[/yellow]")
 
     # Models config file exists and is valid
     models_config_path = config.MODELS_CONFIG_PATH
