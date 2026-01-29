@@ -4,6 +4,7 @@ import traceback
 import sys  # Import sys for exit codes
 from rich.console import Console
 from rich.prompt import Prompt
+from rich.columns import Columns
 from ask_llm.utils.config import Config, has_database_credentials
 from ask_llm.utils.config import set_config_value
 from ask_llm.utils.input_handler import MultilineInputHandler
@@ -635,9 +636,20 @@ def show_status(config: Config, args: argparse.Namespace | None = None):
 
     sections.append(("Memory", memory_table))
 
-    for title, table in sections:
+    idx = 0
+    while idx < len(sections):
+        title, table = sections[idx]
+        if title == "Current Session" and idx + 1 < len(sections) and sections[idx + 1][0] == "Service":
+            session_panel = Panel.fit(table, title=f"[bold]{title}[/bold]", border_style="grey39")
+            service_title, service_table = sections[idx + 1]
+            service_panel = Panel.fit(service_table, title=f"[bold]{service_title}[/bold]", border_style="grey39")
+            console.print(Columns([session_panel, service_panel], align="left", equal=False, expand=False))
+            console.print()
+            idx += 2
+            continue
         console.print(Panel.fit(table, title=f"[bold]{title}[/bold]", border_style="grey39"))
         console.print()
+        idx += 1
 
 
 def show_bots(config: Config):
