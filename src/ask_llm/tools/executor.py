@@ -74,6 +74,7 @@ class ToolExecutor:
             "store_memory": self._execute_store_memory,
             "delete_memory": self._execute_delete_memory,
             "search_history": self._execute_search_history,
+            "get_recent_history": self._execute_get_recent_history,
             "forget_history": self._execute_forget_history,
             # Profile tools
             "set_user_attribute": self._execute_set_user_attribute,
@@ -346,6 +347,59 @@ class ToolExecutor:
             
         except Exception as e:
             logger.error(f"History search failed: {e}")
+            return format_tool_result(tool_call.name, None, error=str(e))
+
+    def _execute_get_recent_history(self, tool_call: ToolCall) -> str:
+        """Execute get_recent_history tool - gets the last N messages by timestamp."""
+        if not self.memory_client:
+            return format_tool_result(
+                tool_call.name,
+                None,
+                error="Memory system not available"
+            )
+
+        n_messages = tool_call.arguments.get("n_messages", 10)
+        role_filter = tool_call.arguments.get("role_filter")
+
+        try:
+            # Get recent messages using the memory client
+            results = self.memory_client.get_messages(limit=n_messages)
+
+            if not results:
+                return format_tool_result(
+                    tool_call.name,
+                    "No messages found in history."
+                )
+
+            # Filter by role if specified
+            if role_filter:
+                results = [r for r in results if r.get("role") == role_filter]
+
+            # Sort by timestamp descending (most recent first) and limit
+            results = sorted(results, key=lambda x: x.get("timestamp", 0), reverse=True)[:n_messages]
+
+            if not results:
+                return format_tool_result(
+                    tool_call.name,
+                    f"No {role_filter} messages found in history."
+                )
+
+            # Format results for the model (oldest first for readability)
+            results = list(reversed(results))
+            lines = [f"Last {len(results)} messages from history:"]
+            for i, msg in enumerate(results, 1):
+                role = msg.get("role", "unknown")
+                content = msg.get("content", "")
+                # Truncate long messages
+                content = content[:200] + "..." if len(content) > 200 else content
+                # Escape newlines for readability
+                content = content.replace("\n", " ")
+                lines.append(f"{i}. [{role}] {content}")
+
+            return format_tool_result(tool_call.name, "\n".join(lines))
+
+        except Exception as e:
+            logger.error(f"Get recent history failed: {e}")
             return format_tool_result(tool_call.name, None, error=str(e))
 
     def _execute_forget_history(self, tool_call: ToolCall) -> str:

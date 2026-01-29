@@ -210,6 +210,26 @@ MEMORY_TOOLS = [
         ]
     ),
     Tool(
+        name="get_recent_history",
+        description="Get the most recent N messages from conversation history (no search query needed).",
+        parameters=[
+            ToolParameter(
+                name="n_messages",
+                type="integer",
+                description="Number of recent messages to retrieve (default 10)",
+                required=False,
+                default=10
+            ),
+            ToolParameter(
+                name="role_filter",
+                type="string",
+                description="'user', 'assistant', or omit for all",
+                required=False,
+                default=None
+            ),
+        ]
+    ),
+    Tool(
         name="forget_history",
         description="Delete recent messages and their extracted memories.",
         parameters=[

@@ -33,6 +33,7 @@ services:
 
       # Logging
       ASK_LLM_LOG_PREFIX: ${ASK_LLM_LOG_PREFIX:-docker}
+      ASK_LLM_DEBUG_TURN_LOG: ${ASK_LLM_DEBUG_TURN_LOG:-true}
     ports:
       - "${MCP_PORT:-8001}:8001"
       - "${SERVICE_PORT:-8642}:8642"
@@ -40,7 +41,7 @@ services:
       # Mount config directory for .env and yaml files
       - ./config:/root/.config/ask-llm
       # Mount logs directory
-      - ./logs:/app/.logs
+      - ./.logs:/app/.logs
       # Optional: mount local models
       - ${MODELS_PATH:-./models}:/app/models
     restart: unless-stopped
