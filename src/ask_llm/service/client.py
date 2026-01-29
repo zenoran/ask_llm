@@ -87,7 +87,7 @@ class ServiceClient:
         Uses raw TCP socket connect which fails immediately on connection refused,
         avoiding HTTP timeout delays.
         """
-        # Try Unix socket first (Linux/macOS)
+        # Try Unix socket first (Linux/macOS) - only for localhost
         if self.socket_path.exists():
             try:
                 sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -99,17 +99,23 @@ class ServiceClient:
             except (socket.error, OSError, BlockingIOError) as e:
                 logger.debug(f"Unix socket unavailable: {e}")
         
+        # Parse host and port from http_url
+        from urllib.parse import urlparse
+        parsed = urlparse(self.http_url)
+        host = parsed.hostname or "127.0.0.1"
+        port = parsed.port or DEFAULT_HTTP_PORT
+        
         # Try raw TCP connect (fast - fails immediately if port not listening)
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(0.1)  # 100ms timeout max
-            result = sock.connect_ex(("127.0.0.1", DEFAULT_HTTP_PORT))
+            sock.settimeout(0.5)  # 500ms timeout for remote hosts
+            result = sock.connect_ex((host, port))
             sock.close()
             if result == 0:
-                logger.debug(f"Background service available via TCP port {DEFAULT_HTTP_PORT}")
+                logger.debug(f"Background service available via TCP {host}:{port}")
                 return True
             else:
-                logger.debug(f"TCP port {DEFAULT_HTTP_PORT} not listening (errno={result})")
+                logger.debug(f"TCP {host}:{port} not listening (errno={result})")
         except Exception as e:
             logger.debug(f"TCP check failed: {e}")
         
@@ -485,8 +491,11 @@ _service_client: ServiceClient | None = None
 
 
 def get_service_client() -> ServiceClient:
-    """Get the global service client instance."""
+    """Get the global service client instance, using configured SERVICE_HOST/PORT."""
     global _service_client
     if _service_client is None:
-        _service_client = ServiceClient()
+        from ask_llm.utils.config import Config
+        config = Config()
+        http_url = f"http://{config.SERVICE_HOST}:{config.SERVICE_PORT}"
+        _service_client = ServiceClient(http_url=http_url)
     return _service_client
