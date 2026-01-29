@@ -136,18 +136,24 @@ class ServiceAskLLM(BaseAskLLM):
     
     def prepare_messages_for_query(self, prompt: str) -> list[Message]:
         """Prepare messages for query including history and memory context.
-        
+
         Called by the service API before sending to the LLM.
-        
+
         Args:
             prompt: User's prompt
-            
+
         Returns:
             List of messages ready for LLM query
         """
+        # Reload history from database to ensure we have the latest messages.
+        # The ServiceAskLLM instance is cached across requests, so in-memory
+        # history may be stale (missing messages from CLI, other sessions, or
+        # messages that were only in DB but not loaded at init time).
+        self.load_history()
+
         # Add user message to history first
         self.history_manager.add_message("user", prompt)
-        
+
         # Build context with system prompt, memory, and history
         return self._build_context_messages(prompt)
     

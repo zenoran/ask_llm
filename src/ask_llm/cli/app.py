@@ -84,13 +84,20 @@ def query_via_service(
                 stream=True,
             )
             
-            render_streaming_response(
+            # If service returned None (failed), fall back to local
+            if stream_iterator is None:
+                return False
+            
+            result = render_streaming_response(
                 stream_iterator=stream_iterator,
                 console=console,
                 panel_title=panel_title,
                 panel_border_style=border_style,
                 plaintext_output=plaintext_output,
             )
+            # If streaming returned no content (service error), fall back to local
+            if not result:
+                return False
             return True
         else:
             response = client.chat_completion_full(
@@ -124,57 +131,102 @@ def show_status(config: Config, args: argparse.Namespace | None = None):
     import shutil
     from ask_llm.utils.config import is_huggingface_available, is_llama_cpp_available, has_database_credentials
     
-    console.print(Panel.fit("[bold magenta]ask_llm System Status[/bold magenta]", border_style="magenta"))
+    console.print(Panel.fit("[bold magenta]ask_llm System Status[/bold magenta]", border_style="grey39"))
     console.print()
-    
-    # Build status table
-    table = Table(show_header=False, box=None, padding=(0, 2))
-    table.add_column("Setting", style="cyan")
-    table.add_column("Value")
-    
-    # --- Background Service Section ---
-    table.add_row("[bold]Background Service[/bold]", "")
+
+    def make_table() -> Table:
+        table = Table(show_header=False, box=None, padding=(0, 2))
+        table.add_column("Setting", style="cyan")
+        table.add_column("Value")
+        return table
+
+    def format_active_setting(label: str, env_key: str, env_value: object, config_value: object, redact: bool = False) -> str:
+        if env_value is not None and env_value != "":
+            display = "<set>" if redact else str(env_value)
+            return f"{label}: {display} [dim]({env_key})[/dim]"
+        if config_value is None or config_value == "":
+            return f"{label}: [dim]<not set>[/dim]"
+        display = "<set>" if redact else str(config_value)
+        return f"{label}: {display} [dim](config)[/dim]"
+
+    def format_env_tag(env_key: str) -> str:
+        return f"[dim]({env_key})[/dim]"
+
+    def format_compact_setting(label: str, env_key: str, env_value: object, config_value: object, redact: bool = False) -> str:
+        if env_value is not None and env_value != "":
+            display = "<set>" if redact else str(env_value)
+            return f"{label}={display} {format_env_tag(env_key)}"
+        if config_value is None or config_value == "":
+            return f"{label}=<not set>"
+        display = "<set>" if redact else str(config_value)
+        return f"{label}={display} [dim](config)[/dim]"
+
+    # Check if USE_SERVICE is enabled
+    use_service_env = os.getenv("ASK_LLM_USE_SERVICE", "").lower() in ("true", "1", "yes")
+    use_service_config = getattr(config, "USE_SERVICE", False)
+    use_service = use_service_env or use_service_config
+    service_url_env = os.getenv("ASK_LLM_SERVICE_URL")
+    service_url_config = getattr(config, "SERVICE_URL", None)
+    service_url = service_url_env or service_url_config
+
+    service_client = None
+    service_status = None
+    service_available = False
+    service_error = None
     try:
         service_client = get_service_client()
         if service_client and service_client.is_available(force_check=True):
-            # Get detailed status
-            status = service_client.get_status()
-            if status and status.available:
-                uptime_str = ""
-                if status.uptime_seconds:
-                    hours, remainder = divmod(int(status.uptime_seconds), 3600)
-                    minutes, seconds = divmod(remainder, 60)
-                    if hours > 0:
-                        uptime_str = f"{hours}h {minutes}m"
-                    elif minutes > 0:
-                        uptime_str = f"{minutes}m {seconds}s"
-                    else:
-                        uptime_str = f"{seconds}s"
-                
-                service_status = f"[green]✓ Running[/green]"
-                if uptime_str:
-                    service_status += f" [dim](uptime: {uptime_str})[/dim]"
-                table.add_row("  Status", service_status)
-                table.add_row("  URL", f"[dim]{service_client.http_url}[/dim]")
-                table.add_row("  Version", f"{status.version or 'unknown'}")
-                table.add_row("  Tasks Processed", f"{status.tasks_processed}")
-                table.add_row("  Tasks Pending", f"{status.tasks_pending}")
-                if status.models_loaded:
-                    table.add_row("  Models Loaded", ", ".join(status.models_loaded))
-            else:
-                table.add_row("  Status", "[yellow]⚠ Unhealthy response[/yellow]")
-        else:
-            table.add_row("  Status", "[dim]○ Not running[/dim]")
-            table.add_row("  ", "[dim]Start with: llm-service[/dim]")
+            service_available = True
+            try:
+                service_status = service_client.get_status(silent=True)
+            except Exception as e:
+                service_error = str(e)
     except Exception as e:
-        table.add_row("  Status", f"[red]✗ Error checking: {e}[/red]")
-    
-    table.add_row("", "")
-    
-    # --- Current Session Section (based on args) ---
+        service_error = str(e)
+
+    sections: list[tuple[str, Table]] = []
+
+    # --- Execution Section ---
+    exec_table = make_table()
+    if use_service:
+        if use_service_env:
+            mode_suffix = format_env_tag("ASK_LLM_USE_SERVICE")
+        else:
+            mode_suffix = "[dim](config: USE_SERVICE)[/dim]"
+        exec_table.add_row("Mode", f"[bold cyan]Service Mode[/bold cyan] {mode_suffix}")
+        if service_url:
+            exec_table.add_row(
+                "Service URL",
+                f"[cyan]{service_url}[/cyan] {format_env_tag('ASK_LLM_SERVICE_URL')}"
+                if service_url_env
+                else f"[cyan]{service_url}[/cyan] [dim](config: SERVICE_HOST/PORT)[/dim]",
+            )
+        elif hasattr(config, "SERVICE_HOST") and hasattr(config, "SERVICE_PORT"):
+            default_url = f"http://{config.SERVICE_HOST}:{config.SERVICE_PORT}"
+            exec_table.add_row(
+                "Service URL",
+                f"[cyan]{default_url}[/cyan] [dim](default, config: SERVICE_HOST/PORT)[/dim]",
+            )
+        if service_available and service_status and getattr(service_status, "available", False):
+            exec_table.add_row("API Usage", "[green]✓ Connected via service API[/green]")
+        elif service_available:
+            exec_table.add_row("API Usage", "[yellow]⚠ Service reachable but unhealthy[/yellow]")
+        else:
+            exec_table.add_row("API Usage", "[red]✗ Service not reachable[/red]")
+    else:
+        mode_suffix = "[dim](config: USE_SERVICE)[/dim]"
+        exec_table.add_row("Mode", f"[bold green]Direct Execution[/bold green] [dim](local)[/dim] {mode_suffix}")
+        exec_table.add_row("Info", "[dim]LLM queries run directly in this process[/dim]")
+        exec_table.add_row("Hint", "[dim]Set ASK_LLM_USE_SERVICE=True to use service mode[/dim]")
+        if service_available:
+            exec_table.add_row("Notice", "[yellow]Service detected but not enabled[/yellow]")
+            exec_table.add_row(" ", f"[dim]Service available at: {service_client.http_url}[/dim]")
+    sections.append(("Execution", exec_table))
+
+    # --- Current Session Section ---
     if args:
-        table.add_row("[bold]Current Session[/bold]", "")
-        
+        session_table = make_table()
+
         # Determine effective bot
         bot_manager = BotManager(config)
         if args.bot:
@@ -189,8 +241,8 @@ def show_status(config: Config, args: argparse.Namespace | None = None):
         else:
             target_bot = bot_manager.get_default_bot()
             bot_display = f"[bold cyan]{target_bot.name}[/bold cyan] ({target_bot.slug}) [dim]default[/dim]"
-        table.add_row("  Bot", bot_display)
-        
+        session_table.add_row("Bot", bot_display)
+
         # Determine effective model: -m flag > bot's default_model > config DEFAULT_MODEL_ALIAS
         explicit_model = getattr(args, 'model', None)
         if explicit_model:
@@ -198,11 +250,11 @@ def show_status(config: Config, args: argparse.Namespace | None = None):
             model_source = "[dim]-m flag[/dim]"
         elif target_bot.default_model:
             model_alias = target_bot.default_model
-            model_source = f"[dim]bot default[/dim]"
+            model_source = "[dim]bot default[/dim]"
         else:
             model_alias = config.DEFAULT_MODEL_ALIAS
             model_source = "[dim]config default[/dim]"
-        
+
         if model_alias:
             # Check if model exists in defined models
             defined_models = config.defined_models.get("models", {})
@@ -219,16 +271,16 @@ def show_status(config: Config, args: argparse.Namespace | None = None):
                     model_display = f"[red]{model_alias}[/red] [dim](not found)[/dim] {model_source}"
         else:
             model_display = "[dim]not set[/dim]"
-        table.add_row("  Model", model_display)
-        
+        session_table.add_row("Model", model_display)
+
         # Determine effective user
         user_id = getattr(args, 'user', None) or config.DEFAULT_USER
         if getattr(args, 'local', False):
-            user_display = f"[dim]N/A (--local mode)[/dim]"
+            user_display = "[dim]N/A (--local mode)[/dim]"
         else:
             try:
                 from ask_llm.profiles import ProfileManager, EntityType
-                
+
                 manager = ProfileManager(config)
                 profile, _ = manager.get_or_create_profile(EntityType.USER, user_id)
                 if profile and profile.display_name:
@@ -237,8 +289,8 @@ def show_status(config: Config, args: argparse.Namespace | None = None):
                     user_display = f"{user_id} [dim](no profile)[/dim]"
             except Exception:
                 user_display = f"{user_id}"
-        table.add_row("  User", user_display)
-        
+        session_table.add_row("User", user_display)
+
         # Show mode
         mode_parts = []
         if getattr(args, 'local', False):
@@ -248,12 +300,65 @@ def show_status(config: Config, args: argparse.Namespace | None = None):
         if getattr(args, 'no_stream', False):
             mode_parts.append("no-stream")
         mode_display = ", ".join(mode_parts) if mode_parts else "[dim]default[/dim]"
-        table.add_row("  Mode", mode_display)
-        
-        table.add_row("", "")
-    
-    # --- Dependencies Section ---
-    table.add_row("[bold]Dependencies[/bold]", "")
+        session_table.add_row("Flags", mode_display)
+
+        sections.append(("Current Session", session_table))
+
+    # --- Service Section ---
+    if use_service or service_available or service_url:
+        service_table = make_table()
+        if service_available and service_status and getattr(service_status, "available", False):
+            uptime_str = ""
+            if service_status.uptime_seconds:
+                hours, remainder = divmod(int(service_status.uptime_seconds), 3600)
+                minutes, seconds = divmod(remainder, 60)
+                if hours > 0:
+                    uptime_str = f"{hours}h {minutes}m"
+                elif minutes > 0:
+                    uptime_str = f"{minutes}m {seconds}s"
+                else:
+                    uptime_str = f"{seconds}s"
+
+            service_state = "[green]✓ Connected[/green]"
+            if uptime_str:
+                service_state += f" [dim](uptime: {uptime_str})[/dim]"
+            service_table.add_row("Status", service_state)
+            service_table.add_row("Version", f"{service_status.version or 'unknown'}")
+            service_table.add_row("Tasks", f"{service_status.tasks_processed} processed / {service_status.tasks_pending} pending")
+            if service_status.models_loaded:
+                service_table.add_row("Models Loaded", ", ".join(service_status.models_loaded))
+        elif service_available:
+            service_table.add_row("Status", "[yellow]⚠ Service unhealthy[/yellow]")
+        else:
+            status_msg = "[red]✗ Cannot connect to service[/red]" if use_service else "[dim]○ Service not running[/dim]"
+            service_table.add_row("Status", status_msg)
+            if service_error:
+                service_table.add_row("Error", f"[dim]{service_error[:80]}[/dim]")
+
+        # Check MCP Memory Server (if using service mode)
+        if use_service and service_url:
+            try:
+                import httpx
+                # Extract host from service URL and check MCP port (usually 8001)
+                mcp_status = "[dim]○ Not checked[/dim]"
+                if "localhost" in service_url or "127.0.0.1" in service_url:
+                    mcp_url = service_url.replace("8642", "8001")  # Assume MCP on 8001
+                    try:
+                        response = httpx.get(f"{mcp_url}/health", timeout=2.0)
+                        if response.status_code == 200:
+                            mcp_status = f"[green]✓ Running[/green] [dim]({mcp_url})[/dim]"
+                        else:
+                            mcp_status = f"[yellow]⚠ Unhealthy[/yellow] [dim](status {response.status_code})[/dim]"
+                    except Exception:
+                        mcp_status = f"[red]✗ Not reachable[/red] [dim]({mcp_url})[/dim]"
+                service_table.add_row("MCP Server", mcp_status)
+            except Exception:
+                pass
+
+        sections.append(("Service", service_table))
+
+    # --- Local Dependencies Section ---
+    deps_table = make_table()
     
     # Check CUDA availability
     cuda_status = "[dim]○ Not available[/dim]"
@@ -273,12 +378,12 @@ def show_status(config: Config, args: argparse.Namespace | None = None):
                 cuda_status = f"[yellow]⚠ nvcc found but failed[/yellow]"
         except Exception:
             cuda_status = f"[green]✓ Available[/green] (nvcc at {nvcc_path})"
-    table.add_row("  CUDA", cuda_status)
+    deps_table.add_row("CUDA", cuda_status)
     
     # Check huggingface-hub (for GGUF downloads)
     hf_hub_available = importlib.util.find_spec("huggingface_hub") is not None
     hf_hub_status = "[green]✓ Installed[/green]" if hf_hub_available else "[red]✗ Not installed[/red] (pip install huggingface-hub)"
-    table.add_row("  huggingface-hub", hf_hub_status)
+    deps_table.add_row("huggingface-hub", hf_hub_status)
     
     # Check llama-cpp-python (for GGUF inference)
     llama_cpp_available = is_llama_cpp_available()
@@ -310,12 +415,12 @@ def show_status(config: Config, args: argparse.Namespace | None = None):
                 llama_cpp_status = "[green]✓ Installed[/green] [dim](CPU only)[/dim]"
         except (ImportError, AttributeError, OSError):
             llama_cpp_status = "[green]✓ Installed[/green]"
-    table.add_row("  llama-cpp-python", llama_cpp_status)
+    deps_table.add_row("llama-cpp-python", llama_cpp_status)
     
     # Check HuggingFace transformers (for HF models)
     hf_available = is_huggingface_available()
     hf_status = "[green]✓ Installed[/green]" if hf_available else "[dim]○ Not installed[/dim] (pip install transformers torch)"
-    table.add_row("  transformers + torch", hf_status)
+    deps_table.add_row("transformers + torch", hf_status)
     
     # Check ollama connectivity
     ollama_status = "[dim]○ Not checked[/dim]"
@@ -330,70 +435,54 @@ def show_status(config: Config, args: argparse.Namespace | None = None):
                 ollama_status = f"[yellow]⚠ Server responded with {response.status_code}[/yellow]"
         except Exception:
             ollama_status = f"[red]✗ Not reachable[/red] ({config.OLLAMA_URL})"
-    table.add_row("  Ollama server", ollama_status)
+    providers_table = make_table()
+    ollama_url_env = os.getenv("ASK_LLM_OLLAMA_URL")
+    ollama_url_value = ollama_url_env or config.OLLAMA_URL
+    if ollama_url_env:
+        ollama_tag = format_env_tag("ASK_LLM_OLLAMA_URL")
+    else:
+        ollama_tag = "[dim](config: OLLAMA_URL)[/dim]"
+    providers_table.add_row("Ollama", f"{ollama_status} {ollama_tag} [dim]({ollama_url_value})[/dim]")
     
     # Check OpenAI API key (from environment variable)
     openai_api_key = os.getenv("OPENAI_API_KEY")
     openai_status = "[green]✓ API key set[/green]" if openai_api_key else "[dim]○ No API key[/dim] (export OPENAI_API_KEY=...)"
-    table.add_row("  OpenAI API", openai_status)
-    
-    table.add_row("", "")
-    
+    openai_tag = format_env_tag("OPENAI_API_KEY")
+    openai_key_state = "<set>" if openai_api_key else "<not set>"
+    providers_table.add_row("OpenAI", f"{openai_status} [dim](key: {openai_key_state} {openai_tag})[/dim]")
+
+    sections.append(("Local Dependencies", deps_table))
+    sections.append(("Providers", providers_table))
+
     # --- Bots Section ---
     bot_manager = BotManager(config)
     default_bot = bot_manager.get_default_bot()
     local_bot = bot_manager.get_default_bot(local_mode=True)
     
-    table.add_row("[bold]Bots[/bold]", "")
-    table.add_row("  Default", f"[bold cyan]{default_bot.name}[/bold cyan] - {default_bot.description}")
-    table.add_row("  Local (--local)", f"[bold yellow]{local_bot.name}[/bold yellow] - {local_bot.description}")
-    table.add_row("  Available", ", ".join(b.slug for b in bot_manager.list_bots()))
-    table.add_row("", "")
-    
-    # --- Memory Section ---
-    db_status = "[yellow]Not Configured[/yellow]"
-    long_term_count = 0
-    messages_count = 0
-    
-    if not has_database_credentials(config):
-        db_status = "[yellow]Not Configured[/yellow] [dim](set ASK_LLM_POSTGRES_PASSWORD)[/dim]"
-    else:
-        try:
-            from ask_llm.memory.postgresql import PostgreSQLMemoryBackend
-            backend = PostgreSQLMemoryBackend(config, bot_id=default_bot.slug)
-            db_stats = backend.stats()
-            long_term_count = db_stats.get('memories', {}).get('total_count', 0)
-            messages_count = db_stats.get('messages', {}).get('total_count', 0)
-            db_status = f"[green]Connected[/green] ({config.POSTGRES_HOST}:{config.POSTGRES_PORT}/{config.POSTGRES_DATABASE})"
-        except Exception as e:
-            db_status = f"[red]Error: {e}[/red]"
-    
-    table.add_row("[bold]Memory[/bold]", "")
-    table.add_row("  PostgreSQL Backend", db_status)
-    table.add_row("  Messages (permanent)", f"[green]{messages_count}[/green]" if messages_count else "[dim]0[/dim]")
-    table.add_row("  Memories (distilled)", f"[green]{long_term_count}[/green]" if long_term_count else "[dim]0[/dim]")
-    table.add_row("", "")
-    
-    # --- Configuration Section ---
-    table.add_row("[bold]Configuration[/bold]", "")
-    table.add_row("  Default Model", f"{config.DEFAULT_MODEL_ALIAS or '[dim]not set[/dim]'}")
-    table.add_row("  Models Config", f"{config.MODELS_CONFIG_PATH}")
-    table.add_row("  Memory N Results", f"{config.MEMORY_N_RESULTS}")
-    table.add_row("  Min Relevance", f"{config.MEMORY_MIN_RELEVANCE}")
-    table.add_row("  History Duration", f"{config.HISTORY_DURATION}s ({config.HISTORY_DURATION // 60} min)")
-    table.add_row("  History File (--local)", f"{config.HISTORY_FILE}")
-    table.add_row("", "")
-    
-    # --- Pipeline Self-Checks Section ---
-    table.add_row("[bold]Pipeline Self-Checks[/bold]", "")
-    
-    # Check 1: Default model is valid and accessible
+    bots_table = make_table()
+    bots_table.add_row("Default", f"[bold cyan]{default_bot.name}[/bold cyan] - {default_bot.description}")
+    bots_table.add_row("Local (--local)", f"[bold yellow]{local_bot.name}[/bold yellow] - {local_bot.description}")
+    bots_table.add_row("Available", ", ".join(b.slug for b in bot_manager.list_bots()))
+    sections.append(("Bots", bots_table))
+
+    # --- Models Section ---
     defined_models = config.defined_models.get("models", {})
+    models_table = make_table()
     if config.DEFAULT_MODEL_ALIAS:
         if config.DEFAULT_MODEL_ALIAS in defined_models:
             model_def = defined_models[config.DEFAULT_MODEL_ALIAS]
             model_type = model_def.get("type", "unknown")
-            
+            default_model_env = os.getenv("ASK_LLM_DEFAULT_MODEL_ALIAS")
+            models_table.add_row(
+                "Default Model",
+                f"{config.DEFAULT_MODEL_ALIAS} [dim]({model_type})[/dim]",
+            )
+            if default_model_env:
+                model_source = format_env_tag("ASK_LLM_DEFAULT_MODEL_ALIAS")
+            else:
+                model_source = "[dim](config: DEFAULT_MODEL_ALIAS)[/dim]"
+            models_table.add_row("Default Model Source", f"{model_source}")
+
             # Check model-specific requirements
             model_check = "[green]✓ Valid[/green]"
             if model_type == "gguf":
@@ -427,63 +516,128 @@ def show_status(config: Config, args: argparse.Namespace | None = None):
             elif model_type == "huggingface":
                 if not hf_available:
                     model_check = "[red]✗ transformers/torch not installed[/red]"
-            
-            table.add_row("  Default Model", f"{model_check}")
+
+            models_table.add_row("Default Model Check", f"{model_check}")
         else:
-            table.add_row("  Default Model", f"[red]✗ '{config.DEFAULT_MODEL_ALIAS}' not found in models.yaml[/red]")
+            models_table.add_row("Default Model", f"[red]✗ '{config.DEFAULT_MODEL_ALIAS}' not found in models.yaml[/red]")
     else:
-        table.add_row("  Default Model", "[yellow]⚠ Not configured[/yellow]")
-    
-    # Check 2: Models config file exists and is valid
+        models_table.add_row("Default Model", "[yellow]⚠ Not configured[/yellow]")
+
+    # Models config file exists and is valid
     models_config_path = config.MODELS_CONFIG_PATH
+    models_config_env = os.getenv("ASK_LLM_MODELS_CONFIG_PATH")
     if os.path.exists(models_config_path):
         model_count = len(defined_models)
         if model_count > 0:
-            table.add_row("  Models Config", f"[green]✓ {model_count} models defined[/green]")
+            models_table.add_row("Models Config", f"[green]✓ {model_count} models defined[/green]")
         else:
-            table.add_row("  Models Config", "[yellow]⚠ File exists but no models defined[/yellow]")
+            models_table.add_row("Models Config", "[yellow]⚠ File exists but no models defined[/yellow]")
     else:
-        table.add_row("  Models Config", f"[red]✗ File not found: {models_config_path}[/red]")
-    
-    # Check 3: Memory backend connectivity (already checked above)
+        models_table.add_row("Models Config", f"[red]✗ File not found: {models_config_path}[/red]")
+    if models_config_env:
+        config_source = format_env_tag("ASK_LLM_MODELS_CONFIG_PATH")
+    else:
+        config_source = "[dim](config: MODELS_CONFIG_PATH)[/dim]"
+    models_table.add_row("Models Config Source", f"{config_source} [dim]({models_config_path})[/dim]")
+
+    sections.append(("Models", models_table))
+
+    # --- Memory Section ---
+    db_status = "[yellow]Not Configured[/yellow]"
+    long_term_count = 0
+    messages_count = 0
+    db_stats = None
+
+    if not has_database_credentials(config):
+        db_status = "[yellow]Not Configured[/yellow] [dim](set ASK_LLM_POSTGRES_PASSWORD)[/dim]"
+    else:
+        try:
+            from ask_llm.memory.postgresql import PostgreSQLMemoryBackend
+            backend = PostgreSQLMemoryBackend(config, bot_id=default_bot.slug)
+            db_stats = backend.stats()
+            long_term_count = db_stats.get('memories', {}).get('total_count', 0)
+            messages_count = db_stats.get('messages', {}).get('total_count', 0)
+            db_status = f"[green]Connected[/green] ({config.POSTGRES_HOST}:{config.POSTGRES_PORT}/{config.POSTGRES_DATABASE})"
+        except Exception as e:
+            db_status = f"[red]Error: {e}[/red]"
+
+    memory_table = make_table()
+    memory_table.add_row("PostgreSQL", db_status)
+    memory_table.add_row(
+        "Postgres Config",
+        ", ".join(
+            [
+                format_compact_setting(
+                    "host",
+                    "ASK_LLM_POSTGRES_HOST",
+                    os.getenv("ASK_LLM_POSTGRES_HOST"),
+                    config.POSTGRES_HOST,
+                ),
+                format_compact_setting(
+                    "port",
+                    "ASK_LLM_POSTGRES_PORT",
+                    os.getenv("ASK_LLM_POSTGRES_PORT"),
+                    config.POSTGRES_PORT,
+                ),
+                format_compact_setting(
+                    "db",
+                    "ASK_LLM_POSTGRES_DATABASE",
+                    os.getenv("ASK_LLM_POSTGRES_DATABASE"),
+                    config.POSTGRES_DATABASE,
+                ),
+                format_compact_setting(
+                    "user",
+                    "ASK_LLM_POSTGRES_USER",
+                    os.getenv("ASK_LLM_POSTGRES_USER"),
+                    config.POSTGRES_USER,
+                ),
+                format_compact_setting(
+                    "pass",
+                    "ASK_LLM_POSTGRES_PASSWORD",
+                    os.getenv("ASK_LLM_POSTGRES_PASSWORD"),
+                    None,
+                    redact=True,
+                ),
+            ]
+        ),
+    )
+    messages_display = f"[green]{messages_count}[/green]" if messages_count else "[dim]0[/dim]"
+    memories_display = f"[green]{long_term_count}[/green]" if long_term_count else "[dim]0[/dim]"
+    memory_table.add_row("Counts", f"messages={messages_display}, memories={memories_display}")
+
     if db_status.startswith("[green]"):
-        # Test vector extension
         try:
             from pgvector.psycopg2 import register_vector
-            table.add_row("  Memory Backend", "[green]✓ PostgreSQL + pgvector[/green]")
+            memory_table.add_row("Backend", "[green]✓ PostgreSQL + pgvector[/green]")
         except ImportError:
-            table.add_row("  Memory Backend", "[yellow]⚠ pgvector Python package not installed[/yellow]")
+            memory_table.add_row("Backend", "[yellow]⚠ pgvector Python package not installed[/yellow]")
     elif not has_database_credentials(config):
-        table.add_row("  Memory Backend", "[dim]○ Not configured (set ASK_LLM_POSTGRES_PASSWORD)[/dim]")
+        memory_table.add_row("Backend", "[dim]○ Not configured (set ASK_LLM_POSTGRES_PASSWORD)[/dim]")
     elif db_status.startswith("[red]"):
-        table.add_row("  Memory Backend", "[red]✗ PostgreSQL connection failed[/red]")
+        memory_table.add_row("Backend", "[red]✗ PostgreSQL connection failed[/red]")
     else:
-        table.add_row("  Memory Backend", "[dim]○ Not configured (--local mode only)[/dim]")
-    
-    # Check 4: History file location is writable
+        memory_table.add_row("Backend", "[dim]○ Not configured (--local mode only)[/dim]")
+
+    # History file location is writable
     history_dir = os.path.dirname(config.HISTORY_FILE)
     if os.path.exists(history_dir):
         if os.access(history_dir, os.W_OK):
-            table.add_row("  History Storage", "[green]✓ Writable[/green]")
+            memory_table.add_row("History Storage", "[green]✓ Writable[/green]")
         else:
-            table.add_row("  History Storage", f"[red]✗ Not writable: {history_dir}[/red]")
+            memory_table.add_row("History Storage", f"[red]✗ Not writable: {history_dir}[/red]")
     else:
         # Check if we can create it
         try:
             os.makedirs(history_dir, exist_ok=True)
-            table.add_row("  History Storage", "[green]✓ Created[/green]")
+            memory_table.add_row("History Storage", "[green]✓ Created[/green]")
         except Exception as e:
-            table.add_row("  History Storage", f"[red]✗ Cannot create: {e}[/red]")
-    
-    # Check 5: Service mode readiness
-    service_client = get_service_client()
-    if service_client and service_client.is_available():
-        table.add_row("  Service Mode", "[green]✓ Ready (use --service)[/green]")
-    else:
-        table.add_row("  Service Mode", "[dim]○ Service not running[/dim]")
+            memory_table.add_row("History Storage", f"[red]✗ Cannot create: {e}[/red]")
 
-    console.print(table)
-    console.print()
+    sections.append(("Memory", memory_table))
+
+    for title, table in sections:
+        console.print(Panel.fit(table, title=f"[bold]{title}[/bold]", border_style="grey39"))
+        console.print()
 
 
 def show_bots(config: Config):
@@ -1209,4 +1363,3 @@ def run_app(args: argparse.Namespace, config_obj: Config, resolved_alias: str):
                 console.print()
                 break
     console.print()
-

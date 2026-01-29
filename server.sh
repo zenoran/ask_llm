@@ -19,6 +19,7 @@ SERVICE_PID_FILE="$RUN_DIR/llm-service.pid"
 LOG_MODE="file"  # file | stdout
 VERBOSE_FLAG=""
 DEBUG_FLAG=""
+DEV_MODE=false
 
 mkdir -p "$RUN_DIR" "$LOG_DIR"
 
@@ -37,17 +38,24 @@ start_memory_server() {
   fi
 
   echo "[mcp] Starting on ${MEMORY_HOST}:${MEMORY_PORT}..."
+
+  # In dev mode, use --no-sync to avoid rebuilding
+  UV_FLAGS=""
+  if [[ "$DEV_MODE" == true ]]; then
+    UV_FLAGS="--no-sync"
+  fi
+
   if [[ "$LOG_MODE" == "stdout" ]]; then
     ASK_LLM_LOG_PREFIX="mcp" \
     ASK_LLM_MEMORY_SERVER_VERBOSE=${VERBOSE_FLAG:+1} \
     ASK_LLM_MEMORY_SERVER_DEBUG=${DEBUG_FLAG:+1} \
-    uv run --extra mcp llm-mcp-server --transport http --host "$MEMORY_HOST" --port "$MEMORY_PORT" &
+    uv run $UV_FLAGS --extra mcp llm-mcp-server --transport http --host "$MEMORY_HOST" --port "$MEMORY_PORT" &
     echo $! > "$MEMORY_PID_FILE"
   else
     ASK_LLM_LOG_PREFIX="mcp" \
     ASK_LLM_MEMORY_SERVER_VERBOSE=${VERBOSE_FLAG:+1} \
     ASK_LLM_MEMORY_SERVER_DEBUG=${DEBUG_FLAG:+1} \
-    nohup uv run --extra mcp llm-mcp-server --transport http --host "$MEMORY_HOST" --port "$MEMORY_PORT" \
+    nohup uv run $UV_FLAGS --extra mcp llm-mcp-server --transport http --host "$MEMORY_HOST" --port "$MEMORY_PORT" \
       > "$LOG_DIR/memory-server.log" 2>&1 &
     echo $! > "$MEMORY_PID_FILE"
   fi
@@ -70,15 +78,25 @@ start_llm_service() {
   done
 
   echo "[llm] Starting on ${SERVICE_HOST}:${SERVICE_PORT}..."
+
+  # Add --reload flag and --no-sync in dev mode
+  RELOAD_FLAG=""
+  UV_FLAGS=""
+  if [[ "$DEV_MODE" == true ]]; then
+    RELOAD_FLAG="--reload"
+    UV_FLAGS="--no-sync"
+    echo "[llm] Dev mode enabled - auto-reload on code changes"
+  fi
+
   if [[ "$LOG_MODE" == "stdout" ]]; then
     ASK_LLM_LOG_PREFIX="llm" \
     ASK_LLM_MEMORY_SERVER_URL="$MEMORY_URL" \
-    uv run --extra service --extra search --extra memory llm-service --host "$SERVICE_HOST" --port "$SERVICE_PORT" $VERBOSE_FLAG $DEBUG_FLAG &
+    uv run $UV_FLAGS --extra service --extra search --extra memory llm-service --host "$SERVICE_HOST" --port "$SERVICE_PORT" $RELOAD_FLAG $VERBOSE_FLAG $DEBUG_FLAG &
     echo $! > "$SERVICE_PID_FILE"
   else
     ASK_LLM_LOG_PREFIX="llm" \
     ASK_LLM_MEMORY_SERVER_URL="$MEMORY_URL" \
-    nohup uv run --extra service --extra search --extra memory llm-service --host "$SERVICE_HOST" --port "$SERVICE_PORT" $VERBOSE_FLAG $DEBUG_FLAG \
+    nohup uv run $UV_FLAGS --extra service --extra search --extra memory llm-service --host "$SERVICE_HOST" --port "$SERVICE_PORT" $RELOAD_FLAG $VERBOSE_FLAG $DEBUG_FLAG \
       > "$LOG_DIR/llm-service.log" 2>&1 &
     echo $! > "$SERVICE_PID_FILE"
   fi
@@ -158,7 +176,7 @@ status() {
 
 usage() {
   cat <<EOF
-Usage: $(basename "$0") [start|stop|restart|status] [--stdout|--logfile] [--verbose|--debug]
+Usage: $(basename "$0") [start|stop|restart|status] [--stdout|--logfile] [--verbose|--debug] [--dev]
 
 Commands:
   start     Start memory server + llm-service (background, logs in .logs/)
@@ -171,6 +189,7 @@ Options:
   --logfile  Write logs to .logs/ (default)
   --verbose  Pass verbose logging to servers
   --debug    Pass debug logging to servers
+  --dev      Enable development mode with auto-reload
 EOF
 }
 
@@ -183,6 +202,7 @@ while [[ $# -gt 0 ]]; do
     --logfile) LOG_MODE="file" ;;
     --verbose) VERBOSE_FLAG="--verbose" ;;
     --debug) DEBUG_FLAG="--debug" ;;
+    --dev) DEV_MODE=true ;;
     *)
       echo "Unknown option: $1"
       usage
@@ -196,6 +216,22 @@ case "$cmd" in
     start_memory_server
     start_llm_service
     status
+
+    # If running in stdout mode (Docker), keep the script alive by tailing logs
+    if [[ "$LOG_MODE" == "stdout" ]]; then
+      echo ""
+      echo "Services started. Monitoring processes..."
+      # Keep the script running and monitor child processes
+      while true; do
+        # Check if both services are still running
+        if ! is_running "$MEMORY_PID_FILE" || ! is_running "$SERVICE_PID_FILE"; then
+          echo "[ERROR] One or more services stopped unexpectedly"
+          status
+          exit 1
+        fi
+        sleep 10
+      done
+    fi
     ;;
   stop)
     stop_service "llm-service" "$SERVICE_PID_FILE" "llm-service"

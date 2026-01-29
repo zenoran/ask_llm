@@ -94,9 +94,9 @@ class ToolLoop:
             if iteration > 1:
                 logger.debug(f"Tool loop iteration {iteration}/{self.max_iterations}")
             
-            # Query LLM - only stream on potential final iteration
-            is_last_chance = (iteration == self.max_iterations)
-            response = query_fn(current_messages, stream_final and is_last_chance)
+            # Never stream in tool loop - we need to check for tool calls before rendering
+            # The caller (AskLLM.query) handles rendering the final response
+            response = query_fn(current_messages, False)
             
             if not response:
                 logger.debug("Empty response from LLM")
@@ -104,6 +104,7 @@ class ToolLoop:
             
             # Check for tool calls
             if not has_tool_call(response):
+                logger.debug("No tool calls found - returning final response")
                 logger.debug("No tool calls found - returning final response")
                 return response
             

@@ -311,6 +311,13 @@ class BaseAskLLM(ABC):
                     stream=stream,
                 )
                 
+                # Render the final response (tool loop returns raw text, never renders)
+                if assistant_response:
+                    if not plaintext_output:
+                        self.client._print_assistant_message(assistant_response)
+                    else:
+                        print(assistant_response)
+                
                 # Save tool context to history
                 if tool_context:
                     self.history_manager.add_message("system", f"[Tool Results]\n{tool_context}")

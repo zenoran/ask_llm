@@ -115,7 +115,7 @@ class ServiceClient:
         
         return False
     
-    def get_status(self) -> ServiceStatus:
+    def get_status(self, silent: bool = False) -> ServiceStatus:
         """Get detailed status of the background service."""
         if not self.is_available():
             return ServiceStatus(available=False)
@@ -131,7 +131,8 @@ class ServiceClient:
                 models_loaded=response.get("models_loaded"),
             )
         except Exception as e:
-            logger.warning(f"Failed to get service status: {e}")
+            if not silent:
+                logger.warning(f"Failed to get service status: {e}")
             return ServiceStatus(available=False)
     
     def submit_task(self, task: Task) -> bool:
@@ -234,8 +235,12 @@ class ServiceClient:
             return None
     
     def _stream_chat_completion(self, payload: dict):
-        """Stream chat completion from the service."""
+        """Stream chat completion from the service.
+        
+        Yields content chunks. If the request fails, yields nothing and logs error.
+        """
         import urllib.request
+        import urllib.error
         
         url = f"{self.http_url}/v1/chat/completions"
         headers = {"Content-Type": "application/json"}
@@ -243,23 +248,28 @@ class ServiceClient:
         
         req = urllib.request.Request(url, data=body, headers=headers, method="POST")
         
-        with urllib.request.urlopen(req, timeout=60.0) as resp:
-            full_content = ""
-            for line in resp:
-                line = line.decode().strip()
-                if line.startswith("data: "):
-                    data = line[6:]
-                    if data == "[DONE]":
-                        break
-                    try:
-                        chunk = json.loads(data)
-                        delta = chunk.get("choices", [{}])[0].get("delta", {})
-                        content = delta.get("content", "")
-                        if content:
-                            full_content += content
-                            yield content
-                    except json.JSONDecodeError:
-                        continue
+        try:
+            with urllib.request.urlopen(req, timeout=60.0) as resp:
+                for line in resp:
+                    line = line.decode().strip()
+                    if line.startswith("data: "):
+                        data = line[6:]
+                        if data == "[DONE]":
+                            break
+                        try:
+                            chunk = json.loads(data)
+                            delta = chunk.get("choices", [{}])[0].get("delta", {})
+                            content = delta.get("content", "")
+                            if content:
+                                yield content
+                        except json.JSONDecodeError:
+                            continue
+        except urllib.error.HTTPError as e:
+            logger.warning(f"Service streaming failed: HTTP {e.code}")
+            return
+        except Exception as e:
+            logger.warning(f"Service streaming failed: {e}")
+            return
     
     def chat_completion_full(
         self,
