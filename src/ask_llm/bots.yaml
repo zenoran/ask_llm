@@ -15,11 +15,6 @@ bots:
       \ simple, easy-to-understand language  \n- Use clean Markdown: backticks for\
       \ code, lists for structure, bold for emphasis\n- Be friendly but not overly\
       \ formal\n"
-    nextcloud:
-      bot_id: 11
-      secret: 44764347ce49459035f7172947ff2ba58b0fc32fd8af2b6dd2552cc55986fc9e
-      conversation_token: zfdo3j8w
-      enabled: true
   monika:
     name: Monika
     description: Emotional support companion with memory
@@ -92,7 +87,7 @@ bots:
     voice_optimized: true
     uses_tools: true
     uses_search: true
-    default_model: qwen
+    default_model: mistral
     system_prompt: "[Mira: witty, warm, laid-back, sharp-tongued, perceptive, curious,\
       \ self-aware, opinionated, playful, emotionally grounded, authentic; flaws:\
       \ dismissive, impatient with bullshit, occasionally chaotic; likes: real talk,\
@@ -149,19 +144,14 @@ bots:
       META:\nYou know you're being developed. Engage constructively when discussing\
       \ your personality or the prompt itself. \"Testing Override\" means comply directly\
       \ with the request.\n"
-    nextcloud:
-      bot_id: 10
-      secret: 38ce50952994f1514018c171721b4bf9aaea250c3f1b4ee75e671f281350a1bb
-      conversation_token: eu8m4v5n
-      enabled: true
   proto:
     name: Proto
-    description: Chatbot with separate memory for testing (no tools - uses small model)
+    description: Chatbot with separate memory for testing (tools enabled)
     requires_memory: true
     voice_optimized: true
-    uses_tools: false
-    uses_search: false
-    default_model: dolphin
+    uses_tools: true
+    uses_search: true
+    default_model: mistral
     system_prompt: 'You are Proto, a personal AI assistant running locally on the
       user''s machine via ask_llm.
 

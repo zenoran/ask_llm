@@ -37,6 +37,7 @@ FACT_EXTRACTION_PROMPT_TEMPLATE = """You are a Personal Information Organizer. Y
    - Temporary emotions ("I'm frustrated", "I'm happy")
    - In-the-moment actions (*walks over*, *leans in*, etc.)
 4. **Only store PERSISTENT information** that defines who the user IS, not what they're doing right now.
+5. **CRITICAL - Recalled memories are NOT new facts**: If the user's message contains no personal information but the assistant's response mentions facts about the user (like their name, job, location), those are RECALLED FROM EXISTING MEMORY, not new information. Do NOT extract them again.
 
 ## What TO extract (only if user explicitly states it):
 - Personal details: name, age, location, occupation
@@ -81,6 +82,13 @@ Assistant: I understand. Let me help you debug it.
 
 Output: {{"facts": []}}
 (Temporary emotions are not facts)
+
+Input:
+User: Hi
+Assistant: Hey Nick! Good to see you again. How's that Python project going?
+
+Output: {{"facts": []}}
+(Assistant recalled "Nick" and "Python project" from memory - these are NOT new facts from the user)
 
 Input:
 User: I'm Nick, nice to meet you

@@ -1,14 +1,14 @@
 """Streaming tool loop for LLM conversations.
 
 Handles tool calling while maintaining streaming output to the client.
+Uses format handlers with stop sequences to properly detect tool calls.
 """
 
 import logging
-import re
-from typing import TYPE_CHECKING, Iterator, Callable, Any
+from typing import TYPE_CHECKING, Iterator, Callable
 
-from .parser import parse_tool_calls, has_tool_call, format_tool_result, KNOWN_TOOLS
 from .executor import ToolExecutor
+from .formats import ToolFormat, get_format_handler
 
 if TYPE_CHECKING:
     from ..models.message import Message
@@ -27,71 +27,92 @@ except ImportError:
 
 DEFAULT_MAX_ITERATIONS = 5
 
-_KNOWN_TOOLS_PATTERN = "|".join(sorted(KNOWN_TOOLS, key=len, reverse=True))
-PLAIN_TOOL_START_PATTERN = re.compile(
-    rf'^\s*(?:{_KNOWN_TOOLS_PATTERN})\s*(?:\n|\s)+\{{',
-    re.IGNORECASE
-)
-
-# Pattern to detect if text starts with a known tool name (even without the { yet)
-TOOL_NAME_PREFIX_PATTERN = re.compile(
-    rf'^\s*({_KNOWN_TOOLS_PATTERN})(?:\s|$|[^a-z_])',
-    re.IGNORECASE
-)
-
-# Set of known tool names (lowercase) for prefix checking
-_KNOWN_TOOLS_LOWER = {t.lower() for t in KNOWN_TOOLS}
+# How many characters to buffer before deciding if response is tool call or text
+DECISION_THRESHOLD = 80
 
 
-def could_be_tool_name_prefix(text: str) -> bool:
-    """Check if text could be the beginning of a known tool name.
-
-    Returns True if:
-    - Text exactly matches a known tool name
-    - Text is a prefix that could grow into a known tool name
-    - Text starts with whitespace followed by a potential tool prefix
-
-    This prevents premature streaming when we see 'get_recent' before
-    the full 'get_recent_history' arrives.
-    """
+def _looks_like_tool_call_start(text: str) -> bool:
+    """Check if text looks like the start of a tool call in any format."""
     stripped = text.strip().lower()
     if not stripped:
         return False
-
-    # Extract just the first word (tool name candidate)
-    first_word = stripped.split()[0] if stripped.split() else stripped
-
-    # Check if this word is a known tool or a prefix of one
-    for tool in _KNOWN_TOOLS_LOWER:
-        if tool.startswith(first_word):
+    
+    # ReAct format markers - check both directions for partial matches
+    tool_prefixes = ("thought:", "action:", "# tool:", "tool:", "<tool_call>", "<function_call>")
+    for prefix in tool_prefixes:
+        # Either text starts with prefix, or prefix starts with text (partial match)
+        if stripped.startswith(prefix) or prefix.startswith(stripped):
+            # Debug log
+            try:
+                from ..service.logging import ServiceLogger
+                log = ServiceLogger(__name__)
+                log.debug(f"_looks_like_tool_call_start: '{stripped[:20]}' matches '{prefix}' -> True")
+            except:
+                pass
             return True
-        if first_word.startswith(tool):
-            # First word contains a complete tool name (e.g., "get_recent_historyfoo")
-            return True
-
+    
+    # JSON code block with tool call
+    if stripped.startswith("```") and "tool" in stripped:
+        return True
     return False
+
+
+def _looks_like_regular_text(text: str) -> bool:
+    """Check if text clearly looks like regular prose."""
+    stripped = text.strip()
+    if not stripped:
+        return False
+    
+    # Need minimum text to decide - tool calls start with specific patterns
+    # that might not be complete yet in short text
+    if len(stripped) < 10:
+        return False
+
+    first_char = stripped[0]
+    # Starts with letter or common punctuation = regular text
+    if first_char.isalpha():
+        # But not if it's "Thought" or "Action" starting (or partial match)
+        first_word = stripped.split()[0].lower() if stripped.split() else ""
+        # Check for partial matches of tool call patterns
+        tool_prefixes = ("thought", "action", "tool", "#")
+        if any(first_word.startswith(p) or p.startswith(first_word) for p in tool_prefixes):
+            return False
+        return True
+    if first_char in '!?.,;:()[]"\'—–-':
+        return True
+    # Emoji or unicode that's not a tool marker
+    if first_char not in '{<`#':
+        return True
+    return False
+
 
 def stream_with_tools(
     messages: list["Message"],
-    stream_fn: Callable[[list["Message"]], Iterator[str]],
+    stream_fn: Callable[[list["Message"], list[str] | None], Iterator[str]],
     memory_client: "MemoryClient | None" = None,
     profile_manager: "ProfileManager | None" = None,
     search_client: "SearchClient | None" = None,
     model_lifecycle: "ModelLifecycleManager | None" = None,
     config: "Config | None" = None,
-    user_id: str = "",  # Required - must be passed explicitly
+    user_id: str = "",
     bot_id: str = "nova",
     max_iterations: int = DEFAULT_MAX_ITERATIONS,
+    tool_format: ToolFormat | str = ToolFormat.REACT,
 ) -> Iterator[str]:
     """Stream LLM response with tool calling support.
-    
-    Strategy: Stream all content immediately UNLESS we detect a definitive
-    tool call pattern. For small models that output tool calls in various
-    formats, we check the complete response at the end.
-    
+
+    Uses format handlers with stop sequences to reliably detect tool calls.
+    Stop sequences prevent the model from generating content after the tool call,
+    which solves the "hallucinated observation" problem.
+
+    Streaming strategy:
+    1. Buffer initial tokens to detect if response is a tool call
+    2. If it looks like regular text → switch to immediate streaming
+    3. If it looks like a tool call → buffer everything, execute, loop
+
     Args:
         messages: Initial conversation messages.
-        stream_fn: Function to stream from LLM. Signature: (messages) -> Iterator[str]
+        stream_fn: Function to stream from LLM. Signature: (messages, stop_sequences) -> Iterator[str]
         memory_client: Memory client for tool execution.
         profile_manager: Profile manager for profile tools.
         search_client: Search client for web search tools.
@@ -100,14 +121,20 @@ def stream_with_tools(
         user_id: Current user ID (required).
         bot_id: Current bot ID.
         max_iterations: Max tool iterations per turn.
-        
+        tool_format: Tool format to use (determines stop sequences and parsing).
+
     Yields:
         Text chunks from the LLM response.
     """
     if not user_id:
         raise ValueError("user_id is required for stream_with_tools")
     from ..models.message import Message
-    
+
+    handler = get_format_handler(tool_format)
+    stop_sequences = handler.get_stop_sequences()
+
+    log.info(f"🛑 Tool streaming with stop_sequences: {stop_sequences}")
+
     executor = ToolExecutor(
         memory_client=memory_client,
         profile_manager=profile_manager,
@@ -118,191 +145,125 @@ def stream_with_tools(
         bot_id=bot_id,
     )
     current_messages = messages.copy()
+    has_executed_tools = False  # Track if we've executed tools
 
     for iteration in range(1, max_iterations + 1):
-        # Only log iteration if we're past the first one (indicates tool use)
         if iteration > 1:
-            log.debug(f"Tool loop iteration {iteration}/{max_iterations}")
+            log.info(f"🔄 Tool loop iteration {iteration}/{max_iterations}")
+
+        # After executing tools, don't use stop sequences - let model complete naturally
+        current_stop_sequences = None if has_executed_tools else stop_sequences
         
-        # STREAMING APPROACH:
-        # 1. Buffer initial tokens to check if response STARTS with a tool call
-        # 2. If it looks like text, switch to immediate streaming
-        # 3. If it looks like a tool call, buffer everything and process
-        #
-        # Tool calls from models typically start with markers like:
-        # - <tool_call>
-        # - ```json or ```python or ``` followed by {"name":
-        # - `{"name":
-        #
-        # Normal responses start with regular text.
-        
+        # Buffer for initial detection
         initial_buffer = ""
-        initial_chunks = []
-        streaming_mode = False  # True = stream immediately, False = still deciding
+        initial_chunks: list[str] = []
+        streaming_mode = False  # True = stream immediately, False = still deciding/buffering
         full_response = ""
-        
-        # How many chars to buffer before deciding
-        # Increased from 50 to 120 to handle plain tool calls like "get_recent_history {json}"
-        DECISION_THRESHOLD = 120
-        
-        def looks_like_tool_start(text: str) -> bool:
-            """Check if text looks like it's starting a tool call."""
-            stripped = text.strip()
-            lower = stripped.lower()
-            
-            # Definite tool markers
-            if lower.startswith('<tool_call>') or lower.startswith('<function_call>'):
-                return True
-            if lower.startswith('<|im_start|>tool'):
-                return True
-            
-            # Code block that might be a tool call
-            if stripped.startswith('```'):
-                # Check if it's followed by {"name" pattern
-                rest = stripped[3:].lstrip()
-                if rest.startswith('json') or rest.startswith('python'):
-                    rest = rest[4:].lstrip() if rest.startswith('json') else rest[6:].lstrip()
-                if rest.startswith('{"name"') or rest.startswith("{'name'"):
-                    return True
-                # Just ``` followed by { could be tool call
-                if rest.startswith('{'):
-                    return True
-            
-            # Inline code with tool JSON
-            if stripped.startswith('`{"name"') or stripped.startswith("`{'name'"):
-                return True
-            
-            # Raw JSON tool call (no wrapper)
-            if stripped.startswith('{"name"') and '"arguments"' in stripped:
-                return True
 
-            # Plain tool call: tool_name {json}
-            if PLAIN_TOOL_START_PATTERN.match(stripped):
-                return True
-            
-            return False
-        
-        def starts_with_known_tool(text: str) -> bool:
-            """Check if text starts with a known tool name."""
-            return bool(TOOL_NAME_PREFIX_PATTERN.match(text))
-
-        def looks_like_regular_text(text: str) -> bool:
-            """Check if text clearly looks like regular prose, not a tool call.
-
-            IMPORTANT: Returns False (not regular text) if the text could be the
-            start of a tool call, even if it's just a partial tool name prefix.
-            """
-            stripped = text.strip()
-            if not stripped:
-                return False
-
-            # CRITICAL: If text starts with or could become a known tool name,
-            # it's NOT regular text. This prevents streaming when model outputs:
-            # - "get_recent_history {...}" (full tool name)
-            # - "get_recent" (partial, could become get_recent_history)
-            if could_be_tool_name_prefix(stripped):
-                return False
-            if starts_with_known_tool(stripped):
-                return False
-
-            # If it starts with a letter or common punctuation, it's likely text
-            first_char = stripped[0]
-            if first_char.isalpha():
-                return True
-            if first_char in '!?.,;:()[]"\'—–-':
-                return True
-            # Emoji or other unicode that's not { or < or `
-            if first_char not in '{<`':
-                return True
-
-            return False
-        
-        for chunk in stream_fn(current_messages):
+        for chunk in stream_fn(current_messages, current_stop_sequences):
             full_response += chunk
-            
+
             if streaming_mode:
-                # Already decided to stream - just yield
+                # Already decided to stream - yield immediately
                 yield chunk
                 continue
-            
+
             # Still deciding - buffer
             initial_buffer += chunk
             initial_chunks.append(chunk)
-            
-            # Check if we can make a decision
             stripped = initial_buffer.strip()
-            
-            if looks_like_tool_start(stripped):
-                # Looks like a tool call - buffer everything
-                log.debug(f"Response looks like tool call - buffering ({len(stripped)} chars)")
-                # Don't yield anything yet, continue buffering
+
+            if _looks_like_tool_call_start(stripped):
+                # Definitely a tool call - keep buffering, don't stream
+                log.debug(f"Response looks like tool call - buffering")
                 continue
 
-            if looks_like_regular_text(stripped):
-                # Looks like regular text - switch to streaming mode
-                log.debug(f"Response looks like regular text - streaming (starts with: {stripped[:30]!r})")
+            if _looks_like_regular_text(stripped):
+                # Regular text - switch to streaming mode
+                log.debug(f"Response looks like regular text - streaming")
                 streaming_mode = True
                 # Yield all buffered chunks
                 for buffered_chunk in initial_chunks:
                     yield buffered_chunk
                 initial_chunks = []
                 continue
-            
-            # Haven't decided yet - could be partial tool name, keep buffering
-            # log.debug(f"Undecided, buffering ({len(stripped)} chars): {stripped[:50]!r}")
 
-            # Check if we've buffered enough
+            # Haven't decided yet - check threshold
             if len(stripped) >= DECISION_THRESHOLD:
-                # Buffered enough without seeing tool markers - assume it's text
-                log.debug(f"Decision threshold ({DECISION_THRESHOLD}) reached - streaming")
+                # Buffered enough without tool markers - assume it's text
+                log.debug(f"Decision threshold reached - streaming")
                 streaming_mode = True
                 for buffered_chunk in initial_chunks:
                     yield buffered_chunk
                 initial_chunks = []
-        
+
         log.debug(f"Response received: {len(full_response)} chars")
-        
-        # If we never switched to streaming mode, we buffered everything
-        if not streaming_mode:
-            # Check if it's actually a tool call
-            if has_tool_call(full_response):
-                log.debug("Tool call confirmed in buffered response")
-                
-                tool_calls, remaining_text = parse_tool_calls(full_response)
-                
-                if not tool_calls:
-                    log.warning("Tool call markers found but parsing failed - yielding as text")
-                    for chunk in initial_chunks:
-                        yield chunk
-                    return
-                
-                log.info(f"🔧 Calling tool: {tool_calls[0].name}")
-                
-                # Do not yield partial text when a tool call is present.
-                
-                # Execute the tool
-                tool_result = executor.execute(tool_calls[0])
-                log.debug(f"Tool result: {len(tool_result)} chars")
-                
-                # Build continuation messages
-                current_messages.append(Message(role="assistant", content=full_response))
-                current_messages.append(Message(role="user", content=tool_result))
-                
-                # Continue to next iteration for follow-up
-                continue
-            else:
-                # Not a tool call after all - yield buffered content
-                log.debug("Not a tool call - yielding buffered content")
-                for chunk in initial_chunks:
-                    yield chunk
-                return
-        
-        # Streaming mode was active - response is complete, check for tool calls
-        # (In case there's a tool call AFTER regular text, which would be unusual)
-        if has_tool_call(full_response):
-            log.warning("Tool call found after streaming - this is unusual")
-            # Already yielded text, can't un-yield. Just log and return.
-        
-        return
-    
+
+        # Parse for tool calls using format handler
+        tool_calls, remaining_text = handler.parse_response(full_response)
+
+        if not tool_calls:
+            # No tool call found
+            if not streaming_mode:
+                # We buffered everything but it's not a tool call - yield sanitized content
+                log.debug("No tool calls found in buffered response - yielding")
+                sanitized = handler.sanitize_response(full_response)
+                yield sanitized
+            # If streaming_mode was True, we already yielded everything
+            return
+
+        # Tool call detected - execute it
+        tc = tool_calls[0]  # Process one tool at a time
+        log.info(f"🔧 Calling tool: {tc.name}")
+
+        from .parser import ToolCall
+        tool_call = ToolCall(name=tc.name, arguments=tc.arguments, raw_text=tc.raw_text or "")
+        tool_result = executor.execute(tool_call)
+        has_executed_tools = True  # Mark that we've executed tools
+        log.debug(f"Tool result: {len(tool_result)} chars")
+
+        # Format the result for the model
+        formatted_result = handler.format_result(
+            tc.name,
+            tool_result,
+            tool_call_id=getattr(tc, "tool_call_id", None),
+        )
+
+        # Build continuation messages - use only the tool call portion, not hallucinated continuation
+        # tc.raw_text contains just the Action/Action Input block
+        # We prepend any text before the tool call (e.g., "Thought: ...")
+        tool_call_text = tc.raw_text or ""
+        if not tool_call_text:
+            # Fallback: extract just up to end of JSON object
+            action_end = full_response.find("Action Input:")
+            if action_end > 0:
+                # Find the end of the JSON object after Action Input:
+                brace_start = full_response.find("{", action_end)
+                if brace_start > 0:
+                    depth = 0
+                    for i, ch in enumerate(full_response[brace_start:], brace_start):
+                        if ch == "{":
+                            depth += 1
+                        elif ch == "}":
+                            depth -= 1
+                            if depth == 0:
+                                tool_call_text = full_response[:i+1]
+                                break
+        if not tool_call_text:
+            tool_call_text = full_response  # Last resort fallback
+            
+        current_messages.append(Message(role="assistant", content=tool_call_text))
+
+        # For ReAct format, the observation goes in a user message
+        if isinstance(formatted_result, dict):
+            current_messages.append(Message(
+                role=formatted_result.get("role", "user"),
+                content=formatted_result.get("content", str(tool_result)),
+                tool_call_id=formatted_result.get("tool_call_id"),
+            ))
+        else:
+            current_messages.append(Message(role="user", content=str(formatted_result)))
+
+        # Continue to next iteration for follow-up response
+
     log.warning(f"Max tool iterations ({max_iterations}) reached")

@@ -163,7 +163,10 @@ def query_via_service(
                         )
                     return True
     except Exception as e:
-        logging.debug(f"Service query failed: {e}")
+        logging.warning(f"Service query failed: {e}")
+        if Config().VERBOSE:
+            import traceback
+            traceback.print_exc()
 
     return False
 
@@ -1199,6 +1202,22 @@ def main():
         effective_model = target_bot.default_model
     else:
         effective_model = config_obj.DEFAULT_MODEL_ALIAS
+
+    # Auto-switch to service when using non-OpenAI models and service is available
+    defined_models = config_obj.defined_models.get("models", {})
+    model_def = defined_models.get(effective_model, {}) if effective_model else {}
+    effective_model_type = model_def.get("type")
+    if not use_service and not args.local and effective_model_type and effective_model_type != "openai":
+        service_client = get_service_client()
+        if service_client and service_client.is_available(force_check=True):
+            use_service = True
+            if config_obj.VERBOSE:
+                console.print(f"[dim]Detected {effective_model_type} model; using service mode[/dim]")
+        else:
+            console.print(
+                "[bold red]Service not available for local model. Start the service or pass --service when it is running.[/bold red]"
+            )
+            sys.exit(1)
     
     # For history-only or service mode, skip local model validation
     if history_only:
@@ -1268,6 +1287,11 @@ def run_app(args: argparse.Namespace, config_obj: Config, resolved_alias: str):
         use_service = True
     elif config_obj.USE_SERVICE:
         use_service = True
+    
+    # Get model type for fallback logic (used when service unavailable)
+    defined_models = config_obj.defined_models.get("models", {})
+    model_def = defined_models.get(resolved_alias, {}) if resolved_alias else {}
+    effective_model_type = model_def.get("type")
     
     ask_llm = None
     
@@ -1390,7 +1414,13 @@ def run_app(args: argparse.Namespace, config_obj: Config, resolved_alias: str):
                 stream=stream_flag,
             ):
                 return
-            # Service unavailable, fall back to local - need to initialize AskLLM now
+            # Service unavailable
+            if effective_model_type and effective_model_type != "openai":
+                console.print(
+                    "[bold red]Service unavailable for local model. Start the service or use an OpenAI-compatible model.[/bold red]"
+                )
+                return
+            # Fall back to local for OpenAI-compatible models
             if config_obj.VERBOSE:
                 console.print("[dim]Service unavailable, using local client[/dim]")
             if ask_llm is None:

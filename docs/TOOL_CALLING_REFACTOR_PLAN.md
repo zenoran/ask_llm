@@ -35,53 +35,52 @@ The current implementation uses a custom `<tool_call>` XML format that relies on
 
 ---
 
-## Status Update (2026-01-29 evening)
+## Status Update (2026-01-31)
 
-### Major Progress: Native OpenAI Tool Calling with Streaming
+### Current State
 
-**Tools now work correctly for OpenAI models!** Implemented proper native tool calling that:
-- Uses OpenAI's `tools` parameter with structured responses (no text parsing)
-- Maintains real streaming for regular responses
-- Handles tool calls inline during streaming
+**OpenAI models**: ✅ Working - Native tool calling with structured responses.
 
-### Changes Made Today
+**GGUF models**: ✅ Fixed - Multi-format parser now handles various tool output styles.
 
-#### 1. `src/ask_llm/clients/openai_client.py`
-- Added `stream_with_tools()` method that:
-  - Passes `tools` schema to OpenAI API with `stream=True`
-  - Yields content chunks immediately (real streaming)
-  - Accumulates tool_call deltas from stream
-  - Returns `{"tool_calls": [...], "content": "..."}` dict at end if tools were called
+### Root Cause Analysis (2026-01-31)
 
-#### 2. `src/ask_llm/service/api.py`
-- Updated streaming endpoint to use native streaming with tools:
-  - Detects if client supports native tools (`supports_native_tools()` + `stream_with_tools`)
-  - For OpenAI: Uses new `stream_with_tools()` - real streaming + structured tool calls
-  - For GGUF/local: Falls back to text-based `stream_with_tools()` from streaming.py
-  - Implements tool loop inline: execute tools, append results, continue streaming
+The infrastructure was in place but the parser was too strict:
+- `get_tool_format()` returns `"react"` for GGUF models ✅
+- `get_tools_prompt()` generates correct ReAct instructions ✅
+- `ReActFormatHandler` has proper stop sequences ✅
 
-#### 3. Infrastructure already in place (no changes needed)
-- `src/ask_llm/tools/formats/native_openai.py` - Tool schema generation
-- `src/ask_llm/tools/loop.py` - Non-streaming tool loop with native support
-- `src/ask_llm/utils/config.py` - Returns `"native"` format for OpenAI models
+**The Problem**: Models don't always follow the exact ReAct format. Dolphin-Mistral outputs:
+```
+# Tool: retrieve_conversation_history
+# Arguments: {"num_messages": 10}
+```
+Instead of the expected:
+```
+Action: get_recent_history
+Action Input: {"n_messages": 10}
+```
 
-### Current Behavior
-- **OpenAI models**: Native tool calling with real streaming
-  - Regular prompts: Stream immediately
-  - Tool prompts: Stream content, detect tool calls, execute, stream follow-up
-- **Local models (GGUF)**: Text-based tool detection via streaming.py (heuristics)
+### Solution Implemented: Multi-Format Parser
 
-### Still TODO / Known Issues
-1. **streaming.py bandaids** - Still has heuristic code for non-native models. Works but fragile.
-2. **ReAct format** - Not yet implemented for local models (would be cleaner than heuristics)
-3. **Stop sequences** - Not used yet; would help ReAct format enforcement
-4. **Testing** - Need to verify tool loop iteration limit and edge cases
+Updated `react.py` with:
+1. **Multi-format parsing**: Tries ReAct → Alt format → Code block JSON
+2. **Tool name normalization**: Maps model-invented names to actual tools
+   - `retrieve_conversation_history` → `get_recent_history`
+   - `get_conversation_history` → `get_recent_history`
+   - `search_memory` → `search_memories`
+   - etc.
+3. **Argument normalization**: Maps common arg variations
+   - `num_messages` → `n_messages`
+   - `count` → `n_messages`
+   - etc.
+4. **Additional stop sequences**: `\n# Tool:` to catch alt format early
+5. **Enhanced sanitization**: Removes all format markers from final responses
 
-### Next Steps (for continuing tomorrow)
-1. **Test the new streaming** - Run `./server.sh restart` and try tool commands
-2. **Clean up streaming.py** - Remove/simplify heuristic code if native path works
-3. **Implement ReAct for local models** - Replace heuristics with proper format
-4. **Add stop sequences** - For ReAct format enforcement on local models
+### Files Changed
+- `src/ask_llm/tools/formats/react.py` - Multi-format parser + normalization
+- `src/ask_llm/tools/streaming.py` - Updated `_looks_like_tool_call_start()`
+- `docs/TOOL_CALLING_REFACTOR_PLAN.md` - This update
 
 ---
 

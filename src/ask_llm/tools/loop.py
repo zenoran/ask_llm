@@ -12,7 +12,7 @@ import logging
 from typing import TYPE_CHECKING
 
 from .executor import ToolExecutor
-from .formats import ToolFormat, get_format_handler
+from .formats import ToolFormat, get_format_handler, ToolCallRequest
 from .parser import ToolCall, format_tool_result
 
 if TYPE_CHECKING:
@@ -98,26 +98,74 @@ class ToolLoop:
         current_messages = messages.copy()
         handler = self.format_handler
         self._using_native_tools = self._should_use_native_tools() and client.supports_native_tools()
+        
+        if self._using_native_tools:
+            logger.info("🔧 Using native tool calling")
 
+        has_executed_tools = False  # Track if we've already run tools
+        
         for iteration in range(1, self.max_iterations + 1):
             # Only log iteration if we're past the first one (indicates tool use)
             if iteration > 1:
-                logger.debug(f"Tool loop iteration {iteration}/{self.max_iterations}")
+                logger.info(f"🔄 Tool loop iteration {iteration}/{self.max_iterations}")
             
             # Never stream in tool loop - we need to check for tool calls before rendering
             # The caller (AskLLM.query) handles rendering the final response
+            # After tools have been executed, don't use stop sequences - let model complete naturally
             response = self._query_llm(
                 client=client,
                 messages=current_messages,
                 handler=handler,
                 use_native=self._using_native_tools,
+                skip_stop_sequences=has_executed_tools,  # Don't stop early if already have tool results
             )
             
             if not response:
                 logger.debug("Empty response from LLM")
                 return ""
             
-            # Parse tool calls
+            # Handle native tool calls (response is a dict with tool_calls)
+            if isinstance(response, dict) and "tool_calls" in response:
+                native_tool_calls = response["tool_calls"]
+                content = response.get("content", "")
+                
+                # Convert native tool calls to our ToolCallRequest format
+                tool_calls = []
+                for tc in native_tool_calls:
+                    func = tc.get("function", {})
+                    tool_calls.append(ToolCallRequest(
+                        name=func.get("name", ""),
+                        arguments=func.get("arguments", "{}"),
+                        raw_text="",
+                        tool_call_id=tc.get("id"),
+                    ))
+                
+                if tool_calls:
+                    # Execute tools
+                    tool_messages, tool_results = self._execute_tools(tool_calls, handler)
+                    
+                    logger.info(
+                        "🔧 Tool calls (native): %s",
+                        ", ".join(tc.name for tc in tool_calls)
+                    )
+                    
+                    # Track tool interactions for history/context
+                    tool_summary = "\n\n".join(tool_results)
+                    self.tool_context.append({
+                        "tools_called": [tc.name for tc in tool_calls],
+                        "results": tool_summary,
+                    })
+                    
+                    # Build continuation messages
+                    assistant_message = self._build_assistant_message(response, tool_calls)
+                    current_messages.append(assistant_message)
+                    current_messages.extend(tool_messages)
+                    continue  # Next iteration
+                
+                # No tool calls in dict, return content
+                return content if content else ""
+            
+            # Parse tool calls from text response (ReAct/XML format)
             tool_calls, remaining_text = handler.parse_response(response)
             effective_handler = handler
 
@@ -158,6 +206,7 @@ class ToolLoop:
             
             # Execute tools
             tool_messages, tool_results = self._execute_tools(tool_calls, effective_handler)
+            has_executed_tools = True  # Mark that we've executed tools
             
             logger.info(
                 "🔧 Tool calls: %s",
@@ -172,6 +221,8 @@ class ToolLoop:
             })
             
             # Build continuation messages
+            # For ReAct format: add assistant's action, then observation as user message
+            # The model should then continue with "Thought: I now have..." or "Final Answer:"
             assistant_message = self._build_assistant_message(response, tool_calls)
             current_messages.append(assistant_message)
             current_messages.extend(tool_messages)
@@ -251,25 +302,80 @@ class ToolLoop:
             elif isinstance(response, str):
                 content = response
             return Message(role="assistant", content=content or "", tool_calls=tool_payloads)
-        return Message(role="assistant", content=response if isinstance(response, str) else "")
+        
+        # For ReAct/text format: truncate response at the end of the tool call
+        # to prevent hallucinated continuations from confusing the model
+        content = response if isinstance(response, str) else ""
+        if tool_calls and content:
+            # Find where the last tool call ends and truncate there
+            # Look for the closing brace of the last Action Input
+            last_tc = tool_calls[-1]
+            if last_tc.raw_text:
+                # Use the raw_text to find where to truncate
+                idx = content.find(last_tc.raw_text)
+                if idx >= 0:
+                    content = content[:idx + len(last_tc.raw_text)]
+            else:
+                # Fallback: try to find Action Input JSON and truncate after it
+                import re
+                # Find the last Action Input: {...} and truncate after it
+                matches = list(re.finditer(r'Action\s*Input\s*:\s*(\{[^}]*\}|\S+)', content, re.IGNORECASE))
+                if matches:
+                    last_match = matches[-1]
+                    content = content[:last_match.end()]
+        
+        return Message(role="assistant", content=content)
 
     def _should_use_native_tools(self) -> bool:
-        if isinstance(self.tool_format, ToolFormat):
-            return self.tool_format == ToolFormat.NATIVE_OPENAI
-        return str(self.tool_format).lower() == ToolFormat.NATIVE_OPENAI.value
+        """Check if we should use native tool calling.
+        
+        Native tool calling is only used for NATIVE_OPENAI format (OpenAI API).
+        For GGUF/local models using REACT format, we use text-based ReAct parsing
+        because llama-cpp-python's native function calling has issues with
+        multi-turn tool conversations (empty responses after tool execution).
+        """
+        # Normalize to string for comparison
+        format_str = self.tool_format.value if isinstance(self.tool_format, ToolFormat) else str(self.tool_format).lower()
+        
+        # Only use native for NATIVE_OPENAI (OpenAI API)
+        # Do NOT use for REACT - llama-cpp-python's chatml-function-calling
+        # doesn't handle multi-turn tool conversations well
+        if format_str == ToolFormat.NATIVE_OPENAI.value or format_str == "native":
+            return True
+        return False
 
-    def _query_llm(self, client: "LLMClient", messages: list["Message"], handler, use_native: bool):
+    def _query_llm(self, client: "LLMClient", messages: list["Message"], handler, use_native: bool, skip_stop_sequences: bool = False):
+        """Query the LLM, potentially with native tool calling.
+        
+        Args:
+            client: LLM client instance.
+            messages: Conversation messages.
+            handler: Format handler for tools.
+            use_native: Whether to use native tool calling.
+            skip_stop_sequences: If True, don't use stop sequences (for follow-up after tools).
+        
+        Returns:
+            Either a string response or a dict with tool_calls for native mode.
+        """
         if use_native and hasattr(handler, "get_tools_schema"):
             tools_schema = handler.get_tools_schema(self.tools or [])
-            response, _ = client.query_with_tools(
+            content, tool_calls = client.query_with_tools(
                 messages,
                 tools_schema=tools_schema,
                 tool_choice="auto",
                 stop=None,
             )
-            return response
+            
+            # If we got tool_calls from native mode, return them in a dict
+            if tool_calls:
+                return {"content": content, "tool_calls": tool_calls}
+            
+            # No tool calls, return content as string
+            return content if content else ""
 
-        stop_sequences = handler.get_stop_sequences()
+        # For text-based parsing, use stop sequences only on first iteration
+        # After tools have run, let the model complete its response naturally
+        stop_sequences = None if skip_stop_sequences else handler.get_stop_sequences()
         return client.query(messages, plaintext_output=True, stream=False, stop=stop_sequences)
 
 

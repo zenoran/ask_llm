@@ -112,6 +112,13 @@ def setup_service_logging(verbose: bool = False, debug: bool = False) -> None:
     _verbose = verbose
     _debug = debug
 
+    # Suppress Hugging Face / Transformers progress noise in non-debug mode
+    if not debug:
+        os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+        os.environ.setdefault("TRANSFORMERS_NO_ADVISORY_WARNINGS", "1")
+        os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
+        os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+
     # Determine log level
     if debug:
         level = logging.DEBUG

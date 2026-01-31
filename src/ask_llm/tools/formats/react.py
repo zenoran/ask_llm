@@ -17,6 +17,56 @@ _THOUGHT_MARKERS = (
     "observation:",
 )
 
+# Alternative format markers that some models use
+_ALT_TOOL_MARKERS = (
+    "# tool:",
+    "tool:",
+    "function:",
+    "# function:",
+)
+
+# Map of common tool name variations to actual tool names
+# Models often invent their own tool names; this normalizes them
+TOOL_NAME_ALIASES = {
+    # History retrieval variations
+    "retrieve_conversation_history": "get_recent_history",
+    "get_conversation_history": "get_recent_history",
+    "get_history": "get_recent_history",
+    "conversation_history": "get_recent_history",
+    "fetch_history": "get_recent_history",
+    "show_history": "get_recent_history",
+    "list_history": "get_recent_history",
+    "get_messages": "get_recent_history",
+    "retrieve_messages": "get_recent_history",
+    # Memory search variations
+    "search_memory": "search_memories",
+    "memory_search": "search_memories",
+    "query_memories": "search_memories",
+    "find_memories": "search_memories",
+    # Memory storage variations
+    "save_memory": "store_memory",
+    "add_memory": "store_memory",
+    "remember": "store_memory",
+    # Profile variations
+    "get_profile": "get_user_profile",
+    "user_profile": "get_user_profile",
+    "set_attribute": "set_user_attribute",
+    "set_preference": "set_user_attribute",
+    # Web search variations
+    "search": "web_search",
+    "internet_search": "web_search",
+    "google": "web_search",
+}
+
+
+def _normalize_tool_name(name: str) -> str:
+    """Normalize tool name to match actual tool definitions."""
+    normalized = name.strip().lower().replace("-", "_").replace(" ", "_")
+    # Check aliases
+    if normalized in TOOL_NAME_ALIASES:
+        return TOOL_NAME_ALIASES[normalized]
+    return name.strip()
+
 
 def _try_fix_json(json_str: str) -> str | None:
     original = json_str
@@ -161,15 +211,46 @@ class ReActFormatHandler(ToolFormatHandler):
         )
 
     def get_stop_sequences(self) -> list[str]:
-        return ["\nObservation:", "\nObservation"]
+        # Stop sequences should ONLY stop before tool calls, not before Final Answer
+        # We want to stop when the model is about to hallucinate an Observation
+        # (which it shouldn't - we provide the real observation after tool execution)
+        return [
+            "\nObservation:",   # Stop before hallucinating tool result
+            "\nObservation",    # Catch without colon
+            "}\nObservation",   # After JSON closes
+        ]
 
     def parse_response(self, response: str) -> tuple[list[ToolCallRequest], str]:
         if not response:
             return [], ""
 
+        # Try ReAct format first: Action: / Action Input:
+        result = self._parse_react_format(response)
+        if result[0]:
+            return result
+
+        # Try alternative format: # Tool: / # Arguments: (Dolphin, etc.)
+        result = self._parse_alt_tool_format(response)
+        if result[0]:
+            return result
+
+        # Try code block with JSON tool call
+        result = self._parse_code_block_format(response)
+        if result[0]:
+            return result
+
+        # Check for Final Answer
+        final_match = re.search(r"(?is)Final\s*Answer\s*:\s*(.*)$", response)
+        if final_match:
+            return [], final_match.group(1).strip()
+
+        return [], response.strip()
+
+    def _parse_react_format(self, response: str) -> tuple[list[ToolCallRequest], str]:
+        """Parse standard ReAct format: Action: / Action Input:"""
         action_match = re.search(r"(?im)^\s*Action\s*:\s*(.+?)\s*$", response)
         if action_match:
-            tool_name = action_match.group(1).strip()
+            tool_name = _normalize_tool_name(action_match.group(1))
             search_start = action_match.end()
             action_input_match = re.search(
                 r"(?im)^\s*Action\s*Input\s*:\s*", response[search_start:]
@@ -180,6 +261,8 @@ class ReActFormatHandler(ToolFormatHandler):
                 if payload and end_idx:
                     parsed = _load_json_payload(payload)
                     if isinstance(parsed, dict):
+                        # Normalize argument keys too
+                        parsed = self._normalize_arguments(tool_name, parsed)
                         raw_text = response[action_match.start() : end_idx]
                         remaining = (response[: action_match.start()] + response[end_idx:]).strip()
                         return (
@@ -192,12 +275,120 @@ class ReActFormatHandler(ToolFormatHandler):
                             ],
                             remaining,
                         )
+            else:
+                # No Action Input found - treat as tool with no arguments
+                # This handles tools like get_user_profile that don't require params
+                raw_text = response[action_match.start() : action_match.end()]
+                remaining = (response[: action_match.start()] + response[action_match.end():]).strip()
+                return (
+                    [
+                        ToolCallRequest(
+                            name=tool_name,
+                            arguments={},
+                            raw_text=raw_text,
+                        )
+                    ],
+                    remaining,
+                )
+        return [], response
 
-        final_match = re.search(r"(?is)Final\s*Answer\s*:\s*(.*)$", response)
-        if final_match:
-            return [], final_match.group(1).strip()
+    def _parse_alt_tool_format(self, response: str) -> tuple[list[ToolCallRequest], str]:
+        """Parse alternative format: # Tool: / # Arguments: (Dolphin, Mistral, etc.)"""
+        # Match: # Tool: tool_name (with optional markdown code block)
+        tool_match = re.search(r"(?im)^[`\s]*#?\s*Tool\s*:\s*(.+?)\s*$", response)
+        if not tool_match:
+            return [], response
 
-        return [], response.strip()
+        tool_name = _normalize_tool_name(tool_match.group(1))
+        search_start = tool_match.end()
+
+        # Look for # Arguments: or Arguments: with JSON
+        args_match = re.search(
+            r"(?im)^[`\s]*#?\s*Arguments?\s*:\s*", response[search_start:]
+        )
+        if args_match:
+            input_start = search_start + args_match.end()
+            payload, end_idx = _extract_json_object(response, input_start)
+            if payload and end_idx:
+                parsed = _load_json_payload(payload)
+                if isinstance(parsed, dict):
+                    parsed = self._normalize_arguments(tool_name, parsed)
+                    raw_text = response[tool_match.start() : end_idx]
+                    remaining = (response[: tool_match.start()] + response[end_idx:]).strip()
+                    # Strip code block markers from remaining
+                    remaining = re.sub(r"^```\s*\n?", "", remaining)
+                    remaining = re.sub(r"\n?```\s*$", "", remaining)
+                    logger.info(f"Parsed alt tool format: {tool_name} with args {parsed}")
+                    return (
+                        [
+                            ToolCallRequest(
+                                name=tool_name,
+                                arguments=parsed,
+                                raw_text=raw_text,
+                            )
+                        ],
+                        remaining.strip(),
+                    )
+        return [], response
+
+    def _parse_code_block_format(self, response: str) -> tuple[list[ToolCallRequest], str]:
+        """Parse JSON tool call in a code block."""
+        # Match: ```json or ``` followed by {"name": "...", "arguments": {...}}
+        code_block_match = re.search(
+            r"```(?:json)?\s*\n?\s*(\{.*?\})\s*\n?```",
+            response,
+            re.DOTALL | re.IGNORECASE,
+        )
+        if code_block_match:
+            payload = code_block_match.group(1)
+            parsed = _load_json_payload(payload)
+            if isinstance(parsed, dict) and "name" in parsed:
+                tool_name = _normalize_tool_name(str(parsed.get("name", "")))
+                arguments = parsed.get("arguments", {})
+                if not isinstance(arguments, dict):
+                    arguments = {}
+                arguments = self._normalize_arguments(tool_name, arguments)
+                raw_text = code_block_match.group(0)
+                remaining = (
+                    response[: code_block_match.start()]
+                    + response[code_block_match.end() :]
+                ).strip()
+                logger.info(f"Parsed code block tool format: {tool_name}")
+                return (
+                    [
+                        ToolCallRequest(
+                            name=tool_name,
+                            arguments=arguments,
+                            raw_text=raw_text,
+                        )
+                    ],
+                    remaining,
+                )
+        return [], response
+
+    def _normalize_arguments(self, tool_name: str, args: dict) -> dict:
+        """Normalize argument keys for a tool call."""
+        # Map common argument name variations
+        ARG_ALIASES = {
+            "num_messages": "n_messages",
+            "number_of_messages": "n_messages",
+            "count": "n_messages",
+            "limit": "n_messages",
+            "num_results": "n_results",
+            "number_of_results": "n_results",
+            "max_results": "n_results",
+            "search_query": "query",
+            "q": "query",
+            "text": "content",
+            "message": "content",
+        }
+        normalized = {}
+        for key, value in args.items():
+            normalized_key = key.lower().replace("-", "_").replace(" ", "_")
+            if normalized_key in ARG_ALIASES:
+                normalized_key = ARG_ALIASES[normalized_key]
+            normalized[normalized_key] = value
+        return normalized
 
     def format_result(
         self,
@@ -216,19 +407,60 @@ class ReActFormatHandler(ToolFormatHandler):
         if not response:
             return ""
 
+        # Extract Final Answer if present
         final_match = re.search(r"(?is)Final\s*Answer\s*:\s*(.*)$", response)
         if final_match:
             response = final_match.group(1).strip()
 
+        # Remove ReAct markers (Thought:, Action:, Action Input:, Observation:)
         cleaned_lines = []
+        skip_until_blank = False
         for line in response.splitlines():
             stripped = line.strip().lower()
+            
+            # Skip ReAct single-line markers (don't set skip_until_blank - these are one line)
             if stripped.startswith(_THOUGHT_MARKERS):
                 continue
+            
+            # Skip alternative tool format markers (these have multi-line JSON after them)
+            if any(stripped.startswith(marker) for marker in _ALT_TOOL_MARKERS):
+                skip_until_blank = True
+                continue
+            if stripped.startswith("# arguments:") or stripped.startswith("arguments:"):
+                skip_until_blank = True
+                continue
+            
+            # Resume after blank line (end of tool block)
+            if skip_until_blank:
+                if not stripped:
+                    skip_until_blank = False
+                continue
+            
             cleaned_lines.append(line)
 
         cleaned = "\n".join(cleaned_lines)
+        
+        # Remove XML-style tool calls
         cleaned = re.sub(r"<tool_call>.*?</tool_call>", "", cleaned, flags=re.DOTALL | re.IGNORECASE)
+        cleaned = re.sub(r"<function_call>.*?</function_call>", "", cleaned, flags=re.DOTALL | re.IGNORECASE)
+        
+        # Remove code blocks containing tool calls
+        cleaned = re.sub(
+            r"```(?:json)?\s*\n?\s*#\s*Tool:.*?```",
+            "",
+            cleaned,
+            flags=re.DOTALL | re.IGNORECASE,
+        )
+        cleaned = re.sub(
+            r"```(?:json)?\s*\n?\s*\{[^}]*\"name\"[^}]*\}.*?```",
+            "",
+            cleaned,
+            flags=re.DOTALL | re.IGNORECASE,
+        )
+        
+        # Clean up excessive whitespace
+        cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+        
         return cleaned.strip()
 
     def _normalize_result(self, result: Any) -> str:

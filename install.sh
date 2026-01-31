@@ -38,6 +38,7 @@ EDITABLE=false
 REPO="git+https://github.com/zenoran/ask_llm.git"
 DEV_SYNC=false
 FORCE_REBUILD=false
+DEPS_ONLY=false  # Install only dependencies, not the project itself (for Docker layer caching)
 
 # Help function
 show_help() {
@@ -156,6 +157,11 @@ while [[ $# -gt 0 ]]; do
             DEV_SYNC=true
             shift
             ;;
+        --deps-only)
+            # Install only dependencies, not the project (for Docker layer caching)
+            DEPS_ONLY=true
+            shift
+            ;;
         *)
             echo -e "${RED}Unknown option: $1${NC}"
             exit 1
@@ -182,9 +188,17 @@ if [ "$DEV_SYNC" = true ]; then
     # Sync all extras (excluding llamacpp - we handle that separately for CUDA)
     # Use --inexact to not remove packages not in the lock file (like our CUDA-built llama-cpp)
     echo -e "${YELLOW}  Syncing extras: mcp, service, search, memory, huggingface...${NC}"
+    if [ "$DEPS_ONLY" = true ]; then
+        # Docker layer caching: install deps without the project (src/ not available yet)
+        # Skip llama-cpp entirely - it will be installed in the next Docker layer
+        uv sync --inexact --no-install-project --extra mcp --extra service --extra search --extra memory --extra huggingface
+        echo -e "${GREEN}✓ Dependencies synced (deps-only mode)${NC}"
+        exit 0
+    fi
+
     uv sync --inexact --extra mcp --extra service --extra search --extra memory --extra huggingface
     echo -e "${GREEN}✓ Base extras synced${NC}"
-    
+
     # Install llama-cpp-python with CUDA
     echo -e "${BLUE}Installing llama-cpp-python with CUDA...${NC}"
     if [ "$WITH_CUDA" = true ]; then

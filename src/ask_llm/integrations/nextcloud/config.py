@@ -1,9 +1,23 @@
-"""Nextcloud Talk bot configuration management."""
+"""Nextcloud Talk bot configuration management.
+
+Nextcloud bot configs (including secrets) are stored in the USER config:
+    ~/.config/ask-llm/bots.yaml
+
+This is separate from the repo's bots.yaml which only contains bot definitions.
+The user config is merged with the repo config at runtime.
+"""
 
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 import yaml
+
+
+def _get_user_bots_yaml_path() -> Path:
+    """Get path to user's bots.yaml config file."""
+    from ask_llm.utils.config import DOTENV_PATH
+    # DOTENV_PATH is ~/.config/ask-llm/.env, so parent is the config dir
+    return DOTENV_PATH.parent / "bots.yaml"
 
 
 @dataclass
@@ -22,32 +36,64 @@ class NextcloudBot:
 
 
 class NextcloudBotConfig:
-    """Manages Nextcloud bot configuration from bots.yaml."""
+    """Manages Nextcloud bot configuration.
+    
+    Reads nextcloud configs from BOTH:
+    - Repo bots.yaml (passed in constructor) - for legacy/fallback
+    - User bots.yaml (~/.config/ask-llm/bots.yaml) - preferred location for secrets
+    
+    Writes ONLY to user bots.yaml to keep secrets out of repo.
+    """
 
     def __init__(self, bots_yaml_path: Path):
-        self.bots_yaml_path = bots_yaml_path
+        """Initialize config.
+        
+        Args:
+            bots_yaml_path: Path to repo's bots.yaml (for reading only)
+        """
+        self.repo_bots_yaml_path = bots_yaml_path
+        self.user_bots_yaml_path = _get_user_bots_yaml_path()
         self.bots: dict[str, NextcloudBot] = {}
         self._last_mtime: float = 0
+        self._last_user_mtime: float = 0
         self.load()
 
     def _check_reload(self):
-        """Reload config if file has changed."""
-        if not self.bots_yaml_path.exists():
-            return
-        mtime = self.bots_yaml_path.stat().st_mtime
-        if mtime > self._last_mtime:
+        """Reload config if either file has changed."""
+        repo_mtime = self.repo_bots_yaml_path.stat().st_mtime if self.repo_bots_yaml_path.exists() else 0
+        user_mtime = self.user_bots_yaml_path.stat().st_mtime if self.user_bots_yaml_path.exists() else 0
+        
+        if repo_mtime > self._last_mtime or user_mtime > self._last_user_mtime:
             self.load()
 
     def load(self):
-        """Load Nextcloud bot configs from bots.yaml."""
-        if not self.bots_yaml_path.exists():
-            return
-
-        self._last_mtime = self.bots_yaml_path.stat().st_mtime
+        """Load Nextcloud bot configs from both repo and user bots.yaml.
+        
+        User config takes precedence over repo config.
+        """
         self.bots.clear()
+        
+        # Track mtimes
+        if self.repo_bots_yaml_path.exists():
+            self._last_mtime = self.repo_bots_yaml_path.stat().st_mtime
+        if self.user_bots_yaml_path.exists():
+            self._last_user_mtime = self.user_bots_yaml_path.stat().st_mtime
 
-        with open(self.bots_yaml_path) as f:
+        # Load from repo bots.yaml first (legacy support)
+        if self.repo_bots_yaml_path.exists():
+            self._load_from_yaml(self.repo_bots_yaml_path)
+        
+        # Load from user bots.yaml (overrides repo)
+        if self.user_bots_yaml_path.exists():
+            self._load_from_yaml(self.user_bots_yaml_path)
+    
+    def _load_from_yaml(self, yaml_path: Path):
+        """Load nextcloud configs from a YAML file."""
+        with open(yaml_path) as f:
             data = yaml.safe_load(f)
+        
+        if not data:
+            return
 
         # Look for nextcloud config in each bot
         for bot_id, bot_config in data.get('bots', {}).items():
@@ -56,15 +102,25 @@ class NextcloudBotConfig:
                 self.bots[bot_id] = NextcloudBot(
                     ask_llm_bot=bot_id,
                     nextcloud_bot_id=nc_config.get('bot_id'),
-                    secret=nc_config.get('secret'),
+                    secret=nc_config.get('secret', ''),
                     conversation_token=nc_config.get('conversation_token'),
                     enabled=nc_config.get('enabled', True),
                 )
 
     def save(self):
-        """Save Nextcloud configs back to bots.yaml."""
-        with open(self.bots_yaml_path) as f:
-            data = yaml.safe_load(f)
+        """Save Nextcloud configs to USER bots.yaml (not repo).
+        
+        This keeps secrets out of the repository.
+        """
+        # Ensure user config directory exists
+        self.user_bots_yaml_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        # Load existing user config or create empty
+        if self.user_bots_yaml_path.exists():
+            with open(self.user_bots_yaml_path) as f:
+                data = yaml.safe_load(f) or {}
+        else:
+            data = {}
 
         if 'bots' not in data:
             data['bots'] = {}
@@ -72,7 +128,7 @@ class NextcloudBotConfig:
         # Update nextcloud section for each bot
         for bot_id, nc_bot in self.bots.items():
             if bot_id not in data['bots']:
-                continue
+                data['bots'][bot_id] = {}
 
             data['bots'][bot_id]['nextcloud'] = {
                 'bot_id': nc_bot.nextcloud_bot_id,
@@ -81,8 +137,10 @@ class NextcloudBotConfig:
                 'enabled': nc_bot.enabled,
             }
 
-        with open(self.bots_yaml_path, 'w') as f:
+        with open(self.user_bots_yaml_path, 'w') as f:
             yaml.dump(data, f, default_flow_style=False, sort_keys=False)
+        
+        self._last_user_mtime = self.user_bots_yaml_path.stat().st_mtime
 
     def add_bot(
         self,
@@ -91,7 +149,10 @@ class NextcloudBotConfig:
         secret: str,
         conversation_token: str,
     ):
-        """Add Nextcloud config to a bot."""
+        """Add Nextcloud config to a bot.
+        
+        Saves to ~/.config/ask-llm/bots.yaml (user config, not repo).
+        """
         bot = NextcloudBot(
             ask_llm_bot=ask_llm_bot,
             nextcloud_bot_id=nextcloud_bot_id,
@@ -104,19 +165,29 @@ class NextcloudBotConfig:
         return bot
 
     def remove_bot(self, ask_llm_bot: str) -> bool:
-        """Remove Nextcloud config from a bot."""
-        if ask_llm_bot in self.bots:
-            del self.bots[ask_llm_bot]
-            # Remove from YAML
-            with open(self.bots_yaml_path) as f:
-                data = yaml.safe_load(f)
+        """Remove Nextcloud config from a bot.
+        
+        Removes from user config only (doesn't touch repo).
+        """
+        if ask_llm_bot not in self.bots:
+            return False
+        
+        del self.bots[ask_llm_bot]
+        
+        # Remove from user YAML
+        if self.user_bots_yaml_path.exists():
+            with open(self.user_bots_yaml_path) as f:
+                data = yaml.safe_load(f) or {}
             if 'bots' in data and ask_llm_bot in data['bots']:
                 if 'nextcloud' in data['bots'][ask_llm_bot]:
                     del data['bots'][ask_llm_bot]['nextcloud']
-            with open(self.bots_yaml_path, 'w') as f:
+                    # Clean up empty bot entry
+                    if not data['bots'][ask_llm_bot]:
+                        del data['bots'][ask_llm_bot]
+            with open(self.user_bots_yaml_path, 'w') as f:
                 yaml.dump(data, f, default_flow_style=False, sort_keys=False)
-            return True
-        return False
+        
+        return True
 
     def get_bot_by_conversation(self, token: str) -> Optional[NextcloudBot]:
         """Get bot config by conversation token."""

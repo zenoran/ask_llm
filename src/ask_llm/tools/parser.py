@@ -299,8 +299,7 @@ def format_tool_result(tool_name: str, result: Any, error: str | None = None) ->
     return (
         f"<tool_result name=\"{tool_name}\" status=\"success\">\n"
         f"{result_str}\n"
-        f"</tool_result>\n"
-        f"[IMPORTANT: Use the ACTUAL result above in your response. Do not make up or assume different information.]"
+        f"</tool_result>"
     )
 
 

@@ -3,7 +3,7 @@ import logging
 import os
 import contextlib
 import json
-from typing import List, Dict, Any, Iterator
+from typing import List, Dict, Any, Iterator, Optional, Union
 
 from rich.markdown import Markdown
 from rich.rule import Rule
@@ -216,6 +216,162 @@ class LlamaCppClient(LLMClient):
         """Return Llama.cpp specific styling."""
         # Return None for title to let base class use bot_name, only specify border style
         return None, "yellow"
+
+    def supports_native_tools(self) -> bool:
+        """Check if this client supports native tool calling.
+        
+        llama-cpp-python supports native function calling via chat_format.
+        We return True here, but actual support depends on model compatibility.
+        """
+        return True
+
+    def query_with_tools(
+        self,
+        messages: List[Message],
+        tools_schema: Optional[List[Dict[str, Any]]] = None,
+        tool_choice: Union[str, Dict[str, Any], None] = "auto",
+        stop: Optional[Union[List[str], str]] = None,
+        **kwargs: Any,
+    ) -> tuple[Any, Optional[List[Dict[str, Any]]]]:
+        """Query with native function calling support.
+        
+        Uses llama-cpp-python's built-in chatml-function-calling format
+        which constrains output with grammar to ensure valid JSON.
+        
+        Args:
+            messages: List of Message objects
+            tools_schema: List of tool definitions in OpenAI format
+            tool_choice: "auto", "none", or {"type": "function", "function": {"name": "..."}}
+            stop: Stop sequences (ignored for native tool calling)
+            
+        Returns:
+            Tuple of (response_content, tool_calls_or_none)
+            - If tool_calls is not None, it contains OpenAI-format tool calls
+            - Otherwise response_content is the text response
+        """
+        if not self.model:
+            raise RuntimeError("Llama.cpp model not properly initialized.")
+        
+        # If no tools, fall back to regular query
+        if not tools_schema:
+            response = self.query(messages, plaintext_output=True, stream=False, stop=stop, **kwargs)
+            return response, None
+        
+        api_messages = [msg.to_api_format() for msg in messages]
+        
+        generation_params = {
+            "messages": api_messages,
+            "tools": tools_schema,
+            "tool_choice": tool_choice or "auto",
+            "max_tokens": self.config.MAX_TOKENS,
+            "temperature": self.config.TEMPERATURE,
+            "top_p": self.config.TOP_P,
+            "stream": False,  # Tool calls don't stream well
+        }
+        
+        if self.config.VERBOSE:
+            logger.debug(f"Native tool call with {len(tools_schema)} tools, tool_choice={tool_choice}")
+        
+        try:
+            with open(os.devnull, 'w') as fnull, contextlib.redirect_stderr(fnull):
+                completion = self.model.create_chat_completion(**generation_params)
+            
+            if not completion or 'choices' not in completion:
+                return "Error: No response from model", None
+            
+            choice = completion['choices'][0]
+            message = choice.get('message', {})
+            
+            # Check for tool calls
+            tool_calls = message.get('tool_calls')
+            if tool_calls:
+                # Return the raw text (if any) and the tool calls
+                content = message.get('content') or ""
+                return content, tool_calls
+            
+            # No tool calls, return content
+            content = message.get('content', '')
+            return content, None
+            
+        except Exception as e:
+            logger.warning(f"Native tool calling failed: {e}, falling back to text-based")
+            # Fall back to regular query without tools
+            response = self.query(messages, plaintext_output=True, stream=False, stop=stop, **kwargs)
+            return response, None
+
+    def stream_with_tools(
+        self,
+        messages: List[Message],
+        tools: List[Dict[str, Any]],
+        tool_choice: Union[str, Dict[str, Any]] = "auto",
+        **kwargs: Any,
+    ) -> Iterator[Union[str, Dict[str, Any]]]:
+        """Stream responses with native tool calling support.
+        
+        Yields:
+            - String chunks for regular content
+            - Dict with tool_calls when a tool call is detected
+        """
+        if not self.model:
+            raise RuntimeError("Llama.cpp model not properly initialized.")
+        
+        api_messages = [msg.to_api_format() for msg in messages]
+        
+        generation_params = {
+            "messages": api_messages,
+            "tools": tools,
+            "tool_choice": tool_choice,
+            "max_tokens": self.config.MAX_TOKENS,
+            "temperature": self.config.TEMPERATURE,
+            "top_p": self.config.TOP_P,
+            "stream": True,
+        }
+        
+        try:
+            with open(os.devnull, 'w') as fnull, contextlib.redirect_stderr(fnull):
+                stream = self.model.create_chat_completion(**generation_params)
+            
+            accumulated_tool_calls: Dict[int, Dict[str, Any]] = {}
+            
+            for chunk in stream:
+                choice = chunk.get('choices', [{}])[0]
+                delta = choice.get('delta', {})
+                
+                # Check for content
+                content = delta.get('content')
+                if content:
+                    yield content
+                
+                # Check for tool calls
+                tool_calls = delta.get('tool_calls')
+                if tool_calls:
+                    for tc in tool_calls:
+                        idx = tc.get('index', 0)
+                        if idx not in accumulated_tool_calls:
+                            accumulated_tool_calls[idx] = {
+                                "id": tc.get('id', f"call_{idx}"),
+                                "type": "function",
+                                "function": {
+                                    "name": "",
+                                    "arguments": "",
+                                }
+                            }
+                        
+                        if 'function' in tc:
+                            if 'name' in tc['function']:
+                                accumulated_tool_calls[idx]['function']['name'] += tc['function']['name']
+                            if 'arguments' in tc['function']:
+                                accumulated_tool_calls[idx]['function']['arguments'] += tc['function']['arguments']
+                
+                # Check for finish reason
+                if choice.get('finish_reason') == 'tool_calls':
+                    # Yield the accumulated tool calls
+                    yield {"tool_calls": list(accumulated_tool_calls.values())}
+                    return
+                    
+        except Exception as e:
+            logger.exception(f"Error in stream_with_tools: {e}")
+            yield f"\nERROR: {e}"
 
     def unload(self) -> None:
         """Unload the GGUF model and free GPU/CPU memory."""

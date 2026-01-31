@@ -1,5 +1,5 @@
 # Multi-stage build for ask_llm
-FROM nvidia/cuda:13.1.1-devel-ubuntu24.04 AS base
+FROM nvidia/cuda:12.9.1-devel-ubuntu24.04 AS base
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -14,7 +14,7 @@ RUN apt-get update && apt-get install -y \
     ninja-build \
     libpq-dev \
     git \
-    cuda-compat-13-1 \
+    cuda-compat-12-9 \
     && rm -rf /var/lib/apt/lists/*
 
 # Install uv
@@ -24,11 +24,10 @@ ENV PATH="/root/.local/bin:$PATH"
 # Set working directory
 WORKDIR /app
 
-# Copy project files
-COPY pyproject.toml ./
-COPY src/ ./src/
-COPY install.sh server.sh ./
-RUN chmod +x install.sh server.sh
+# Copy ONLY files needed for dependency installation first (for layer caching)
+# This ensures source code changes don't invalidate the venv cache
+COPY pyproject.toml install.sh ./
+RUN chmod +x install.sh
 
 # Create virtual environment and install dependencies using install.sh
 # install.sh handles CUDA-aware llama-cpp-python installation when available
@@ -38,17 +37,32 @@ ENV CUDA_ARCHS=$CUDA_ARCHS
 ENV LD_LIBRARY_PATH=/usr/local/cuda/compat:/usr/local/cuda/lib64:/usr/local/cuda/lib64/stubs
 ENV LIBRARY_PATH=/usr/local/cuda/compat:/usr/local/cuda/lib64/stubs
 RUN echo "/usr/local/cuda/compat" > /etc/ld.so.conf.d/cuda-compat.conf && ldconfig
-ENV UV_HTTP_TIMEOUT=300
+ENV UV_HTTP_TIMEOUT=600
 # Add CUDA stubs for linking during build (no GPU available in docker build)
 ENV LIBRARY_PATH=/usr/local/cuda/lib64/stubs:$LIBRARY_PATH
+# Install dependencies only (without project) - this layer is cached
+RUN ./install.sh --dev --deps-only
+
+# Install llama-cpp-python with CUDA (separate cached layer)
 RUN if [ "$WITH_CUDA" = "true" ]; then \
-        ./install.sh --dev; \
+        CUDA_ARCHS="${CUDA_ARCHS:-120}" \
+        CMAKE_ARGS="-DGGML_CUDA=on -DCMAKE_CUDA_ARCHITECTURES=${CUDA_ARCHS}" \
+        uv pip install llama-cpp-python --reinstall; \
     else \
-        ./install.sh --dev --no-cuda; \
+        uv pip install llama-cpp-python; \
     fi
 
+# NOW copy source code and other files needed for project install
+# Changes to src/ won't invalidate the venv/deps layer above
+COPY src/ ./src/
+COPY server.sh ./
+RUN chmod +x server.sh
+
+# Install the project itself (fast since deps + llama-cpp are cached)
+RUN uv sync --inexact --extra mcp --extra service --extra search --extra memory --extra huggingface
+
 # Runtime stage
-FROM nvidia/cuda:13.1.1-runtime-ubuntu24.04 AS runtime
+FROM nvidia/cuda:12.9.1-runtime-ubuntu24.04 AS runtime
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -91,4 +105,4 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
     CMD curl -f http://localhost:8642/health || exit 1
 
 # Default command starts both MCP server and LLM service
-CMD ["/app/server.sh", "start", "--stdout"]
+CMD ["/app/server.sh", "start", "--stdout", "--verbose"]

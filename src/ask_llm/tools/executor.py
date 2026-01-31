@@ -363,7 +363,8 @@ class ToolExecutor:
 
         try:
             # Get recent messages using the memory client
-            results = self.memory_client.get_messages(limit=n_messages)
+            # We fetch more than needed since we'll filter out summaries and system messages
+            results = self.memory_client.get_messages(limit=None)  # Get all, filter ourselves
 
             if not results:
                 return format_tool_result(
@@ -371,17 +372,20 @@ class ToolExecutor:
                     "No messages found in history."
                 )
 
+            # Filter out summaries and system messages - we want actual conversation messages
+            results = [r for r in results if r.get("role") not in ("summary", "system")]
+            
             # Filter by role if specified
             if role_filter:
                 results = [r for r in results if r.get("role") == role_filter]
 
-            # Sort by timestamp descending (most recent first) and limit
+            # Sort by timestamp descending (most recent first) and take n_messages
             results = sorted(results, key=lambda x: x.get("timestamp", 0), reverse=True)[:n_messages]
 
             if not results:
                 return format_tool_result(
                     tool_call.name,
-                    f"No {role_filter} messages found in history."
+                    f"No {role_filter or 'conversation'} messages found in history."
                 )
 
             # Format results for the model (oldest first for readability)

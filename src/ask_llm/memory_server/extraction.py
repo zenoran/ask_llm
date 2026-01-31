@@ -77,9 +77,9 @@ def extract_profile_attributes_from_fact(
     # Store as profile attribute
     try:
         from ask_llm.profiles import ProfileManager, EntityType
-        
+
         manager = ProfileManager(config)
-        manager.set_attribute(
+        attr = manager.set_attribute(
             entity_type=EntityType.USER,
             entity_id=user_id,
             category=category,
@@ -88,9 +88,12 @@ def extract_profile_attributes_from_fact(
             confidence=importance,  # Map importance to confidence
             source="extracted",
         )
-        
-        logger.info(f"[Profile] ✓ Created attribute: {category}.{key} for user {user_id}")
-        return True
+
+        # Determine if this was a create or update based on timestamps
+        is_new = attr.created_at == attr.updated_at
+        action = "Created" if is_new else "Updated"
+        logger.info(f"[Profile] ✓ {action} attribute: {category}.{key} for user {user_id}")
+        return is_new  # Return True only if newly created
         
     except Exception as e:
         logger.exception(f"[Profile] Failed to create profile attribute: {e}")

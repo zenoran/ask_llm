@@ -62,14 +62,14 @@ EOF
 case "${1:-help}" in
   up)
     echo "Starting containers (production mode)..."
-    docker-compose up -d
+    docker compose up -d
     echo "✓ Services started on ports 8001 (MCP) and 8642 (LLM)"
     echo "Run './start.sh logs' to view output"
     ;;
 
   dev)
     echo "Starting containers (dev mode with live mounting)..."
-    docker-compose -f "$COMPOSE_BASE" -f "$COMPOSE_DEV" up -d
+    docker compose -f "$COMPOSE_BASE" -f "$COMPOSE_DEV" up -d
     echo "✓ Dev mode started - source code mounted from ./src"
     echo "✓ After code changes: ./start.sh restart"
     echo "Run './start.sh logs' to view output"
@@ -77,19 +77,19 @@ case "${1:-help}" in
 
   down)
     echo "Stopping containers..."
-    docker-compose down
+    docker compose down
     echo "✓ Containers stopped and removed"
     ;;
 
   restart)
     echo "Restarting containers..."
-    if docker-compose ps | grep -q ask_llm_app; then
+    if docker compose ps | grep -q ask_llm_app; then
       # Check if dev mode (has source mount)
       if docker inspect ask_llm_app 2>/dev/null | grep -q "/app/src"; then
-        docker-compose -f "$COMPOSE_BASE" -f "$COMPOSE_DEV" restart
+        docker compose -f "$COMPOSE_BASE" -f "$COMPOSE_DEV" restart
         echo "✓ Dev containers restarted"
       else
-        docker-compose restart
+        docker compose restart
         echo "✓ Production containers restarted"
       fi
     else
@@ -100,20 +100,20 @@ case "${1:-help}" in
 
   rebuild)
     echo "Rebuilding and restarting containers..."
-    docker-compose down
-    docker-compose up -d --build
+    docker compose down
+    docker compose up -d --build
     echo "✓ Containers rebuilt and started"
     echo "Run './start.sh logs' to view output"
     ;;
 
   logs)
     echo "Following container logs (Ctrl+C to exit)..."
-    docker-compose logs -f --tail=50
+    docker compose logs -f --tail=50
     ;;
 
   status|ps)
     echo "Container status:"
-    docker-compose ps
+    docker compose ps
     echo ""
     echo "To check service health: llm --status"
     ;;
@@ -125,12 +125,12 @@ case "${1:-help}" in
       echo "Example: ./start.sh exec llm --status"
       exit 1
     fi
-    docker-compose exec app "$@"
+    docker compose exec app "$@"
     ;;
 
   shell|bash)
     echo "Opening shell in container..."
-    docker-compose exec app bash
+    docker compose exec app bash
     ;;
 
   help|-h|--help)

@@ -650,7 +650,7 @@ class BackgroundService:
         if not self._default_model and self._available_models:
             self._default_model = self._available_models[0]
     
-    def _start_generation(self) -> tuple[threading.Event, threading.Event]:
+    async def _start_generation(self) -> tuple[threading.Event, threading.Event]:
         """Start a new generation, cancelling and waiting for any in-progress one.
         
         Returns:
@@ -663,6 +663,8 @@ class BackgroundService:
         2. Waiting for it to actually finish (up to 5 seconds)
         3. Then allowing the new generation to start
         """
+        loop = asyncio.get_event_loop()
+        
         with self._cancel_lock:
             # Cancel any existing generation and wait for it to finish
             if self._current_generation_cancel is not None:
@@ -671,12 +673,15 @@ class BackgroundService:
                 
                 # Wait for the previous generation to signal it's done
                 if self._generation_done is not None:
-                    # Release lock while waiting to avoid deadlock
                     done_event = self._generation_done
+                    # Release lock while waiting to avoid deadlock
                     self._cancel_lock.release()
                     try:
-                        # Wait up to 5 seconds for previous generation to stop
-                        done_event.wait(timeout=5.0)
+                        # Wait in executor to avoid blocking the event loop
+                        await loop.run_in_executor(
+                            None,  # Use default executor
+                            lambda: done_event.wait(timeout=5.0)
+                        )
                     finally:
                         self._cancel_lock.acquire()
             
@@ -907,7 +912,7 @@ class BackgroundService:
             raise ValueError("No user message found in request")
         
         # Start new generation (cancels and waits for any previous one)
-        cancel_event, done_event = self._start_generation()
+        cancel_event, done_event = await self._start_generation()
         
         try:
             # Run the blocking query in single-thread executor
@@ -1084,7 +1089,7 @@ class BackgroundService:
         loop = asyncio.get_running_loop()
         
         # Start new generation (cancels and waits for any previous one)
-        cancel_event, done_event = self._start_generation()
+        cancel_event, done_event = await self._start_generation()
         
         def _stream_to_queue():
             """Run streaming in a thread and push chunks to the async queue."""
@@ -1216,10 +1221,10 @@ class BackgroundService:
                     else:
                         # Fall back to text-based streaming for non-native models (GGUF, etc.)
                         from ..tools import stream_with_tools
-                        log.debug("Using stream_with_tools for non-native tool format")
+                        log.debug(f"Using stream_with_tools for tool format: {ask_llm.tool_format}")
 
-                        def stream_fn(msgs):
-                            return ask_llm.client.stream_raw(msgs)
+                        def stream_fn(msgs, stop_sequences=None):
+                            return ask_llm.client.stream_raw(msgs, stop=stop_sequences)
 
                         stream_iter = stream_with_tools(
                             messages=messages,
@@ -1231,6 +1236,7 @@ class BackgroundService:
                             config=ask_llm.config,
                             user_id=ask_llm.user_id,
                             bot_id=ask_llm.bot_id,
+                            tool_format=ask_llm.tool_format,
                         )
                 else:
                     stream_iter = ask_llm.client.stream_raw(messages)
@@ -1446,20 +1452,83 @@ class BackgroundService:
         if not facts:
             log.info(f"[Extraction] No facts extracted from messages")
             return {"facts_extracted": 0, "facts_stored": 0, "llm_used": use_llm}
-        
-        log.info(f"[Extraction] Extracted {len(facts)} facts, storing...")
-        
+
+        log.info(f"[Extraction] Extracted {len(facts)} facts, checking for duplicates...")
+
         memory_client = self.get_memory_client(bot_id, user_id)
         stored_count = 0
         profile_count = 0
-        
+        skipped_count = 0
+
         if memory_client:
             min_importance = getattr(self.config, "MEMORY_EXTRACTION_MIN_IMPORTANCE", 0.3)
             profile_enabled = getattr(self.config, "MEMORY_PROFILE_ATTRIBUTE_ENABLED", True)
-            
-            for fact in facts:
-                log.debug(f"[Extraction] Fact: '{fact.content[:50]}...' importance={fact.importance:.2f} tags={fact.tags}")
-                if fact.importance >= min_importance:
+
+            # Filter facts by minimum importance first
+            facts = [f for f in facts if f.importance >= min_importance]
+
+            if not facts:
+                log.info("[Extraction] No facts above min importance threshold")
+                return {"facts_extracted": 0, "facts_stored": 0, "llm_used": use_llm}
+
+            # Fetch existing memories to check for duplicates
+            existing_memories = memory_client.list_memories(limit=100, min_importance=0.0)
+
+            if existing_memories:
+                # Use determine_memory_actions to filter out duplicates
+                actions = extraction_service.determine_memory_actions(
+                    new_facts=facts,
+                    existing_memories=existing_memories,
+                )
+
+                # Count how many facts were skipped (duplicates)
+                skipped_count = len(facts) - len(actions)
+                if skipped_count > 0:
+                    log.info(f"[Extraction] Skipped {skipped_count} duplicate/existing facts")
+
+                # Process only the actions (ADD, UPDATE, DELETE)
+                for action in actions:
+                    fact = action.fact
+                    if not fact:
+                        continue
+
+                    log.debug(f"[Extraction] {action.action}: '{fact.content[:50]}...' importance={fact.importance:.2f}")
+
+                    try:
+                        if action.action == "ADD":
+                            memory_client.add_memory(
+                                content=fact.content,
+                                tags=fact.tags,
+                                importance=fact.importance,
+                                source_message_ids=fact.source_message_ids,
+                            )
+                            stored_count += 1
+                        elif action.action == "UPDATE" and action.target_memory_id:
+                            memory_client.update_memory(
+                                memory_id=action.target_memory_id,
+                                content=fact.content,
+                                importance=fact.importance,
+                                tags=fact.tags,
+                            )
+                            stored_count += 1
+                        elif action.action == "DELETE" and action.target_memory_id:
+                            memory_client.delete_memory(memory_id=action.target_memory_id)
+
+                        # Extract profile attributes for ADD and UPDATE actions
+                        if action.action in ("ADD", "UPDATE") and profile_enabled:
+                            from ..memory_server.extraction import extract_profile_attributes_from_fact
+                            if extract_profile_attributes_from_fact(
+                                fact=fact,
+                                user_id=user_id,
+                                config=self.config,
+                            ):
+                                profile_count += 1
+                    except Exception as e:
+                        log.warning(f"Failed to process memory action {action.action}: {e}")
+            else:
+                # No existing memories - store all facts directly
+                for fact in facts:
+                    log.debug(f"[Extraction] ADD (no existing): '{fact.content[:50]}...' importance={fact.importance:.2f}")
                     try:
                         memory_client.add_memory(
                             content=fact.content,
@@ -1479,9 +1548,9 @@ class BackgroundService:
                     except Exception as e:
                         log.warning(f"Failed to store memory: {e}")
         
-        log.info(f"[Extraction] Stored {stored_count} memories, {profile_count} profile attributes")
-        log.memory_operation("extraction", bot_id, count=stored_count, details=f"extracted={len(facts)}, profiles={profile_count}, llm={use_llm}")
-        return {"facts_extracted": len(facts), "facts_stored": stored_count, "profile_attrs": profile_count, "llm_used": use_llm}
+        log.info(f"[Extraction] Stored {stored_count} memories, {profile_count} profile attributes, skipped {skipped_count} duplicates")
+        log.memory_operation("extraction", bot_id, count=stored_count, details=f"extracted={len(facts)}, stored={stored_count}, skipped={skipped_count}, profiles={profile_count}, llm={use_llm}")
+        return {"facts_extracted": len(facts), "facts_stored": stored_count, "facts_skipped": skipped_count, "profile_attrs": profile_count, "llm_used": use_llm}
     
     async def _process_compaction(self, task: Task) -> dict:
         """Process a context compaction task."""
