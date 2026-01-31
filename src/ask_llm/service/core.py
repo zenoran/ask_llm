@@ -178,12 +178,10 @@ class ServiceAskLLM(BaseAskLLM):
         """
         # Use tool loop if bot has tools enabled
         if self.bot.uses_tools and self.memory:
-            def query_fn(msgs, do_stream):
-                return self.client.query(msgs, plaintext_output=True, stream=do_stream)
-            
+            tool_definitions = self._get_tool_definitions()
             return query_with_tools(
                 messages=messages,
-                query_fn=query_fn,
+                client=self.client,
                 memory_client=self.memory,
                 profile_manager=self.profile_manager,
                 search_client=self.search_client,
@@ -192,6 +190,8 @@ class ServiceAskLLM(BaseAskLLM):
                 user_id=self.user_id,
                 bot_id=self.bot_id,
                 stream=stream,
+                tool_format=self.tool_format,
+                tools=tool_definitions,
             )
         
         response = self.client.query(

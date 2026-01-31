@@ -12,6 +12,8 @@ Tool categories:
 from dataclasses import dataclass, field
 from typing import Any
 
+from .formats import ToolFormat, get_format_handler
+
 
 @dataclass
 class ToolParameter:
@@ -376,11 +378,32 @@ MODEL_GUIDANCE = '''
 '''
 
 
+def get_tools_list(
+    tools: list[Tool] | None = None,
+    include_profile_tools: bool = True,
+    include_search_tools: bool = False,
+    include_model_tools: bool = False,
+) -> list[Tool]:
+    """Return the tool list based on selection flags."""
+    if tools is not None:
+        return tools
+
+    resolved = MEMORY_TOOLS.copy()
+    if include_profile_tools:
+        resolved.extend(PROFILE_TOOLS)
+    if include_search_tools:
+        resolved.extend(SEARCH_TOOLS)
+    if include_model_tools:
+        resolved.extend(MODEL_TOOLS)
+    return resolved
+
+
 def get_tools_prompt(
     tools: list[Tool] | None = None,
     include_profile_tools: bool = True,
     include_search_tools: bool = False,
     include_model_tools: bool = False,
+    tool_format: ToolFormat | str = ToolFormat.XML,
 ) -> str:
     """Generate the tools instruction prompt.
     
@@ -389,34 +412,40 @@ def get_tools_prompt(
         include_profile_tools: Whether to include profile tools (default True).
         include_search_tools: Whether to include web search tools (default False).
         include_model_tools: Whether to include model management tools (default False).
+        tool_format: Tool format to use for prompt instructions.
         
     Returns:
         Formatted prompt string to inject into system message.
     """
-    if tools is None:
-        tools = MEMORY_TOOLS.copy()
-        if include_profile_tools:
-            tools.extend(PROFILE_TOOLS)
-        if include_search_tools:
-            tools.extend(SEARCH_TOOLS)
-        if include_model_tools:
-            tools.extend(MODEL_TOOLS)
-    
-    tools_list = "\n".join(tool.to_prompt_string() for tool in tools)
-    
-    # Add search guidance if search tools are included
-    search_guidance = ""
-    if include_search_tools or any(t.name in ("web_search", "news_search") for t in tools):
-        search_guidance = SEARCH_GUIDANCE
-    
-    # Add model guidance if model tools are included
-    if include_model_tools or any(t.name in ("list_models", "switch_model", "get_current_model") for t in tools):
-        search_guidance += MODEL_GUIDANCE
-    
-    return TOOL_CALLING_INSTRUCTIONS.format(
-        tools_list=tools_list,
-        search_guidance=search_guidance,
+    tools = get_tools_list(
+        tools=tools,
+        include_profile_tools=include_profile_tools,
+        include_search_tools=include_search_tools,
+        include_model_tools=include_model_tools,
     )
+
+    # Legacy XML format stays inline for backward compatibility.
+    if (isinstance(tool_format, ToolFormat) and tool_format == ToolFormat.XML) or (
+        isinstance(tool_format, str) and tool_format.strip().lower() == ToolFormat.XML.value
+    ):
+        tools_list = "\n".join(tool.to_prompt_string() for tool in tools)
+
+        # Add search guidance if search tools are included
+        search_guidance = ""
+        if include_search_tools or any(t.name in ("web_search", "news_search") for t in tools):
+            search_guidance = SEARCH_GUIDANCE
+
+        # Add model guidance if model tools are included
+        if include_model_tools or any(t.name in ("list_models", "switch_model", "get_current_model") for t in tools):
+            search_guidance += MODEL_GUIDANCE
+
+        return TOOL_CALLING_INSTRUCTIONS.format(
+            tools_list=tools_list,
+            search_guidance=search_guidance,
+        )
+
+    handler = get_format_handler(tool_format)
+    return handler.get_system_prompt(tools)
 
 
 def get_tool_by_name(name: str, tools: list[Tool] | None = None) -> Tool | None:

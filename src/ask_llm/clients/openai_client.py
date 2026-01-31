@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import httpx
 from openai import OpenAI, OpenAIError
 from typing import List, Iterator, Any
 from rich.json import JSON
@@ -58,6 +59,9 @@ class OpenAIClient(LLMClient):
     def _get_api_key(self) -> str | None:
         return os.getenv("OPENAI_API_KEY")
 
+    def supports_native_tools(self) -> bool:
+        return True
+
     def _model_supports_temperature_top_p(self) -> bool:
         """Check if the model supports temperature and top_p parameters."""
         unsupported_patterns = (
@@ -92,8 +96,7 @@ class OpenAIClient(LLMClient):
     _TOKEN_PARAM_CANDIDATES = ("max_tokens", "max_completion_tokens", "max_output_tokens")
 
     def _initial_token_param_key(self) -> str:
-        m = self.model.lower()
-        if m.startswith("o3") or m.startswith("o4") or m in {"gpt-4o-search-preview", "gpt-4o-audio-preview"}:
+        if self._model_requires_max_completion_tokens():
             return "max_completion_tokens"
         return "max_tokens"
 
@@ -122,7 +125,23 @@ class OpenAIClient(LLMClient):
             attempted_without_temp_top_p = False
             try:
                 return self.client.chat.completions.create(**try_payload)
+            except httpx.HTTPStatusError as e:
+                self._log_http_error(e, try_payload)
+                body = ""
+                if getattr(e, "response", None) is not None:
+                    try:
+                        body = e.response.text.lower()
+                    except Exception:
+                        body = ""
+                if "unsupported parameter" in body and any(
+                    k in body for k in ("max_tokens", "max_completion_tokens", "max_output_tokens")
+                ):
+                    last_err = e
+                    continue
+                last_err = e
+                break
             except OpenAIError as e:
+                self._log_openai_error(e, try_payload)
                 msg = str(e).lower()
                 if ("unsupported parameter" in msg and any(k in msg for k in ("max_tokens", "max_completion_tokens", "max_output_tokens"))) or (
                     "invalid_request_error" in msg and "token" in msg
@@ -151,13 +170,49 @@ class OpenAIClient(LLMClient):
                     break
                 raise
             except Exception as e:
+                self._log_openai_error(e, try_payload)
                 last_err = e
                 break
         if last_err:
             raise last_err
-        return self.client.chat.completions.create(**payload)
 
-    def stream_raw(self, messages: List[Message], **kwargs) -> Iterator[str]:
+    def _log_http_error(self, err: httpx.HTTPStatusError, payload: dict) -> None:
+        response = getattr(err, "response", None)
+        status = response.status_code if response is not None else "unknown"
+        body = ""
+        if response is not None:
+            try:
+                body = response.text
+            except Exception:
+                body = "<unreadable response body>"
+        if body and len(body) > 2000:
+            body = body[:2000] + "...(truncated)"
+        logger.error(
+            "OpenAI HTTP %s for %s. Response body: %s",
+            status,
+            getattr(response, "url", "unknown"),
+            body or "<empty>",
+        )
+
+    def _log_openai_error(self, err: Exception, payload: dict) -> None:
+        response = getattr(err, "response", None) or getattr(err, "http_response", None)
+        status = getattr(response, "status_code", "unknown") if response is not None else "unknown"
+        body = ""
+        if response is not None:
+            try:
+                body = response.text
+            except Exception:
+                body = "<unreadable response body>"
+        if body and len(body) > 2000:
+            body = body[:2000] + "...(truncated)"
+        if body:
+            logger.error(
+                "OpenAI error (status=%s). Response body: %s",
+                status,
+                body,
+            )
+
+    def stream_raw(self, messages: List[Message], stop: list[str] | str | None = None, **kwargs) -> Iterator[str]:
         """Stream raw text chunks from OpenAI API without console formatting."""
         api_messages = self._prepare_api_messages(messages)
         payload = {
@@ -165,16 +220,18 @@ class OpenAIClient(LLMClient):
             "messages": api_messages,
             "stream": True,
         }
-        
+        if stop:
+            payload["stop"] = stop
+
         if self._model_requires_max_completion_tokens():
             payload["max_completion_tokens"] = self.config.MAX_TOKENS
         else:
             payload["max_tokens"] = self.config.MAX_TOKENS
-        
+
         if self._model_supports_temperature_top_p():
             payload["temperature"] = self.config.TEMPERATURE
             payload["top_p"] = self.config.TOP_P
-        
+
         try:
             stream = self._chat_create_with_fallback(payload)
             yield from self._iterate_openai_chunks(stream)
@@ -182,7 +239,89 @@ class OpenAIClient(LLMClient):
             logger.error(f"Error during OpenAI streaming: {e}")
             raise
 
-    def query(self, messages: List[Message], plaintext_output: bool = False, stream: bool = True, **kwargs) -> str:
+    def stream_with_tools(
+        self,
+        messages: List[Message],
+        tools_schema: list[dict[str, Any]] | None = None,
+        tool_choice: str | dict | None = "auto",
+        stop: list[str] | str | None = None,
+    ) -> Iterator[str | dict]:
+        """Stream response with native tool support.
+
+        Yields:
+            - str: Content chunks as they arrive
+            - dict: Tool calls dict {"tool_calls": [...]} when stream ends with tool calls
+
+        If the model responds with text only, yields content chunks.
+        If the model calls tools, yields nothing (tool calls returned at end as dict).
+        """
+        api_messages = self._prepare_api_messages(messages)
+        payload = {
+            "model": self.model,
+            "messages": api_messages,
+            "stream": True,
+        }
+        if stop:
+            payload["stop"] = stop
+        if tools_schema:
+            payload["tools"] = tools_schema
+            if tool_choice is not None:
+                payload["tool_choice"] = tool_choice
+
+        if self._model_requires_max_completion_tokens():
+            payload["max_completion_tokens"] = self.config.MAX_TOKENS
+        else:
+            payload["max_tokens"] = self.config.MAX_TOKENS
+
+        if self._model_supports_temperature_top_p():
+            payload["temperature"] = self.config.TEMPERATURE
+            payload["top_p"] = self.config.TOP_P
+
+        try:
+            stream = self._chat_create_with_fallback(payload)
+
+            # Accumulate tool calls from stream
+            tool_calls_acc: dict[int, dict] = {}  # index -> {id, function: {name, arguments}}
+            content_buffer = ""
+
+            for chunk in stream:
+                delta = chunk.choices[0].delta if chunk.choices else None
+                if not delta:
+                    continue
+
+                # Handle content
+                if delta.content:
+                    content_buffer += delta.content
+                    yield delta.content
+
+                # Handle tool calls (accumulated across chunks)
+                if delta.tool_calls:
+                    for tc_delta in delta.tool_calls:
+                        idx = tc_delta.index
+                        if idx not in tool_calls_acc:
+                            tool_calls_acc[idx] = {
+                                "id": tc_delta.id or "",
+                                "type": "function",
+                                "function": {"name": "", "arguments": ""},
+                            }
+                        if tc_delta.id:
+                            tool_calls_acc[idx]["id"] = tc_delta.id
+                        if tc_delta.function:
+                            if tc_delta.function.name:
+                                tool_calls_acc[idx]["function"]["name"] = tc_delta.function.name
+                            if tc_delta.function.arguments:
+                                tool_calls_acc[idx]["function"]["arguments"] += tc_delta.function.arguments
+
+            # If we accumulated tool calls, yield them as final item
+            if tool_calls_acc:
+                sorted_calls = [tool_calls_acc[i] for i in sorted(tool_calls_acc.keys())]
+                yield {"tool_calls": sorted_calls, "content": content_buffer}
+
+        except Exception as e:
+            logger.error(f"Error during OpenAI streaming with tools: {e}")
+            raise
+
+    def query(self, messages: List[Message], plaintext_output: bool = False, stream: bool = True, stop: list[str] | str | None = None, **kwargs) -> str:
         """Query OpenAI API with full message history."""
         api_messages = self._prepare_api_messages(messages)
         should_stream = stream and not self.config.NO_STREAM
@@ -191,12 +330,10 @@ class OpenAIClient(LLMClient):
             "messages": api_messages,
             "stream": should_stream,
         }
-        self._set_token_param(payload, self._initial_token_param_key(), self.config.MAX_TOKENS)
-        
-        if self._model_requires_max_completion_tokens():
-            payload["max_completion_tokens"] = self.config.MAX_TOKENS
-        else:
-            payload["max_tokens"] = self.config.MAX_TOKENS
+        if stop:
+            payload["stop"] = stop
+        token_key = self._initial_token_param_key()
+        self._set_token_param(payload, token_key, self.config.MAX_TOKENS)
         
         if self._model_supports_temperature_top_p():
             payload["temperature"] = self.config.TEMPERATURE
@@ -226,6 +363,62 @@ class OpenAIClient(LLMClient):
             self.console.print(Rule(style="green"))
 
         return response
+
+    def query_with_tools(
+        self,
+        messages: List[Message],
+        tools_schema: list[dict[str, Any]] | None = None,
+        tool_choice: str | dict | None = "auto",
+        stop: list[str] | str | None = None,
+        **kwargs: Any,
+    ) -> tuple[dict[str, Any], None]:
+        """Query OpenAI with native tool calling schema."""
+        api_messages = self._prepare_api_messages(messages)
+        payload = {
+            "model": self.model,
+            "messages": api_messages,
+            "stream": False,
+        }
+        if stop:
+            payload["stop"] = stop
+        if tools_schema:
+            payload["tools"] = tools_schema
+            if tool_choice is not None:
+                payload["tool_choice"] = tool_choice
+
+        token_key = self._initial_token_param_key()
+        self._set_token_param(payload, token_key, self.config.MAX_TOKENS)
+
+        if self._model_supports_temperature_top_p():
+            payload["temperature"] = self.config.TEMPERATURE
+            payload["top_p"] = self.config.TOP_P
+
+        completion = self._chat_create_with_fallback(payload)
+        message = completion.choices[0].message
+        content = message.content or ""
+        tool_calls_payload: list[dict[str, Any]] = []
+        tool_calls = getattr(message, "tool_calls", None) or []
+        for call in tool_calls:
+            func = getattr(call, "function", None)
+            if func is None and isinstance(call, dict):
+                func = call.get("function")
+            name = getattr(func, "name", None) if func is not None else None
+            arguments = getattr(func, "arguments", None) if func is not None else None
+            if isinstance(func, dict):
+                name = func.get("name")
+                arguments = func.get("arguments")
+            tool_calls_payload.append(
+                {
+                    "id": getattr(call, "id", None) if not isinstance(call, dict) else call.get("id"),
+                    "type": getattr(call, "type", None) if not isinstance(call, dict) else call.get("type"),
+                    "function": {
+                        "name": name,
+                        "arguments": arguments,
+                    },
+                }
+            )
+
+        return {"content": content, "tool_calls": tool_calls_payload}, None
 
     def _prepare_api_messages(self, messages: List[Message]) -> list[dict]:
         prepared = []

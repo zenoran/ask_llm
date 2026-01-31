@@ -35,6 +35,56 @@ The current implementation uses a custom `<tool_call>` XML format that relies on
 
 ---
 
+## Status Update (2026-01-29 evening)
+
+### Major Progress: Native OpenAI Tool Calling with Streaming
+
+**Tools now work correctly for OpenAI models!** Implemented proper native tool calling that:
+- Uses OpenAI's `tools` parameter with structured responses (no text parsing)
+- Maintains real streaming for regular responses
+- Handles tool calls inline during streaming
+
+### Changes Made Today
+
+#### 1. `src/ask_llm/clients/openai_client.py`
+- Added `stream_with_tools()` method that:
+  - Passes `tools` schema to OpenAI API with `stream=True`
+  - Yields content chunks immediately (real streaming)
+  - Accumulates tool_call deltas from stream
+  - Returns `{"tool_calls": [...], "content": "..."}` dict at end if tools were called
+
+#### 2. `src/ask_llm/service/api.py`
+- Updated streaming endpoint to use native streaming with tools:
+  - Detects if client supports native tools (`supports_native_tools()` + `stream_with_tools`)
+  - For OpenAI: Uses new `stream_with_tools()` - real streaming + structured tool calls
+  - For GGUF/local: Falls back to text-based `stream_with_tools()` from streaming.py
+  - Implements tool loop inline: execute tools, append results, continue streaming
+
+#### 3. Infrastructure already in place (no changes needed)
+- `src/ask_llm/tools/formats/native_openai.py` - Tool schema generation
+- `src/ask_llm/tools/loop.py` - Non-streaming tool loop with native support
+- `src/ask_llm/utils/config.py` - Returns `"native"` format for OpenAI models
+
+### Current Behavior
+- **OpenAI models**: Native tool calling with real streaming
+  - Regular prompts: Stream immediately
+  - Tool prompts: Stream content, detect tool calls, execute, stream follow-up
+- **Local models (GGUF)**: Text-based tool detection via streaming.py (heuristics)
+
+### Still TODO / Known Issues
+1. **streaming.py bandaids** - Still has heuristic code for non-native models. Works but fragile.
+2. **ReAct format** - Not yet implemented for local models (would be cleaner than heuristics)
+3. **Stop sequences** - Not used yet; would help ReAct format enforcement
+4. **Testing** - Need to verify tool loop iteration limit and edge cases
+
+### Next Steps (for continuing tomorrow)
+1. **Test the new streaming** - Run `./server.sh restart` and try tool commands
+2. **Clean up streaming.py** - Remove/simplify heuristic code if native path works
+3. **Implement ReAct for local models** - Replace heuristics with proper format
+4. **Add stop sequences** - For ReAct format enforcement on local models
+
+---
+
 ## Current Architecture Analysis
 
 ### Files Involved

@@ -51,6 +51,26 @@ class LLMClient(ABC):
         """
         pass
 
+    def supports_native_tools(self) -> bool:
+        """Return True if the client supports native tool calling."""
+        return False
+
+    def query_with_tools(
+        self,
+        messages: List[Message],
+        tools_schema: Any | None = None,
+        tool_choice: str | dict | None = "auto",
+        stop: list[str] | str | None = None,
+        **kwargs: Any,
+    ) -> tuple[Any, Any | None]:
+        """Query the LLM with tool schema (native tools if supported).
+
+        Default implementation ignores tools_schema and returns text response.
+        Returns a tuple of (response_payload, native_tool_calls_or_none).
+        """
+        response = self.query(messages, plaintext_output=True, stream=False, stop=stop, **kwargs)
+        return response, None
+
     def format_message(self, role: str, content: str):
         """Formats and prints a message based on its role."""
         if role == "user":

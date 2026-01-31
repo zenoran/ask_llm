@@ -306,6 +306,7 @@ class ServiceStatusResponse(BaseModel):
 class HealthResponse(BaseModel):
     """Simple health check response."""
     status: str = "ok"
+    version: str = SERVICE_VERSION
 
 
 class HistoryMessage(BaseModel):
@@ -1075,6 +1076,7 @@ class BackgroundService:
         
         chunk_queue: asyncio.Queue = asyncio.Queue()
         full_response_holder = [""]  # Use list to allow mutation in nested function
+        tool_context_holder = [""]  # Store tool context from native tool calls
         timing_holder = [0.0, 0.0]  # [start_time, end_time]
         cancelled_holder = [False]  # Track if we were cancelled
         
@@ -1104,23 +1106,132 @@ class BackgroundService:
                 
                 # Choose streaming method based on whether bot uses tools
                 if ask_llm.bot.uses_tools and ask_llm.memory:
-                    from ..tools import stream_with_tools
-                    log.debug("Using stream_with_tools for tool-enabled bot")
-                    
-                    def stream_fn(msgs):
-                        return ask_llm.client.stream_raw(msgs)
-                    
-                    stream_iter = stream_with_tools(
-                        messages=messages,
-                        stream_fn=stream_fn,
-                        memory_client=ask_llm.memory,
-                        profile_manager=ask_llm.profile_manager,
-                        search_client=ask_llm.search_client,
-                        model_lifecycle=ask_llm.model_lifecycle,
-                        config=ask_llm.config,
-                        user_id=ask_llm.user_id,
-                        bot_id=ask_llm.bot_id,
+                    # Check if client supports native streaming with tools (OpenAI)
+                    use_native_streaming = (
+                        ask_llm.client.supports_native_tools()
+                        and ask_llm.tool_format in ("native", "NATIVE_OPENAI")
+                        and hasattr(ask_llm.client, "stream_with_tools")
                     )
+
+                    if use_native_streaming:
+                        # Native streaming with tools - streams content AND handles tool calls
+                        from ..tools.executor import ToolExecutor
+                        from ..tools.formats import get_format_handler
+                        from ..models.message import Message as Msg
+
+                        log.debug("Using native streaming with tools")
+
+                        tool_definitions = ask_llm._get_tool_definitions()
+                        handler = get_format_handler(ask_llm.tool_format)
+                        tools_schema = handler.get_tools_schema(tool_definitions)
+
+                        executor = ToolExecutor(
+                            memory_client=ask_llm.memory,
+                            profile_manager=ask_llm.profile_manager,
+                            search_client=ask_llm.search_client,
+                            model_lifecycle=ask_llm.model_lifecycle,
+                            config=ask_llm.config,
+                            user_id=ask_llm.user_id,
+                            bot_id=ask_llm.bot_id,
+                        )
+
+                        def native_stream_with_tool_loop():
+                            """Stream with native tool support, handling tool calls inline."""
+                            import json as _json
+                            from ..tools.parser import ToolCall
+
+                            current_msgs = list(messages)
+                            max_iterations = 5
+
+                            for iteration in range(max_iterations):
+                                for item in ask_llm.client.stream_with_tools(
+                                    current_msgs,
+                                    tools_schema=tools_schema,
+                                    tool_choice="auto",
+                                ):
+                                    if isinstance(item, str):
+                                        # Content chunk - yield to user immediately
+                                        yield item
+                                    elif isinstance(item, dict) and "tool_calls" in item:
+                                        # Tool calls at end of stream
+                                        tool_calls = item["tool_calls"]
+                                        content = item.get("content", "")
+
+                                        if not tool_calls:
+                                            return  # No tools, done
+
+                                        log.info(f"🔧 Tool calls: {[tc['function']['name'] for tc in tool_calls]}")
+
+                                        # Execute tools
+                                        tool_results = []
+                                        for tc in tool_calls:
+                                            func = tc.get("function", {})
+                                            name = func.get("name", "")
+                                            args_str = func.get("arguments", "{}")
+                                            try:
+                                                args = _json.loads(args_str) if args_str else {}
+                                            except _json.JSONDecodeError:
+                                                args = {}
+
+                                            tool_call_obj = ToolCall(name=name, arguments=args, raw_text="")
+                                            result = executor.execute(tool_call_obj)
+                                            tool_results.append({
+                                                "tool_call_id": tc.get("id", ""),
+                                                "content": result,
+                                            })
+
+                                        # Store tool context
+                                        tool_context_holder[0] = "\n\n".join(
+                                            f"[{tc['function']['name']}]\n{tr['content']}"
+                                            for tc, tr in zip(tool_calls, tool_results)
+                                        )
+
+                                        # Build continuation messages
+                                        assistant_msg = Msg(
+                                            role="assistant",
+                                            content=content,
+                                            tool_calls=[
+                                                {"id": tc.get("id"), "name": tc["function"]["name"], "arguments": tc["function"]["arguments"]}
+                                                for tc in tool_calls
+                                            ],
+                                        )
+                                        current_msgs.append(assistant_msg)
+
+                                        for tc, tr in zip(tool_calls, tool_results):
+                                            current_msgs.append(Msg(
+                                                role="tool",
+                                                content=tr["content"],
+                                                tool_call_id=tr["tool_call_id"],
+                                            ))
+
+                                        # Continue to next iteration (will stream the follow-up)
+                                        break
+                                else:
+                                    # Stream finished without tool calls dict (pure content response)
+                                    return
+
+                            log.warning(f"Tool loop: max iterations ({max_iterations}) reached")
+
+                        stream_iter = native_stream_with_tool_loop()
+                    else:
+                        # Fall back to text-based streaming for non-native models (GGUF, etc.)
+                        from ..tools import stream_with_tools
+                        log.debug("Using stream_with_tools for non-native tool format")
+
+                        def stream_fn(msgs):
+                            return ask_llm.client.stream_raw(msgs)
+
+                        stream_iter = stream_with_tools(
+                            messages=messages,
+                            stream_fn=stream_fn,
+                            memory_client=ask_llm.memory,
+                            profile_manager=ask_llm.profile_manager,
+                            search_client=ask_llm.search_client,
+                            model_lifecycle=ask_llm.model_lifecycle,
+                            config=ask_llm.config,
+                            user_id=ask_llm.user_id,
+                            bot_id=ask_llm.bot_id,
+                        )
                 else:
                     stream_iter = ask_llm.client.stream_raw(messages)
                 
@@ -1144,7 +1255,7 @@ class BackgroundService:
                     # Calculate elapsed time and log with tokens/sec
                     elapsed_ms = (timing_holder[1] - timing_holder[0]) * 1000
                     log.llm_response(full_response_holder[0], elapsed_ms=elapsed_ms)
-                    ask_llm.finalize_response(user_prompt, full_response_holder[0])
+                    ask_llm.finalize_response(user_prompt, full_response_holder[0], tool_context_holder[0])
 
                     # Write debug turn log if enabled (check config or env var)
                     if self.config.DEBUG_TURN_LOG or os.environ.get("ASK_LLM_DEBUG_TURN_LOG"):

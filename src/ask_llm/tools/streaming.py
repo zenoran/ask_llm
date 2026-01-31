@@ -4,9 +4,10 @@ Handles tool calling while maintaining streaming output to the client.
 """
 
 import logging
+import re
 from typing import TYPE_CHECKING, Iterator, Callable, Any
 
-from .parser import parse_tool_calls, has_tool_call, format_tool_result
+from .parser import parse_tool_calls, has_tool_call, format_tool_result, KNOWN_TOOLS
 from .executor import ToolExecutor
 
 if TYPE_CHECKING:
@@ -25,6 +26,50 @@ except ImportError:
     log = logging.getLogger(__name__)
 
 DEFAULT_MAX_ITERATIONS = 5
+
+_KNOWN_TOOLS_PATTERN = "|".join(sorted(KNOWN_TOOLS, key=len, reverse=True))
+PLAIN_TOOL_START_PATTERN = re.compile(
+    rf'^\s*(?:{_KNOWN_TOOLS_PATTERN})\s*(?:\n|\s)+\{{',
+    re.IGNORECASE
+)
+
+# Pattern to detect if text starts with a known tool name (even without the { yet)
+TOOL_NAME_PREFIX_PATTERN = re.compile(
+    rf'^\s*({_KNOWN_TOOLS_PATTERN})(?:\s|$|[^a-z_])',
+    re.IGNORECASE
+)
+
+# Set of known tool names (lowercase) for prefix checking
+_KNOWN_TOOLS_LOWER = {t.lower() for t in KNOWN_TOOLS}
+
+
+def could_be_tool_name_prefix(text: str) -> bool:
+    """Check if text could be the beginning of a known tool name.
+
+    Returns True if:
+    - Text exactly matches a known tool name
+    - Text is a prefix that could grow into a known tool name
+    - Text starts with whitespace followed by a potential tool prefix
+
+    This prevents premature streaming when we see 'get_recent' before
+    the full 'get_recent_history' arrives.
+    """
+    stripped = text.strip().lower()
+    if not stripped:
+        return False
+
+    # Extract just the first word (tool name candidate)
+    first_word = stripped.split()[0] if stripped.split() else stripped
+
+    # Check if this word is a known tool or a prefix of one
+    for tool in _KNOWN_TOOLS_LOWER:
+        if tool.startswith(first_word):
+            return True
+        if first_word.startswith(tool):
+            # First word contains a complete tool name (e.g., "get_recent_historyfoo")
+            return True
+
+    return False
 
 def stream_with_tools(
     messages: list["Message"],
@@ -97,7 +142,8 @@ def stream_with_tools(
         full_response = ""
         
         # How many chars to buffer before deciding
-        DECISION_THRESHOLD = 50
+        # Increased from 50 to 120 to handle plain tool calls like "get_recent_history {json}"
+        DECISION_THRESHOLD = 120
         
         def looks_like_tool_start(text: str) -> bool:
             """Check if text looks like it's starting a tool call."""
@@ -129,15 +175,36 @@ def stream_with_tools(
             # Raw JSON tool call (no wrapper)
             if stripped.startswith('{"name"') and '"arguments"' in stripped:
                 return True
+
+            # Plain tool call: tool_name {json}
+            if PLAIN_TOOL_START_PATTERN.match(stripped):
+                return True
             
             return False
         
+        def starts_with_known_tool(text: str) -> bool:
+            """Check if text starts with a known tool name."""
+            return bool(TOOL_NAME_PREFIX_PATTERN.match(text))
+
         def looks_like_regular_text(text: str) -> bool:
-            """Check if text clearly looks like regular prose, not a tool call."""
+            """Check if text clearly looks like regular prose, not a tool call.
+
+            IMPORTANT: Returns False (not regular text) if the text could be the
+            start of a tool call, even if it's just a partial tool name prefix.
+            """
             stripped = text.strip()
             if not stripped:
                 return False
-            
+
+            # CRITICAL: If text starts with or could become a known tool name,
+            # it's NOT regular text. This prevents streaming when model outputs:
+            # - "get_recent_history {...}" (full tool name)
+            # - "get_recent" (partial, could become get_recent_history)
+            if could_be_tool_name_prefix(stripped):
+                return False
+            if starts_with_known_tool(stripped):
+                return False
+
             # If it starts with a letter or common punctuation, it's likely text
             first_char = stripped[0]
             if first_char.isalpha():
@@ -147,7 +214,7 @@ def stream_with_tools(
             # Emoji or other unicode that's not { or < or `
             if first_char not in '{<`':
                 return True
-            
+
             return False
         
         for chunk in stream_fn(current_messages):
@@ -167,13 +234,13 @@ def stream_with_tools(
             
             if looks_like_tool_start(stripped):
                 # Looks like a tool call - buffer everything
-                log.debug("Response looks like tool call - buffering")
+                log.debug(f"Response looks like tool call - buffering ({len(stripped)} chars)")
                 # Don't yield anything yet, continue buffering
                 continue
-            
+
             if looks_like_regular_text(stripped):
                 # Looks like regular text - switch to streaming mode
-                log.debug("Response looks like regular text - streaming")
+                log.debug(f"Response looks like regular text - streaming (starts with: {stripped[:30]!r})")
                 streaming_mode = True
                 # Yield all buffered chunks
                 for buffered_chunk in initial_chunks:
@@ -181,10 +248,13 @@ def stream_with_tools(
                 initial_chunks = []
                 continue
             
-            # Haven't decided yet - check if we've buffered enough
+            # Haven't decided yet - could be partial tool name, keep buffering
+            # log.debug(f"Undecided, buffering ({len(stripped)} chars): {stripped[:50]!r}")
+
+            # Check if we've buffered enough
             if len(stripped) >= DECISION_THRESHOLD:
                 # Buffered enough without seeing tool markers - assume it's text
-                log.debug("Decision threshold reached - streaming")
+                log.debug(f"Decision threshold ({DECISION_THRESHOLD}) reached - streaming")
                 streaming_mode = True
                 for buffered_chunk in initial_chunks:
                     yield buffered_chunk
@@ -208,9 +278,7 @@ def stream_with_tools(
                 
                 log.info(f"🔧 Calling tool: {tool_calls[0].name}")
                 
-                # Yield any text before the tool call
-                if remaining_text.strip():
-                    yield remaining_text
+                # Do not yield partial text when a tool call is present.
                 
                 # Execute the tool
                 tool_result = executor.execute(tool_calls[0])

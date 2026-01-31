@@ -5,7 +5,7 @@ allowing bots to autonomously search memories, store facts, manage profiles,
 search the web, and switch models.
 """
 
-from .definitions import MEMORY_TOOLS, PROFILE_TOOLS, SEARCH_TOOLS, MODEL_TOOLS, ALL_TOOLS, get_tools_prompt, Tool
+from .definitions import MEMORY_TOOLS, PROFILE_TOOLS, SEARCH_TOOLS, MODEL_TOOLS, ALL_TOOLS, get_tools_prompt, get_tools_list, Tool
 from .parser import parse_tool_calls, ToolCall, has_tool_call, format_tool_result
 from .executor import ToolExecutor
 from .loop import ToolLoop, query_with_tools
@@ -18,6 +18,7 @@ __all__ = [
     "MODEL_TOOLS",
     "ALL_TOOLS",
     "get_tools_prompt", 
+    "get_tools_list",
     "Tool",
     "parse_tool_calls",
     "ToolCall",
@@ -28,4 +29,3 @@ __all__ = [
     "query_with_tools",
     "stream_with_tools",
 ]
-

@@ -199,7 +199,9 @@ class Config(BaseSettings):
                 console.print(f"[bold red]Warning:[/bold red] Invalid format in {config_path}. Missing or invalid top-level 'models' dictionary. Treating as empty.")
                 self.defined_models = {"models": {}}
             else:
-                self.defined_models = {"models": loaded_data["models"]}
+                self.defined_models = loaded_data
+                if "models" not in self.defined_models:
+                    self.defined_models["models"] = {}
 
         except yaml.YAMLError as e:
             console.print(f"[bold red]Error parsing YAML file {config_path}:[/bold red] {e}")
@@ -252,6 +254,23 @@ class Config(BaseSettings):
                     available_options.append(alias)
 
         return sorted(list(set(available_options))) # Return sorted list of unique aliases
+
+    def get_tool_format(self, model_alias: str | None = None, model_def: Dict[str, Any] | None = None) -> str:
+        """Return the tool format for a given model alias or definition."""
+        if model_def is None and model_alias:
+            model_def = self.defined_models.get("models", {}).get(model_alias, {})
+        model_def = model_def or {}
+
+        tool_format = model_def.get("tool_format")
+        if tool_format:
+            return str(tool_format)
+
+        model_type = model_def.get("type")
+        if model_type == PROVIDER_OPENAI:
+            return "native"
+        if model_type in (PROVIDER_GGUF, PROVIDER_OLLAMA, PROVIDER_HF):
+            return "react"
+        return "xml"
 
 
 def set_config_value(key: str, value: str, config: Config) -> bool:

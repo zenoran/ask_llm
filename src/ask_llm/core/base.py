@@ -28,7 +28,7 @@ from ..clients import LLMClient
 from ..profiles import ProfileManager, EntityType
 from ..memory_server.client import MemoryClient, get_memory_client
 from ..search import get_search_client, SearchClient
-from ..tools import get_tools_prompt, query_with_tools
+from ..tools import get_tools_prompt, get_tools_list, query_with_tools
 from ..utils.config import Config, has_database_credentials
 from ..utils.paths import resolve_log_dir
 from ..utils.history import HistoryManager, Message
@@ -81,6 +81,7 @@ class BaseAskLLM(ABC):
         self.resolved_model_alias = resolved_model_alias
         self.config = config
         self.model_definition = self.config.defined_models.get("models", {}).get(resolved_model_alias)
+        self.tool_format = self.config.get_tool_format(model_alias=resolved_model_alias, model_def=self.model_definition)
         self.local_mode = local_mode
         self.bot_id = bot_id
         self.user_id = user_id
@@ -297,12 +298,10 @@ class BaseAskLLM(ABC):
             
             # Use tool loop if bot has tools enabled
             if self.bot.uses_tools and self.memory:
-                def query_fn(msgs, do_stream):
-                    return self.client.query(msgs, plaintext_output=True, stream=do_stream)
-                
+                tool_definitions = self._get_tool_definitions()
                 assistant_response, tool_context = query_with_tools(
                     messages=context_messages,
-                    query_fn=query_fn,
+                    client=self.client,
                     memory_client=self.memory,
                     profile_manager=self.profile_manager,
                     search_client=self.search_client,
@@ -311,15 +310,17 @@ class BaseAskLLM(ABC):
                     user_id=self.user_id,
                     bot_id=self.bot_id,
                     stream=stream,
+                    tool_format=self.tool_format,
+                    tools=tool_definitions,
                 )
-                
+
                 # Render the final response (tool loop returns raw text, never renders)
                 if assistant_response:
                     if not plaintext_output:
                         self.client._print_assistant_message(assistant_response)
                     else:
                         print(assistant_response)
-                
+
                 # Save tool context to history
                 if tool_context:
                     self.history_manager.add_message("system", f"[Tool Results]\n{tool_context}")
@@ -361,11 +362,10 @@ class BaseAskLLM(ABC):
         
         # Add tool instructions OR memory context
         if self.bot.uses_tools and self.memory:
-            include_search = self.search_client is not None
-            include_models = self.model_lifecycle is not None
+            tool_definitions = self._get_tool_definitions()
             tools_prompt = get_tools_prompt(
-                include_search_tools=include_search,
-                include_model_tools=include_models,
+                tools=tool_definitions,
+                tool_format=self.tool_format,
             )
             builder.add_section(
                 "tools",
@@ -408,6 +408,14 @@ class BaseAskLLM(ABC):
                 messages.append(Message(role="user", content=prompt))
         
         return messages
+
+    def _get_tool_definitions(self) -> list:
+        include_search = self.search_client is not None
+        include_models = self.model_lifecycle is not None
+        return get_tools_list(
+            include_search_tools=include_search,
+            include_model_tools=include_models,
+        )
     
     def _should_skip_history(self, prompt: str) -> bool:
         """Return True if history should be skipped for this prompt."""

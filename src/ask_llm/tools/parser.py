@@ -61,9 +61,24 @@ class ToolCall:
         return f"ToolCall({self.name}, {self.arguments})"
 
 
+# Known tool names for detecting raw JSON tool calls
+KNOWN_TOOLS = {
+    "get_user_profile", "search_memories", "store_memory", "delete_memory",
+    "search_history", "get_recent_history", "forget_history", "set_user_attribute", "delete_user_attribute",
+    "web_search", "news_search", "list_models", "get_current_model", "switch_model",
+    "get_current_time"
+}
+
 # Pattern to match tool calls: <tool_call>{"name": "...", "arguments": {...}}</tool_call>
 TOOL_CALL_PATTERN = re.compile(
     r'<tool_call>\s*(\{.*?\})\s*</tool_call>',
+    re.DOTALL | re.IGNORECASE
+)
+
+# Plain tool call: tool_name { ... } (common when models see tool list but no format)
+_KNOWN_TOOLS_PATTERN = "|".join(sorted(KNOWN_TOOLS, key=len, reverse=True))
+PLAIN_TOOL_CALL_PATTERN = re.compile(
+    rf'^\s*(?P<name>{_KNOWN_TOOLS_PATTERN})\s*(?:\n|\s)+(?P<args>\{{.*?\}})',
     re.DOTALL | re.IGNORECASE
 )
 
@@ -89,6 +104,27 @@ ALT_PATTERNS = [
 ]
 
 
+def _normalize_tool_arguments(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    """Normalize common parameter aliases from loose model output."""
+    if not arguments:
+        return arguments
+    if name == "get_recent_history":
+        if "n_messages" not in arguments:
+            if "n" in arguments:
+                arguments["n_messages"] = arguments.pop("n")
+            elif "limit" in arguments:
+                arguments["n_messages"] = arguments.pop("limit")
+            elif "count" in arguments:
+                arguments["n_messages"] = arguments.pop("count")
+    if name == "search_history":
+        if "n_results" not in arguments:
+            if "n" in arguments:
+                arguments["n_results"] = arguments.pop("n")
+            elif "limit" in arguments:
+                arguments["n_results"] = arguments.pop("limit")
+    return arguments
+
+
 def parse_tool_calls(text: str) -> tuple[list[ToolCall], str]:
     """Parse tool calls from model output.
     
@@ -101,7 +137,31 @@ def parse_tool_calls(text: str) -> tuple[list[ToolCall], str]:
     tool_calls = []
     remaining_text = text
     
-    # Try main pattern first
+    # Try plain tool call pattern first (tool_name {json})
+    plain_match = PLAIN_TOOL_CALL_PATTERN.search(text)
+    if plain_match:
+        name = plain_match.group("name").strip()
+        json_str = plain_match.group("args")
+        try:
+            arguments = json.loads(json_str)
+        except json.JSONDecodeError:
+            fixed_json = _try_fix_json(json_str)
+            if fixed_json:
+                arguments = json.loads(fixed_json)
+            else:
+                arguments = {}
+        arguments = _normalize_tool_arguments(name, arguments if isinstance(arguments, dict) else {})
+        tool_calls.append(
+            ToolCall(
+                name=name,
+                arguments=arguments,
+                raw_text=plain_match.group(0),
+            )
+        )
+        remaining_text = remaining_text.replace(plain_match.group(0), "", 1).strip()
+        return tool_calls, remaining_text
+
+    # Try main pattern next
     matches = list(TOOL_CALL_PATTERN.finditer(text))
     
     # If no matches, try alternative patterns
@@ -123,6 +183,7 @@ def parse_tool_calls(text: str) -> tuple[list[ToolCall], str]:
             arguments = data.get("arguments") or data.get("args") or {}
             
             if name:
+                arguments = _normalize_tool_arguments(name, arguments)
                 tool_calls.append(ToolCall(
                     name=name,
                     arguments=arguments,
@@ -142,6 +203,7 @@ def parse_tool_calls(text: str) -> tuple[list[ToolCall], str]:
                     name = data.get("name")
                     arguments = data.get("arguments") or data.get("args") or {}
                     if name:
+                        arguments = _normalize_tool_arguments(name, arguments)
                         tool_calls.append(ToolCall(
                             name=name,
                             arguments=arguments,
@@ -174,13 +236,6 @@ INLINE_CODE_TOOL_PATTERN = re.compile(
     re.IGNORECASE
 )
 
-# Known tool names for detecting raw JSON tool calls
-KNOWN_TOOLS = {
-    "get_user_profile", "search_memories", "store_memory", "delete_memory",
-    "search_history", "forget_history", "set_user_attribute", "delete_user_attribute",
-    "web_search", "news_search", "list_models", "get_current_model", "switch_model",
-    "get_current_time"
-}
 
 
 def has_tool_call(text: str) -> bool:
@@ -208,6 +263,10 @@ def has_tool_call(text: str) -> bool:
         for tool in KNOWN_TOOLS:
             if f'"{tool}"' in stripped:
                 return True
+
+    # Check for plain tool call format (tool_name {json})
+    if PLAIN_TOOL_CALL_PATTERN.search(text):
+        return True
     
     return False
 

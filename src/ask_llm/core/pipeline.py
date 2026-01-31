@@ -63,6 +63,8 @@ class PipelineContext:
     messages: list["Message"] = field(default_factory=list)
     response: str = ""
     tool_context: str = ""
+    tool_format: str = "xml"
+    tool_definitions: list[Any] = field(default_factory=list)
     
     # Decision flags (set by decision points)
     use_tools: bool = False
@@ -307,11 +309,20 @@ class RequestPipeline:
         # Tool bots let the LLM search memories via tools; non-tool bots get
         # memories injected directly
         if ctx.use_tools:
-            from ..tools import get_tools_prompt
+            from ..tools import get_tools_prompt, get_tools_list
             include_models = self.model_lifecycle is not None
-            tools_prompt = get_tools_prompt(
+            tool_definitions = get_tools_list(
                 include_search_tools=ctx.use_search,
                 include_model_tools=include_models,
+            )
+            tool_format = self.config.get_tool_format(
+                model_alias=getattr(self.llm_client, "model_alias", None)
+            )
+            ctx.tool_format = tool_format
+            ctx.tool_definitions = tool_definitions
+            tools_prompt = get_tools_prompt(
+                tools=tool_definitions,
+                tool_format=tool_format,
             )
             builder.add_section(
                 "tools",
@@ -502,13 +513,9 @@ class RequestPipeline:
         if ctx.use_tools and self.memory_client:
             # Use tool loop
             from ..tools import query_with_tools
-            
-            def query_fn(msgs, do_stream):
-                return self.llm_client.query(msgs, plaintext_output=True, stream=do_stream)
-            
             response, tool_context = query_with_tools(
                 messages=ctx.messages,
-                query_fn=query_fn,
+                client=self.llm_client,
                 memory_client=self.memory_client,
                 profile_manager=self.profile_manager,
                 search_client=self.search_client,
@@ -517,6 +524,8 @@ class RequestPipeline:
                 user_id=ctx.user_id,
                 bot_id=ctx.bot_id,
                 stream=ctx.stream,
+                tool_format=ctx.tool_format,
+                tools=ctx.tool_definitions,
             )
             
             ctx.response = response

@@ -6,6 +6,13 @@ services:
       args:
         WITH_CUDA: ${WITH_CUDA:-true}
         CUDA_ARCHS: ${CUDA_ARCHS:-120}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
     container_name: ask_llm_app
     environment:
       # Database connection (external postgres.home server)
@@ -32,17 +39,18 @@ services:
       # User and bot settings
       ASK_LLM_DEFAULT_USER: ${DEFAULT_USER:-nick}
       ASK_LLM_DEFAULT_BOT: ${ASK_LLM_DEFAULT_BOT:-nova}
-      ASK_LLM_DEFAULT_MODEL_ALIAS: ${ASK_LLM_DEFAULT_MODEL_ALIAS:-gpt-5.2-chat-latest}
+      ASK_LLM_DEFAULT_MODEL_ALIAS: ${ASK_LLM_DEFAULT_MODEL_ALIAS:-gpt-5.2-2025-12-11}
 
       # Logging
       ASK_LLM_LOG_PREFIX: ${ASK_LLM_LOG_PREFIX:-docker}
       ASK_LLM_DEBUG_TURN_LOG: ${ASK_LLM_DEBUG_TURN_LOG:-true}
+      ASK_LLM_LOG_DIR: /app/.logs
     ports:
       - "${MCP_PORT:-8001}:8001"
       - "${SERVICE_PORT:-8642}:8642"
     volumes:
-      # Mount config directory for .env and yaml files
-      - ./config:/root/.config/ask-llm
+      # Mount host config directory to avoid duplication
+      - ${HOME}/.config/ask-llm:/root/.config/ask-llm
       # Mount logs directory
       - ./.logs:/app/.logs
       # Optional: mount local models

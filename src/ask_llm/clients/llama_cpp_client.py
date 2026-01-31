@@ -80,7 +80,7 @@ class LlamaCppClient(LLMClient):
             self.console.print("Ensure model path is correct and `llama-cpp-python` is installed with appropriate hardware acceleration (e.g., BLAS, CUDA). Check library docs.")
             raise
 
-    def stream_raw(self, messages: List[Message], **kwargs: Any) -> Iterator[str]:
+    def stream_raw(self, messages: List[Message], stop: list[str] | str | None = None, **kwargs: Any) -> Iterator[str]:
         """
         Stream raw text chunks from llama.cpp without console formatting.
         
@@ -97,11 +97,13 @@ class LlamaCppClient(LLMClient):
             "top_p": self.config.TOP_P,
             "stream": True,
         }
+        if stop:
+            generation_params["stop"] = stop
         
         raw_stream = self.model.create_chat_completion(**generation_params)
         yield from self._iterate_llama_cpp_chunks(raw_stream)
 
-    def query(self, messages: List[Message], plaintext_output: bool = False, stream: bool = True, **kwargs: Any) -> str:
+    def query(self, messages: List[Message], plaintext_output: bool = False, stream: bool = True, stop: list[str] | str | None = None, **kwargs: Any) -> str:
         """Query the loaded GGUF model.
 
         Args:
@@ -127,6 +129,8 @@ class LlamaCppClient(LLMClient):
             "top_p": self.config.TOP_P,
             "stream": stream and not self.config.NO_STREAM,
         }
+        if stop:
+            generation_params["stop"] = stop
 
         if self.config.VERBOSE:
              log_params = {k: v for k, v in generation_params.items() if k != 'messages'}
