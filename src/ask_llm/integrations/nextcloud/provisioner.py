@@ -66,7 +66,7 @@ class ProvisionerClient:
         self,
         room_name: str,
         bot_name: str,
-        webhook_url: str = "http://echo.home:8642/webhook/nextcloud",
+        webhook_url: Optional[str] = None,
         owner_user_id: str = "nick",
         room_description: Optional[str] = None,
         bot_description: Optional[str] = None,
@@ -77,7 +77,7 @@ class ProvisionerClient:
         Args:
             room_name: Name for the Talk room
             bot_name: Name for the bot
-            webhook_url: Webhook URL for the bot
+            webhook_url: Webhook URL for the bot (optional - provisioner may have default)
             owner_user_id: Nextcloud user ID who will own the room
             room_description: Optional room description
             bot_description: Optional bot description
@@ -94,9 +94,11 @@ class ProvisionerClient:
         payload = {
             "roomName": room_name,
             "botName": bot_name,
-            "webhookUrl": webhook_url,
             "ownerUserId": owner_user_id,
         }
+
+        if webhook_url:
+            payload["webhookUrl"] = webhook_url
 
         if room_description:
             payload["roomDescription"] = room_description

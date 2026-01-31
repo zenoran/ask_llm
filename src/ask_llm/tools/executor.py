@@ -398,7 +398,9 @@ class ToolExecutor:
                 content = content[:200] + "..." if len(content) > 200 else content
                 # Escape newlines for readability
                 content = content.replace("\n", " ")
-                lines.append(f"{i}. [{role}] {content}")
+                lines.append(f"{i}. {content}")
+            
+            lines.append("\n(Present these messages to the user as shown above)")
 
             return format_tool_result(tool_call.name, "\n".join(lines))
 
@@ -415,8 +417,16 @@ class ToolExecutor:
                 error="Memory system not available"
             )
         
+        # Normalize parameter names - LLM often confuses n_messages/count
         count = tool_call.arguments.get("count")
+        if count is None:
+            # Check common aliases
+            count = tool_call.arguments.get("n_messages") or tool_call.arguments.get("n") or tool_call.arguments.get("num_messages")
+        
         minutes = tool_call.arguments.get("minutes")
+        if minutes is None:
+            # Check common aliases
+            minutes = tool_call.arguments.get("time_range") or tool_call.arguments.get("mins")
         
         # Need either count or minutes
         if count is None and minutes is None:

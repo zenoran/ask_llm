@@ -47,6 +47,7 @@ class ServiceAskLLM(BaseAskLLM):
         user_id: str = "",  # Required - must be passed explicitly
         verbose: bool = False,
         debug: bool = False,
+        existing_client: "LLMClient | None" = None,
     ):
         """Initialize ServiceAskLLM.
         
@@ -58,6 +59,7 @@ class ServiceAskLLM(BaseAskLLM):
             user_id: User profile ID (required)
             verbose: Enable verbose logging (--verbose)
             debug: Enable debug logging (--debug)
+            existing_client: Reuse this LLM client instead of loading model again
         """
         super().__init__(
             resolved_model_alias=resolved_model_alias,
@@ -67,6 +69,7 @@ class ServiceAskLLM(BaseAskLLM):
             user_id=user_id,
             verbose=verbose,
             debug=debug,
+            existing_client=existing_client,
         )
     
     def _initialize_client(self) -> LLMClient:

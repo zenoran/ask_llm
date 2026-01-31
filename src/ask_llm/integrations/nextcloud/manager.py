@@ -1,6 +1,5 @@
 """Nextcloud bot manager singleton."""
 
-from pathlib import Path
 from typing import Optional
 from .config import NextcloudBot, NextcloudBotConfig
 
@@ -10,26 +9,28 @@ class NextcloudBotManager:
 
     _instance: Optional['NextcloudBotManager'] = None
 
-    def __init__(self, bots_yaml_path: Path):
-        self.config = NextcloudBotConfig(bots_yaml_path)
+    def __init__(self):
+        self.config = NextcloudBotConfig()
 
     @classmethod
-    def get_instance(cls, bots_yaml_path: Optional[Path] = None) -> 'NextcloudBotManager':
-        """Get singleton instance."""
+    def get_instance(cls, bots_yaml_path=None) -> 'NextcloudBotManager':
+        """Get singleton instance.
+        
+        Args:
+            bots_yaml_path: Ignored - kept for backwards compatibility.
+        """
         if cls._instance is None:
-            if bots_yaml_path is None:
-                # Get default bots.yaml path
-                from ...utils.config import Config
-                config = Config()
-                from ...bots import get_bots_yaml_path
-                bots_yaml_path = get_bots_yaml_path()
-
-            cls._instance = cls(bots_yaml_path)
+            cls._instance = cls()
         return cls._instance
 
     def list_bots(self) -> list[NextcloudBot]:
         """List all configured Nextcloud bots."""
+        self.config._check_reload()
         return list(self.config.bots.values())
+
+    def reload(self) -> None:
+        """Force reload config from disk."""
+        self.config.load()
 
     def add_bot(
         self,

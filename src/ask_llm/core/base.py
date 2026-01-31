@@ -64,6 +64,7 @@ class BaseAskLLM(ABC):
         user_id: str = "",  # Required - must be passed explicitly
         verbose: bool = False,
         debug: bool = False,
+        existing_client: LLMClient | None = None,
     ):
         """Initialize the LLM orchestrator.
         
@@ -75,6 +76,7 @@ class BaseAskLLM(ABC):
             user_id: User profile ID (required)
             verbose: Enable verbose output (--verbose)
             debug: Enable debug output (--debug)
+            existing_client: Reuse this client instead of creating a new one
         """
         if not user_id:
             raise ValueError("user_id is required - set ASK_LLM_DEFAULT_USER or pass --user")
@@ -104,8 +106,12 @@ class BaseAskLLM(ABC):
         # Initialize model lifecycle manager (singleton)
         self.model_lifecycle = get_model_lifecycle(config)
         
-        # Initialize LLM client (implemented by subclass)
-        self.client = self._initialize_client()
+        # Initialize LLM client - reuse existing if provided
+        if existing_client is not None:
+            self.client = existing_client
+            logger.debug(f"Reusing existing client for model '{resolved_model_alias}'")
+        else:
+            self.client = self._initialize_client()
         
         # Register client with lifecycle manager
         self.model_lifecycle.register_client(resolved_model_alias, self.client)

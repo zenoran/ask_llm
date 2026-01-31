@@ -208,6 +208,7 @@ class ReActFormatHandler(ToolFormatHandler):
             "3. Wait for Observation before your next Thought\n"
             f"4. Tool names must be exactly: {tool_names}\n"
             "5. Action Input must be valid JSON\n"
+            "6. When presenting tool results to the user, quote the ACTUAL data from the Observation - do NOT paraphrase or summarize from memory\n"
         )
 
     def get_stop_sequences(self) -> list[str]:
@@ -368,12 +369,26 @@ class ReActFormatHandler(ToolFormatHandler):
 
     def _normalize_arguments(self, tool_name: str, args: dict) -> dict:
         """Normalize argument keys for a tool call."""
-        # Map common argument name variations
-        ARG_ALIASES = {
-            "num_messages": "n_messages",
-            "number_of_messages": "n_messages",
-            "count": "n_messages",
-            "limit": "n_messages",
+        # Tool-specific argument mappings
+        # Different tools use different parameter names for similar concepts
+        TOOL_ARG_ALIASES = {
+            "get_recent_history": {
+                "count": "n_messages",
+                "limit": "n_messages",
+                "num_messages": "n_messages",
+                "number_of_messages": "n_messages",
+            },
+            "forget_history": {
+                "n_messages": "count",
+                "num_messages": "count",
+                "number_of_messages": "count",
+                "n": "count",
+                "limit": "count",
+            },
+        }
+        
+        # Generic aliases (applied if no tool-specific mapping)
+        GENERIC_ARG_ALIASES = {
             "num_results": "n_results",
             "number_of_results": "n_results",
             "max_results": "n_results",
@@ -382,11 +397,18 @@ class ReActFormatHandler(ToolFormatHandler):
             "text": "content",
             "message": "content",
         }
+        
+        # Get tool-specific aliases, fall back to generic
+        tool_aliases = TOOL_ARG_ALIASES.get(tool_name, {})
+        
         normalized = {}
         for key, value in args.items():
             normalized_key = key.lower().replace("-", "_").replace(" ", "_")
-            if normalized_key in ARG_ALIASES:
-                normalized_key = ARG_ALIASES[normalized_key]
+            # Check tool-specific first, then generic
+            if normalized_key in tool_aliases:
+                normalized_key = tool_aliases[normalized_key]
+            elif normalized_key in GENERIC_ARG_ALIASES:
+                normalized_key = GENERIC_ARG_ALIASES[normalized_key]
             normalized[normalized_key] = value
         return normalized
 

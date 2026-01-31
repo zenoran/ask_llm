@@ -1,7 +1,8 @@
 """Bot system for ask_llm.
 
 Bots are AI personalities with their own system prompts and isolated memory.
-Bot definitions are loaded from bots.yaml in this package directory.
+Bot definitions are loaded from bots.yaml in this package directory,
+with user overrides from ~/.config/ask-llm/bots.yaml taking priority.
 """
 
 import logging
@@ -14,13 +15,25 @@ import yaml
 
 logger = logging.getLogger(__name__)
 
-# Path to the bots.yaml file (in the same directory as this module)
-BOTS_YAML_PATH = Path(__file__).parent / "bots.yaml"
+# Path to the repo bots.yaml file (in the same directory as this module)
+REPO_BOTS_YAML_PATH = Path(__file__).parent / "bots.yaml"
 
 
+def get_repo_bots_yaml_path() -> Path:
+    """Get the path to repo bots.yaml."""
+    return REPO_BOTS_YAML_PATH
+
+
+def get_user_bots_yaml_path() -> Path:
+    """Get the path to user bots.yaml (~/.config/ask-llm/bots.yaml)."""
+    from ask_llm.utils.config import DOTENV_PATH
+    return DOTENV_PATH.parent / "bots.yaml"
+
+
+# Backwards compatibility alias
 def get_bots_yaml_path() -> Path:
-    """Get the path to bots.yaml."""
-    return BOTS_YAML_PATH
+    """Get the path to bots.yaml (repo path for backwards compat)."""
+    return REPO_BOTS_YAML_PATH
 
 
 @dataclass
@@ -36,6 +49,7 @@ class Bot:
     default_model: str | None = None  # Default model alias for this bot
     uses_tools: bool = False  # Whether this bot can use tools (memory search, etc.)
     uses_search: bool = False  # Whether this bot can search the web
+    nextcloud: dict | None = None  # Nextcloud integration config (bot_id, secret, etc.)
     
     def __post_init__(self):
         # Ensure slug is lowercase and valid
@@ -46,59 +60,206 @@ class Bot:
 BUILTIN_BOTS: dict[str, Bot] = {}
 _DEFAULTS: dict[str, str] = {"standard": "nova", "local": "spark"}
 _SYSTEM_PROMPTS: dict[str, str] = {}
+_RAW_BOT_DATA: dict[str, dict] = {}  # Raw merged bot data for integrations
+_LAST_REPO_MTIME: float = 0
+_LAST_USER_MTIME: float = 0
 
 
-def _load_bots_from_yaml(yaml_path: Path = BOTS_YAML_PATH) -> None:
-    """Load bot definitions from YAML file into the global registry."""
-    global BUILTIN_BOTS, _DEFAULTS, _SYSTEM_PROMPTS
+def _deep_merge(base: dict, override: dict) -> dict:
+    """Deep merge override into base, with override taking priority.
     
+    For nested dicts, merges recursively. For other types, override wins.
+    """
+    result = base.copy()
+    for key, value in override.items():
+        if key in result and isinstance(result[key], dict) and isinstance(value, dict):
+            result[key] = _deep_merge(result[key], value)
+        else:
+            result[key] = value
+    return result
+
+
+def _load_yaml_file(yaml_path: Path) -> dict | None:
+    """Load a YAML file and return its contents, or None if not found."""
     try:
-        with open(yaml_path, "r", encoding="utf-8") as f:
-            data = yaml.safe_load(f)
-        
-        if not data:
-            logger.warning(f"Empty bots.yaml at {yaml_path}")
-            return
-        
-        # Load bot definitions
-        for slug, bot_data in data.get("bots", {}).items():
-            BUILTIN_BOTS[slug] = Bot(
-                slug=slug,
-                name=bot_data.get("name", slug.title()),
-                description=bot_data.get("description", ""),
-                system_prompt=bot_data.get("system_prompt", "You are a helpful assistant."),
-                requires_memory=bot_data.get("requires_memory", True),
-                voice_optimized=bot_data.get("voice_optimized", False),
-                default_model=bot_data.get("default_model"),
-                uses_tools=bot_data.get("uses_tools", False),
-                uses_search=bot_data.get("uses_search", False),
-            )
-        
-        # Load defaults
-        if "defaults" in data:
-            _DEFAULTS.update(data["defaults"])
-        
-        # Load system prompts
-        if "system_prompts" in data:
-            _SYSTEM_PROMPTS.update(data["system_prompts"])
-        
-        logger.debug(f"Loaded {len(BUILTIN_BOTS)} bots and {len(_SYSTEM_PROMPTS)} system prompts from {yaml_path}")
-        
-    except FileNotFoundError:
-        logger.error(f"Bots YAML file not found: {yaml_path}")
+        if yaml_path.exists():
+            with open(yaml_path, "r", encoding="utf-8") as f:
+                return yaml.safe_load(f) or {}
     except yaml.YAMLError as e:
-        logger.error(f"Error parsing bots.yaml: {e}")
+        logger.error(f"Error parsing {yaml_path}: {e}")
     except Exception as e:
-        logger.error(f"Error loading bots: {e}")
+        logger.error(f"Error reading {yaml_path}: {e}")
+    return None
+
+
+def _check_reload() -> bool:
+    """Check if config files have changed and reload if needed.
+    
+    Returns True if reload was performed.
+    """
+    global _LAST_REPO_MTIME, _LAST_USER_MTIME
+    
+    repo_path = get_repo_bots_yaml_path()
+    user_path = get_user_bots_yaml_path()
+    
+    repo_mtime = repo_path.stat().st_mtime if repo_path.exists() else 0
+    user_mtime = user_path.stat().st_mtime if user_path.exists() else 0
+    
+    if repo_mtime > _LAST_REPO_MTIME or user_mtime > _LAST_USER_MTIME:
+        _load_bots_config()
+        return True
+    return False
+
+
+def _load_bots_config() -> None:
+    """Load bot definitions from repo and user YAML, merging with user taking priority."""
+    global BUILTIN_BOTS, _DEFAULTS, _SYSTEM_PROMPTS, _RAW_BOT_DATA
+    global _LAST_REPO_MTIME, _LAST_USER_MTIME
+    
+    repo_path = get_repo_bots_yaml_path()
+    user_path = get_user_bots_yaml_path()
+    
+    # Track mtimes for hot reload
+    _LAST_REPO_MTIME = repo_path.stat().st_mtime if repo_path.exists() else 0
+    _LAST_USER_MTIME = user_path.stat().st_mtime if user_path.exists() else 0
+    
+    # Load repo config (defaults)
+    repo_data = _load_yaml_file(repo_path) or {}
+    
+    # Load user config (overrides)
+    user_data = _load_yaml_file(user_path) or {}
+    
+    # Merge: user overrides repo
+    merged_data = _deep_merge(repo_data, user_data)
+    
+    if not merged_data:
+        logger.warning("No bot configuration found in repo or user config")
+        return
+    
+    # Clear existing data
+    BUILTIN_BOTS.clear()
+    _RAW_BOT_DATA.clear()
+    
+    # Load bot definitions from merged data
+    for slug, bot_data in merged_data.get("bots", {}).items():
+        _RAW_BOT_DATA[slug] = bot_data  # Store raw for integrations
+        BUILTIN_BOTS[slug] = Bot(
+            slug=slug,
+            name=bot_data.get("name", slug.title()),
+            description=bot_data.get("description", ""),
+            system_prompt=bot_data.get("system_prompt", "You are a helpful assistant."),
+            requires_memory=bot_data.get("requires_memory", True),
+            voice_optimized=bot_data.get("voice_optimized", False),
+            default_model=bot_data.get("default_model"),
+            uses_tools=bot_data.get("uses_tools", False),
+            uses_search=bot_data.get("uses_search", False),
+            nextcloud=bot_data.get("nextcloud"),
+        )
+    
+    # Load defaults (merged)
+    if "defaults" in merged_data:
+        _DEFAULTS.update(merged_data["defaults"])
+    
+    # Load system prompts (merged)
+    if "system_prompts" in merged_data:
+        _SYSTEM_PROMPTS.update(merged_data["system_prompts"])
+    
+    logger.debug(
+        f"Loaded {len(BUILTIN_BOTS)} bots from config "
+        f"(repo: {repo_path.exists()}, user: {user_path.exists()})"
+    )
+
+
+def get_raw_bot_data(slug: str) -> dict | None:
+    """Get raw bot config data by slug (for integrations).
+    
+    Returns the merged raw YAML data for a bot, including integration-specific
+    sections like 'nextcloud'.
+    """
+    _check_reload()
+    return _RAW_BOT_DATA.get(slug.lower().strip())
+
+
+def get_all_raw_bot_data() -> dict[str, dict]:
+    """Get all raw bot config data (for integrations)."""
+    _check_reload()
+    return _RAW_BOT_DATA.copy()
+
+
+def save_user_bot_config(slug: str, section: str, data: dict) -> None:
+    """Save bot-specific config to user bots.yaml.
+    
+    Updates only the specified section for the given bot, preserving other data.
+    This is used by integrations like Nextcloud to store secrets.
+    
+    Args:
+        slug: Bot identifier
+        section: Config section name (e.g., 'nextcloud')
+        data: Data to save in that section
+    """
+    user_path = get_user_bots_yaml_path()
+    user_path.parent.mkdir(parents=True, exist_ok=True)
+    
+    # Load existing user config
+    existing = _load_yaml_file(user_path) or {}
+    
+    if 'bots' not in existing:
+        existing['bots'] = {}
+    if slug not in existing['bots']:
+        existing['bots'][slug] = {}
+    
+    existing['bots'][slug][section] = data
+    
+    with open(user_path, 'w', encoding='utf-8') as f:
+        yaml.dump(existing, f, default_flow_style=False, sort_keys=False)
+    
+    # Trigger reload
+    _load_bots_config()
+
+
+def remove_user_bot_section(slug: str, section: str) -> bool:
+    """Remove a section from bot config in user bots.yaml.
+    
+    Args:
+        slug: Bot identifier
+        section: Config section name to remove (e.g., 'nextcloud')
+        
+    Returns:
+        True if section was removed, False if it didn't exist
+    """
+    user_path = get_user_bots_yaml_path()
+    if not user_path.exists():
+        return False
+    
+    existing = _load_yaml_file(user_path) or {}
+    
+    if 'bots' not in existing or slug not in existing['bots']:
+        return False
+    if section not in existing['bots'][slug]:
+        return False
+    
+    del existing['bots'][slug][section]
+    
+    # Clean up empty bot entry
+    if not existing['bots'][slug]:
+        del existing['bots'][slug]
+    
+    with open(user_path, 'w', encoding='utf-8') as f:
+        yaml.dump(existing, f, default_flow_style=False, sort_keys=False)
+    
+    # Trigger reload
+    _load_bots_config()
+    return True
 
 
 def get_system_prompt(name: str) -> str | None:
     """Get a system prompt by name (e.g., 'refine')."""
+    _check_reload()
     return _SYSTEM_PROMPTS.get(name)
 
 
 # Initialize bots on module load
-_load_bots_from_yaml()
+_load_bots_config()
 
 
 class BotManager:
@@ -106,8 +267,13 @@ class BotManager:
     
     def __init__(self, config: Any = None):
         self.config = config
-        self._bots: dict[str, Bot] = dict(BUILTIN_BOTS)
-        logger.debug(f"BotManager initialized with {len(self._bots)} bots")
+        logger.debug(f"BotManager initialized with {len(BUILTIN_BOTS)} bots")
+    
+    @property
+    def _bots(self) -> dict[str, Bot]:
+        """Get bots from global registry, checking for reload."""
+        _check_reload()
+        return BUILTIN_BOTS
     
     def get_bot(self, slug: str) -> Bot | None:
         """Get a bot by slug.

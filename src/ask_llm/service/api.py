@@ -775,7 +775,7 @@ class BackgroundService:
         log.cache_miss("ask_llm", f"{model_alias}/{bot_id}/{user_id}")
         
         # Check if we already have a client for this model in the client cache
-        # If so, we can potentially reuse it (though AskLLM still needs its own instance)
+        # If so, reuse it to avoid reloading GGUF models into VRAM
         existing_client = self._client_cache.get(model_alias)
         
         # Get model type for logging
@@ -800,6 +800,7 @@ class BackgroundService:
                 local_mode=local_mode,
                 bot_id=bot_id,
                 user_id=user_id,
+                existing_client=existing_client,  # Reuse cached client if available
             )
             self._ask_llm_cache[cache_key] = ask_llm
             
@@ -1868,6 +1869,20 @@ try:
         except Exception as e:
             log.exception("Provisioning failed")
             raise HTTPException(status_code=500, detail=str(e))
+
+    @app.post("/admin/nextcloud-talk/reload", tags=["Admin"])
+    async def reload_nextcloud_bots():
+        """Force reload Nextcloud bot configuration from disk."""
+        from ..integrations.nextcloud.manager import get_nextcloud_manager
+        manager = get_nextcloud_manager()
+        manager.reload()
+        bots = manager.list_bots()
+        log.info(f"Nextcloud bot config reloaded: {len(bots)} bots ({[b.ask_llm_bot for b in bots]})")
+        return {
+            "status": "reloaded",
+            "bots_count": len(bots),
+            "bots": [b.ask_llm_bot for b in bots],
+        }
 
     # -------------------------------------------------------------------------
     # OpenAI-Compatible Endpoints

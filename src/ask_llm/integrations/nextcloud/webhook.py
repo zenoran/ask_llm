@@ -80,15 +80,31 @@ async def send_nextcloud_message(
         'X-Nextcloud-Talk-Bot-Signature': signature,
     }
 
+    # Debug: log message being sent with checksum
+    msg_hash = hashlib.sha256(message.encode('utf-8')).hexdigest()[:12]
+    has_bullets = "- **" in message or "- " in message
+    log.info(f"Sending to Nextcloud: len={len(message)}, hash={msg_hash}, has_bullets={has_bullets}")
+    if log.isEnabledFor(logging.DEBUG):
+        # Log first 500 chars and check for key content
+        log.debug(f"Message preview:\n{message[:500]}{'...' if len(message) > 500 else ''}")
+        # Check for the expected bullet points
+        expected_tools = ["search_history", "get_recent_history", "forget_history"]
+        for tool in expected_tools:
+            if tool in message:
+                log.debug(f"  ✓ Contains '{tool}'")
+            else:
+                log.warning(f"  ✗ MISSING '{tool}' - content may be truncated!")
+    
     try:
         async with httpx.AsyncClient() as client:
             response = await client.post(url, headers=headers, content=body)
 
             if response.status_code == 201:
-                log.info(f"✓ Message sent to {conversation_token}")
+                log.info(f"✓ Message sent to {conversation_token} ({len(message)} chars)")
                 return True
             else:
                 log.error(f"Failed to send message: {response.status_code} {response.text}")
+                log.error(f"Message was ({len(message)} chars): {message[:200]}...")
                 return False
     except Exception as e:
         log.error(f"Error sending message: {e}")
@@ -185,6 +201,12 @@ async def handle_nextcloud_webhook(request: Request) -> dict:
             # Extract the assistant's message
             if response.choices and len(response.choices) > 0:
                 llm_response = response.choices[0].message.content
+                resp_hash = hashlib.sha256((llm_response or "").encode('utf-8')).hexdigest()[:12]
+                log.info(f"LLM response: len={len(llm_response) if llm_response else 0}, hash={resp_hash}")
+                # Log first/last parts to detect truncation
+                if llm_response:
+                    log.debug(f"Response start: {llm_response[:100]!r}")
+                    log.debug(f"Response end: {llm_response[-100:]!r}")
                 # Send response back to Talk with this bot's secret
                 await send_nextcloud_message(
                     nextcloud_url=backend.rstrip('/'),

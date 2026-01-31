@@ -1,23 +1,18 @@
 """Nextcloud Talk bot configuration management.
 
-Nextcloud bot configs (including secrets) are stored in the USER config:
-    ~/.config/ask-llm/bots.yaml
-
-This is separate from the repo's bots.yaml which only contains bot definitions.
-The user config is merged with the repo config at runtime.
+Nextcloud bot configs are stored in the bots.yaml files under the 'nextcloud' key.
+User config (~/.config/ask-llm/bots.yaml) takes priority over repo config.
+This module uses the centralized bot config loader from ask_llm.bots.
 """
 
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Optional
-import yaml
 
-
-def _get_user_bots_yaml_path() -> Path:
-    """Get path to user's bots.yaml config file."""
-    from ask_llm.utils.config import DOTENV_PATH
-    # DOTENV_PATH is ~/.config/ask-llm/.env, so parent is the config dir
-    return DOTENV_PATH.parent / "bots.yaml"
+from ask_llm.bots import (
+    get_all_raw_bot_data,
+    save_user_bot_config,
+    remove_user_bot_section,
+)
 
 
 @dataclass
@@ -38,109 +33,58 @@ class NextcloudBot:
 class NextcloudBotConfig:
     """Manages Nextcloud bot configuration.
     
-    Reads nextcloud configs from BOTH:
-    - Repo bots.yaml (passed in constructor) - for legacy/fallback
-    - User bots.yaml (~/.config/ask-llm/bots.yaml) - preferred location for secrets
+    Uses the centralized bot config loader which merges:
+    - Repo bots.yaml (defaults)
+    - User bots.yaml (~/.config/ask-llm/bots.yaml) (overrides)
     
     Writes ONLY to user bots.yaml to keep secrets out of repo.
     """
 
-    def __init__(self, bots_yaml_path: Path):
+    def __init__(self, bots_yaml_path=None):
         """Initialize config.
         
         Args:
-            bots_yaml_path: Path to repo's bots.yaml (for reading only)
+            bots_yaml_path: Ignored - kept for backwards compatibility.
+                           Config loading is now centralized in ask_llm.bots.
         """
-        self.repo_bots_yaml_path = bots_yaml_path
-        self.user_bots_yaml_path = _get_user_bots_yaml_path()
-        self.bots: dict[str, NextcloudBot] = {}
-        self._last_mtime: float = 0
-        self._last_user_mtime: float = 0
-        self.load()
+        # No separate loading needed - uses centralized loader
+        pass
 
-    def _check_reload(self):
-        """Reload config if either file has changed."""
-        repo_mtime = self.repo_bots_yaml_path.stat().st_mtime if self.repo_bots_yaml_path.exists() else 0
-        user_mtime = self.user_bots_yaml_path.stat().st_mtime if self.user_bots_yaml_path.exists() else 0
-        
-        if repo_mtime > self._last_mtime or user_mtime > self._last_user_mtime:
-            self.load()
-
-    def load(self):
-        """Load Nextcloud bot configs from both repo and user bots.yaml.
-        
-        User config takes precedence over repo config.
-        """
-        self.bots.clear()
-        
-        # Track mtimes
-        if self.repo_bots_yaml_path.exists():
-            self._last_mtime = self.repo_bots_yaml_path.stat().st_mtime
-        if self.user_bots_yaml_path.exists():
-            self._last_user_mtime = self.user_bots_yaml_path.stat().st_mtime
-
-        # Load from repo bots.yaml first (legacy support)
-        if self.repo_bots_yaml_path.exists():
-            self._load_from_yaml(self.repo_bots_yaml_path)
-        
-        # Load from user bots.yaml (overrides repo)
-        if self.user_bots_yaml_path.exists():
-            self._load_from_yaml(self.user_bots_yaml_path)
-    
-    def _load_from_yaml(self, yaml_path: Path):
-        """Load nextcloud configs from a YAML file."""
-        with open(yaml_path) as f:
-            data = yaml.safe_load(f)
-        
-        if not data:
-            return
-
-        # Look for nextcloud config in each bot
-        for bot_id, bot_config in data.get('bots', {}).items():
-            nc_config = bot_config.get('nextcloud')
+    def _get_nextcloud_bots(self) -> dict[str, NextcloudBot]:
+        """Get all bots with nextcloud config from centralized loader."""
+        bots = {}
+        for slug, bot_data in get_all_raw_bot_data().items():
+            nc_config = bot_data.get('nextcloud')
             if nc_config:
-                self.bots[bot_id] = NextcloudBot(
-                    ask_llm_bot=bot_id,
+                bots[slug] = NextcloudBot(
+                    ask_llm_bot=slug,
                     nextcloud_bot_id=nc_config.get('bot_id'),
                     secret=nc_config.get('secret', ''),
                     conversation_token=nc_config.get('conversation_token'),
                     enabled=nc_config.get('enabled', True),
                 )
+        return bots
+
+    @property
+    def bots(self) -> dict[str, NextcloudBot]:
+        """Get all configured Nextcloud bots."""
+        return self._get_nextcloud_bots()
+
+    def load(self):
+        """Reload config - triggers centralized reload via property access."""
+        # No-op: _get_nextcloud_bots() calls get_all_raw_bot_data() which 
+        # checks for config file changes automatically
+        pass
+
+    def _check_reload(self):
+        """Check for config changes - handled by centralized loader."""
+        # No-op: handled automatically by get_all_raw_bot_data()
+        pass
 
     def save(self):
-        """Save Nextcloud configs to USER bots.yaml (not repo).
-        
-        This keeps secrets out of the repository.
-        """
-        # Ensure user config directory exists
-        self.user_bots_yaml_path.parent.mkdir(parents=True, exist_ok=True)
-        
-        # Load existing user config or create empty
-        if self.user_bots_yaml_path.exists():
-            with open(self.user_bots_yaml_path) as f:
-                data = yaml.safe_load(f) or {}
-        else:
-            data = {}
-
-        if 'bots' not in data:
-            data['bots'] = {}
-
-        # Update nextcloud section for each bot
-        for bot_id, nc_bot in self.bots.items():
-            if bot_id not in data['bots']:
-                data['bots'][bot_id] = {}
-
-            data['bots'][bot_id]['nextcloud'] = {
-                'bot_id': nc_bot.nextcloud_bot_id,
-                'secret': nc_bot.secret,
-                'conversation_token': nc_bot.conversation_token,
-                'enabled': nc_bot.enabled,
-            }
-
-        with open(self.user_bots_yaml_path, 'w') as f:
-            yaml.dump(data, f, default_flow_style=False, sort_keys=False)
-        
-        self._last_user_mtime = self.user_bots_yaml_path.stat().st_mtime
+        """Save is handled per-bot via add_bot() now."""
+        # No-op: saves happen individually via save_user_bot_config()
+        pass
 
     def add_bot(
         self,
@@ -148,50 +92,36 @@ class NextcloudBotConfig:
         nextcloud_bot_id: int,
         secret: str,
         conversation_token: str,
-    ):
+    ) -> NextcloudBot:
         """Add Nextcloud config to a bot.
         
         Saves to ~/.config/ask-llm/bots.yaml (user config, not repo).
         """
-        bot = NextcloudBot(
+        nc_data = {
+            'bot_id': nextcloud_bot_id,
+            'secret': secret,
+            'conversation_token': conversation_token,
+            'enabled': True,
+        }
+        save_user_bot_config(ask_llm_bot, 'nextcloud', nc_data)
+        
+        return NextcloudBot(
             ask_llm_bot=ask_llm_bot,
             nextcloud_bot_id=nextcloud_bot_id,
             secret=secret,
             conversation_token=conversation_token,
             enabled=True,
         )
-        self.bots[ask_llm_bot] = bot
-        self.save()
-        return bot
 
     def remove_bot(self, ask_llm_bot: str) -> bool:
         """Remove Nextcloud config from a bot.
         
         Removes from user config only (doesn't touch repo).
         """
-        if ask_llm_bot not in self.bots:
-            return False
-        
-        del self.bots[ask_llm_bot]
-        
-        # Remove from user YAML
-        if self.user_bots_yaml_path.exists():
-            with open(self.user_bots_yaml_path) as f:
-                data = yaml.safe_load(f) or {}
-            if 'bots' in data and ask_llm_bot in data['bots']:
-                if 'nextcloud' in data['bots'][ask_llm_bot]:
-                    del data['bots'][ask_llm_bot]['nextcloud']
-                    # Clean up empty bot entry
-                    if not data['bots'][ask_llm_bot]:
-                        del data['bots'][ask_llm_bot]
-            with open(self.user_bots_yaml_path, 'w') as f:
-                yaml.dump(data, f, default_flow_style=False, sort_keys=False)
-        
-        return True
+        return remove_user_bot_section(ask_llm_bot, 'nextcloud')
 
     def get_bot_by_conversation(self, token: str) -> Optional[NextcloudBot]:
         """Get bot config by conversation token."""
-        self._check_reload()
         for bot in self.bots.values():
             if bot.enabled and bot.conversation_token == token:
                 return bot
@@ -199,5 +129,4 @@ class NextcloudBotConfig:
 
     def get_bot(self, ask_llm_bot: str) -> Optional[NextcloudBot]:
         """Get bot config by ask_llm bot ID."""
-        self._check_reload()
         return self.bots.get(ask_llm_bot)

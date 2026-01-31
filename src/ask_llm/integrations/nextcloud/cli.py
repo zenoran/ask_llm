@@ -2,11 +2,13 @@
 
 import asyncio
 import click
+import httpx
 from rich.console import Console
 from rich.table import Table
 
 from .manager import get_nextcloud_manager
 from .provisioner import get_provisioner_client
+from ...utils.config import Config
 
 console = Console()
 
@@ -43,6 +45,31 @@ def list_bots():
         )
 
     console.print(table)
+
+
+@nextcloud_cli.command(name='reload')
+def reload_bots():
+    """Reload Nextcloud bot configuration (local and remote service)."""
+    # Reload local manager
+    manager = get_nextcloud_manager()
+    manager.reload()
+    bots = manager.list_bots()
+    console.print(f"[green]✓ Local config reloaded ({len(bots)} bots)[/green]")
+
+    # Notify running service
+    try:
+        config = Config()
+        service_url = f"http://{config.SERVICE_HOST}:{config.SERVICE_PORT}"
+        reload_resp = httpx.post(f"{service_url}/admin/nextcloud-talk/reload", timeout=5.0)
+        if reload_resp.status_code == 200:
+            data = reload_resp.json()
+            console.print(f"[green]✓ Service reloaded ({data.get('bots_count', 0)} bots)[/green]")
+        else:
+            console.print(f"[yellow]⚠ Service returned status {reload_resp.status_code}[/yellow]")
+    except httpx.ConnectError:
+        console.print(f"[dim]ℹ Service not running[/dim]")
+    except Exception as e:
+        console.print(f"[yellow]⚠ Could not notify service: {e}[/yellow]")
 
 
 @nextcloud_cli.command(name='provision')
@@ -95,6 +122,21 @@ def provision(ask_llm_bot, room_name, bot_name, owner):
         console.print(f"  Bot ID: {result.bot_id}")
         console.print(f"  Room token: {result.room_token}")
         console.print(f"  Room URL: [link]{result.room_url}[/link]")
+
+        # Notify running service to reload bot config
+        try:
+            config = Config()
+            service_url = f"http://{config.SERVICE_HOST}:{config.SERVICE_PORT}"
+            reload_resp = httpx.post(f"{service_url}/admin/nextcloud-talk/reload", timeout=5.0)
+            if reload_resp.status_code == 200:
+                console.print(f"[dim]✓ Service reloaded bot config[/dim]")
+            else:
+                console.print(f"[yellow]⚠ Could not reload service (status {reload_resp.status_code})[/yellow]")
+        except httpx.ConnectError:
+            console.print(f"[dim]ℹ Service not running - config will be loaded on next start[/dim]")
+        except Exception as e:
+            console.print(f"[yellow]⚠ Could not notify service: {e}[/yellow]")
+
         console.print(f"\n[green]Test it by sending a message in the room![/green]")
 
     except ValueError as e:
