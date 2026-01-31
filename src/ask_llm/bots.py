@@ -18,6 +18,11 @@ logger = logging.getLogger(__name__)
 BOTS_YAML_PATH = Path(__file__).parent / "bots.yaml"
 
 
+def get_bots_yaml_path() -> Path:
+    """Get the path to bots.yaml."""
+    return BOTS_YAML_PATH
+
+
 @dataclass
 class Bot:
     """A bot personality with its own system prompt and capabilities."""

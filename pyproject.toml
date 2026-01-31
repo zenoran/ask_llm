@@ -13,6 +13,7 @@ dependencies = [
     "pyyaml>=6.0.2",
     "pytz>=2025.2",
     "tiktoken>=0.9.0",
+    "click>=8.0.0",
     # PostgreSQL memory backend
     "sqlalchemy>=2.0.0",
     "sqlmodel>=0.0.31",
@@ -68,6 +69,7 @@ ask-llm-service = "ask_llm.service.server:main"
 llm-service = "ask_llm.service.server:main"
 llm-memory = "ask_llm.memory_debug:main"
 llm-mcp-server = "ask_llm.memory_server:run_server"
+llm-nextcloud = "ask_llm.integrations.nextcloud.cli:nextcloud_cli"
 
 [project.entry-points."ask_llm.memory"]
 postgresql = "ask_llm.memory.postgresql:PostgreSQLMemoryBackend"

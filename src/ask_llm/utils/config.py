@@ -158,6 +158,14 @@ class Config(BaseSettings):
     NO_STREAM: bool = Field(default=False, description="Disable streaming output")
     INTERACTIVE_MODE: bool = Field(default=False, description="Whether the app is in interactive mode (set based on args)")
 
+    # --- Nextcloud Talk Bot Settings (legacy single-bot) --- #
+    NEXTCLOUD_BOT_SECRET: Optional[str] = Field(default=None, description="Nextcloud Talk bot secret from occ talk:bot:install (deprecated: use bots.yaml)")
+    NEXTCLOUD_URL: str = Field(default="https://nextcloud.ferreri.us", description="Nextcloud instance URL")
+
+    # --- Nextcloud Talk Provisioner --- #
+    TALK_PROVISIONER_URL: str = Field(default="http://ubuntu.home:8790", description="Nextcloud Talk provisioner service URL")
+    TALK_PROVISIONER_TOKEN: Optional[str] = Field(default=None, description="Bearer token for provisioner service")
+
     # SYSTEM_MESSAGE is set at runtime from bot config, this is just the default
     SYSTEM_MESSAGE: str = Field(default=DEFAULT_SYSTEM_MESSAGE)
 
