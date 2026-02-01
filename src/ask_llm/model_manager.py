@@ -14,6 +14,7 @@ The `ModelManager` class can be used directly for more granular control over
 model configurations.
 """
 
+import os
 import re
 import time
 from collections import defaultdict
@@ -35,6 +36,21 @@ from ask_llm.utils.config import (
     PROVIDER_UNKNOWN,
 )
 from .utils.config import Config
+
+
+def is_service_mode_enabled(config: Config) -> bool:
+    """
+    Check if service mode is enabled via environment variable or config.
+    
+    This is the SINGLE source of truth for determining if service mode should be used.
+    All CLI commands should use this function to check service mode status.
+    
+    Returns:
+        True if USE_SERVICE is enabled via ASK_LLM_USE_SERVICE env var or config.USE_SERVICE
+    """
+    use_service_env = os.getenv("ASK_LLM_USE_SERVICE", "").lower() in ("true", "1", "yes")
+    use_service_config = getattr(config, "USE_SERVICE", False)
+    return use_service_env or use_service_config
 
 console = Console()
 
@@ -128,19 +144,26 @@ class ModelManager:
         defined_models = self.models_data.get("models", {})
         available_aliases = set(self.config.get_model_options())
         local_aliases = set(defined_models.keys())
+        
+        # Only check service availability if service mode is enabled
+        # This prevents "service not reachable" errors when user isn't using service mode
+        use_service = is_service_mode_enabled(self.config)
         service_available = False
         service_models: list[str] = []
         service_url: str | None = None
-        try:
-            from ask_llm.service.client import get_service_client
+        
+        if use_service:
+            try:
+                from ask_llm.service.client import get_service_client
 
-            service_client = get_service_client()
-            service_url = service_client.http_url
-            if service_client.is_available(force_check=True):
-                service_available = True
-                service_models = service_client.list_models() or []
-        except Exception:
-            service_available = False
+                service_client = get_service_client()
+                service_url = service_client.http_url
+                if service_client.is_available(force_check=True):
+                    service_available = True
+                    service_models = service_client.list_models() or []
+            except Exception:
+                service_available = False
+        
         if not defined_models:
             console.print("  [yellow]No models defined in the configuration file.[/yellow]")
         if hasattr(console, 'rule'):
@@ -166,7 +189,9 @@ class ModelManager:
                     note = self._get_dependency_note(mtype) if alias not in available_aliases else ""
                     console.print(f"  {marker} [bold][bright_blue]{alias}[/bright_blue][/bold]: {details}{note}")
                 console.print()
-        if service_available or service_url:
+        
+        # Only show service section if service mode is enabled
+        if use_service:
             if hasattr(console, 'rule'):
                 console.rule("[bold cyan]Service Models[/bold cyan]")
             else:
@@ -181,7 +206,7 @@ class ModelManager:
                 if service_url:
                     console.print(f"  [dim]Source: {service_url}[/dim]")
             else:
-                console.print("  [dim]Service not reachable.[/dim]")
+                console.print("  [yellow]⚠ Service not reachable.[/yellow]")
                 if service_url:
                     console.print(f"  [dim]Expected at: {service_url}[/dim]")
             console.print()

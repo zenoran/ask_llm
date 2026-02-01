@@ -9,7 +9,7 @@ from ask_llm.utils.config import Config, has_database_credentials
 from ask_llm.utils.config import set_config_value
 from ask_llm.utils.input_handler import MultilineInputHandler
 from ask_llm.core import AskLLM
-from ask_llm.model_manager import list_models, update_models_interactive, delete_model, ModelManager
+from ask_llm.model_manager import list_models, update_models_interactive, delete_model, ModelManager, is_service_mode_enabled
 from ask_llm.gguf_handler import handle_add_gguf
 from ask_llm.bots import BotManager
 from ask_llm.profiles import ProfileManager, EntityType, AttributeCategory
@@ -221,10 +221,11 @@ def show_status(config: Config, args: argparse.Namespace | None = None):
         display = "<set>" if redact else str(config_value)
         return f"{label}={display} [dim](config)[/dim]"
 
-    # Check if USE_SERVICE is enabled
+    # Check if USE_SERVICE is enabled - uses centralized function from model_manager
+    # Keep env/config vars for display purposes
     use_service_env = os.getenv("ASK_LLM_USE_SERVICE", "").lower() in ("true", "1", "yes")
     use_service_config = getattr(config, "USE_SERVICE", False)
-    use_service = use_service_env or use_service_config
+    use_service = is_service_mode_enabled(config)  # Centralized check
     service_url_env = os.getenv("ASK_LLM_SERVICE_URL")
     service_url_config = getattr(config, "SERVICE_URL", None)
     service_url = service_url_env or service_url_config

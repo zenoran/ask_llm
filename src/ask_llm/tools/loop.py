@@ -151,6 +151,11 @@ class ToolLoop:
                     ))
                 
                 if tool_calls:
+                    # Log tool calls with key params (concise)
+                    for tc in tool_calls:
+                        args_str = self._format_tool_args(tc.name, tc.arguments)
+                        logger.info(f"🔧 {tc.name}({args_str})")
+                    
                     # Execute tools
                     tool_messages, tool_results = self._execute_tools(tool_calls, handler)
                     
@@ -208,6 +213,11 @@ class ToolLoop:
 
                         return ReActFormatHandler().sanitize_response(final_text)
                 return handler.sanitize_response(final_text)
+            
+            # Log tool calls with key params (concise)
+            for tc in tool_calls:
+                args_str = self._format_tool_args(tc.name, tc.arguments)
+                logger.info(f"🔧 {tc.name}({args_str})")
             
             # Execute tools
             tool_messages, tool_results = self._execute_tools(tool_calls, effective_handler)
@@ -335,6 +345,87 @@ class ToolLoop:
                     content = content[:last_match.end()]
         
         return Message(role="assistant", content=content)
+
+    def _format_tool_args(self, tool_name: str, arguments: dict) -> str:
+        """Format tool arguments for concise logging.
+        
+        Shows the most relevant params for each tool type:
+        - memory: action, content (truncated)
+        - search: query
+        - history: action, query
+        - profile: action, key
+        - etc.
+        """
+        if not arguments:
+            return ""
+        
+        action = arguments.get("action", "")
+        query = arguments.get("query", "")
+        content = arguments.get("content", "")
+        
+        if tool_name == "memory":
+            if action == "store" and content:
+                short = content[:50] + "..." if len(content) > 50 else content
+                return f"store: \"{short}\""
+            elif action == "search" and query:
+                return f"search: \"{query}\""
+            elif action == "delete":
+                return f"delete: {arguments.get('memory_id', query or 'unknown')}"
+            else:
+                return f"{action}: {query or content or str(arguments)}"
+        
+        elif tool_name == "search":
+            q = arguments.get("query", "")
+            t = arguments.get("type", "web")
+            return f"\"{q}\" ({t})" if q else str(arguments)
+        
+        elif tool_name == "history":
+            if action == "search" and query:
+                return f"search: \"{query}\""
+            elif action == "recent":
+                since = arguments.get("since", "")
+                return f"recent since={since}" if since else "recent"
+            elif action == "forget":
+                count = arguments.get("count", arguments.get("minutes", "?"))
+                unit = "msgs" if "count" in arguments else "min"
+                return f"forget {count} {unit}"
+            else:
+                return action
+        
+        elif tool_name == "profile":
+            if action == "set":
+                cat = arguments.get("category", "")
+                key = arguments.get("key", "")
+                val = arguments.get("value", "")
+                if isinstance(val, str) and len(val) > 30:
+                    val = val[:30] + "..."
+                return f"set {cat}.{key}={val}"
+            elif action == "get":
+                return "get profile"
+            elif action == "delete":
+                return f"delete {arguments.get('key', 'unknown')}"
+            else:
+                return action
+        
+        elif tool_name == "model":
+            if action == "switch":
+                return f"switch to {arguments.get('model_name', 'unknown')}"
+            else:
+                return action
+        
+        elif tool_name == "time":
+            return ""
+        
+        # Default: show query or content if available
+        if query:
+            return f"\"{query}\""
+        if content:
+            short = content[:40] + "..." if len(content) > 40 else content
+            return f"\"{short}\""
+        
+        # Fallback: show first few key=value pairs
+        items = list(arguments.items())[:2]
+        return ", ".join(f"{k}={v}" for k, v in items)
 
     def _should_use_native_tools(self) -> bool:
         """Check if we should use native tool calling.

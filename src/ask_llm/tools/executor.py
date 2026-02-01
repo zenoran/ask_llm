@@ -238,11 +238,105 @@ class ToolExecutor:
             logger.exception(f"Tool execution failed: {normalized_call.name}")
             result = format_tool_result(normalized_call.name, None, error=str(e))
 
-        # Log the result in verbose mode
+        # Log result summary (concise)
+        result_summary = self._summarize_result(normalized_call.name, result)
+        if result_summary:
+            logger.info(f"  → {result_summary}")
+
+        # Log the result in verbose mode (full details)
         if slog:
             slog.tool_result(normalized_call.name, result)
 
         return result
+
+    def _summarize_result(self, tool_name: str, result: str) -> str:
+        """Extract a concise summary from tool result for logging."""
+        if not result:
+            return "(no result)"
+        
+        # Check for error
+        if "status=\"error\"" in result or "ERROR:" in result:
+            # Extract error message
+            if "ERROR:" in result:
+                err_start = result.find("ERROR:") + 6
+                err_end = result.find("\n", err_start)
+                return f"[red]Error: {result[err_start:err_end if err_end > 0 else err_start+50].strip()}[/red]"
+            return "[red]Error[/red]"
+        
+        # Memory search results
+        if tool_name == "memory":
+            if "Found" in result and "memories" in result:
+                # Extract count like "Found 3 relevant memories"
+                import re
+                match = re.search(r'Found (\d+) relevant', result)
+                if match:
+                    return f"found {match.group(1)} memories"
+            elif "Memory stored" in result:
+                # Extract ID if present
+                if "ID:" in result:
+                    id_start = result.find("ID:") + 3
+                    id_end = result.find("\n", id_start)
+                    mem_id = result[id_start:id_end if id_end > 0 else id_start+12].strip()
+                    return f"stored (id: {mem_id})"
+                return "stored"
+            elif "deleted" in result.lower():
+                return "deleted"
+        
+        # History search results
+        if tool_name == "history":
+            if "Found" in result and "messages" in result:
+                import re
+                match = re.search(r'Found (\d+) messages', result)
+                if match:
+                    return f"found {match.group(1)} messages"
+            elif "Last" in result and "messages" in result:
+                import re
+                match = re.search(r'Last (\d+) messages', result)
+                if match:
+                    return f"retrieved {match.group(1)} messages"
+            elif "Forgot" in result:
+                return "forgot messages"
+        
+        # Search results
+        if tool_name == "search":
+            if "result" in result.lower():
+                # Count results by looking for numbered lines or URLs
+                lines = result.strip().split('\n')
+                count = len([l for l in lines if l.strip().startswith(('1.', '2.', '3.', '•', '-'))])
+                if count > 0:
+                    return f"found {count} results"
+                return "search complete"
+        
+        # Profile results
+        if tool_name == "profile":
+            if "Saved user" in result:
+                return "saved"
+            elif "Deleted" in result:
+                return "deleted"
+            elif "No profile" in result:
+                return "no profile data"
+            elif "profile" in result.lower():
+                return "retrieved"
+        
+        # Model results
+        if tool_name == "model":
+            if "Available models" in result:
+                # Count models
+                count = result.count('\n') - 1  # Subtract header line
+                return f"listed {max(0, count)} models"
+            elif "Current model" in result:
+                # Extract model name
+                first_line = result.split('\n')[0] if '\n' in result else result
+                return first_line.replace("Current model: ", "").strip()
+            elif "switched" in result.lower():
+                return "switched"
+        
+        # Default: truncate result
+        lines = result.strip().split('\n')
+        first_line = lines[0][:60] if lines else ""
+        if len(first_line) > 60:
+            first_line = first_line[:60] + "..."
+        return first_line
 
     # =========================================================================
     # Consolidated Tool Handlers

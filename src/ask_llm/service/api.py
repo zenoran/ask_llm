@@ -1177,6 +1177,10 @@ class BackgroundService:
                                             except _json.JSONDecodeError:
                                                 args = {}
 
+                                            # Log tool call with args
+                                            args_summary = self._format_tool_args(name, args)
+                                            log.info(f"🔧 {name}({args_summary})")
+
                                             tool_call_obj = ToolCall(name=name, arguments=args, raw_text="")
                                             result = executor.execute(tool_call_obj)
                                             tool_results.append({
@@ -1493,7 +1497,7 @@ class BackgroundService:
                     if not fact:
                         continue
 
-                    log.debug(f"{action.action}: '{fact.content[:50]}...'")
+                    log.info(f"  💾 {action.action}: \"{fact.content[:60]}{'...' if len(fact.content) > 60 else ''}\"")
 
                     try:
                         if action.action == "ADD":
@@ -1529,7 +1533,7 @@ class BackgroundService:
             else:
                 # No existing memories - store all facts directly
                 for fact in facts:
-                    log.debug(f"ADD: '{fact.content[:50]}...'")
+                    log.info(f"  💾 ADD: \"{fact.content[:60]}{'...' if len(fact.content) > 60 else ''}\"")
                     try:
                         memory_client.add_memory(
                             content=fact.content,
@@ -1745,6 +1749,65 @@ class BackgroundService:
         self._shutdown_event.set()
         if self._worker_task:
             self._worker_task.cancel()
+    
+    def _format_tool_args(self, tool_name: str, arguments: dict) -> str:
+        """Format tool arguments for concise logging."""
+        if not arguments:
+            return ""
+        
+        action = arguments.get("action", "")
+        query = arguments.get("query", "")
+        content = arguments.get("content", "")
+        
+        if tool_name == "memory":
+            if action == "store" and content:
+                short = content[:40] + "..." if len(content) > 40 else content
+                return f'"{short}"'
+            elif action == "search" and query:
+                return f'"{query}"'
+            elif action == "delete":
+                return f"id={arguments.get('memory_id', query or 'unknown')}"
+            else:
+                return f"{action}: {query or content or str(arguments)}"
+        
+        elif tool_name == "search":
+            q = arguments.get("query", "")
+            return f'"{q}"' if q else str(arguments)
+        
+        elif tool_name == "history":
+            if action == "search" and query:
+                return f'"{query}"'
+            elif action == "recent":
+                since = arguments.get("since", "")
+                return f"since={since}" if since else "recent"
+            else:
+                return action
+        
+        elif tool_name == "profile":
+            if action == "set":
+                cat = arguments.get("category", "")
+                key = arguments.get("key", "")
+                return f"{cat}.{key}"
+            else:
+                return action
+        
+        elif tool_name == "model":
+            if action == "switch":
+                return f"→ {arguments.get('model_name', 'unknown')}"
+            else:
+                return action
+        
+        elif tool_name == "time":
+            return ""
+        
+        if query:
+            return f'"{query}"'
+        if content:
+            short = content[:30] + "..." if len(content) > 30 else content
+            return f'"{short}"'
+        
+        items = list(arguments.items())[:2]
+        return ", ".join(f"{k}={v}" for k, v in items)
     
     def get_status(self) -> ServiceStatusResponse:
         """Get service status."""
