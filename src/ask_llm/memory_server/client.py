@@ -569,10 +569,22 @@ class MemoryClient:
         """
         self._ensure_initialized()
         if self.server_url:
-            return self._call_server(
+            result = self._call_server(
                 "get_messages",
                 {"bot_id": self.bot_id, "since_seconds": since_seconds, "limit": limit},
             )
+            # Apply timestamp filtering (server doesn't support since/until yet)
+            if since is not None or until is not None:
+                filtered = []
+                for msg in result:
+                    ts = msg.get("timestamp", 0)
+                    if since is not None and ts < since:
+                        continue
+                    if until is not None and ts > until:
+                        continue
+                    filtered.append(msg)
+                return filtered
+            return result
         storage = self._get_storage()
         # Use storage API directly (async) via helper
         messages = _run_async(storage.get_messages(bot_id=self.bot_id, since_seconds=since_seconds, limit=limit))

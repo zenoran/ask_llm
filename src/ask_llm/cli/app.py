@@ -163,6 +163,10 @@ def query_via_service(
                         )
                     return True
     except Exception as e:
+        # Store error in service client for later display
+        service_client = get_service_client()
+        if service_client:
+            service_client.last_error = str(e)
         logging.warning(f"Service query failed: {e}")
         if Config().VERBOSE:
             import traceback
@@ -1421,17 +1425,22 @@ def run_app(args: argparse.Namespace, config_obj: Config, resolved_alias: str):
                 stream=stream_flag,
             ):
                 return
-            # Service unavailable
+            # Service unavailable or failed
+            service_client = get_service_client()
+            error_detail = ""
+            if service_client and hasattr(service_client, 'last_error') and service_client.last_error:
+                error_detail = f"\n[dim]Error: {service_client.last_error}[/dim]"
+            
             if effective_model_type and effective_model_type != "openai":
                 if use_tools:
                     console.print(
-                        "[bold red]Error: Tool usage with local models requires the background service.[/bold red]"
+                        f"[bold red]Error: Tool usage with local models requires the background service.[/bold red]{error_detail}"
                     )
                     console.print("[yellow]Start the service with:[/yellow] llm-service")
                     console.print("[yellow]Or use an OpenAI-compatible model:[/yellow] llm -m gpt4o -b proto")
                 else:
                     console.print(
-                        "[bold red]Service unavailable for local model. Start the service or use an OpenAI-compatible model.[/bold red]"
+                        f"[bold red]Service unavailable for local model. Start the service or use an OpenAI-compatible model.[/bold red]{error_detail}"
                     )
                 return
             # Fall back to local for OpenAI-compatible models

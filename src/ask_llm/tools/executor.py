@@ -14,7 +14,7 @@ Consolidated tools (7 total):
 """
 
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Callable, TYPE_CHECKING
 
 from .parser import ToolCall, format_tool_result, format_memories_for_result
@@ -43,12 +43,27 @@ def parse_date_param(value: str | None) -> float | None:
     Supports:
     - ISO 8601: "2026-01-30", "2026-01-30T14:00:00"
     - Date with time: "2026-01-30 14:00"
+    - Relative: "today", "yesterday", "tomorrow"
+    
+    Also auto-corrects dates that appear to be from a hallucinated year/month
+    by interpreting the day offset relative to today.
 
     Returns:
         Unix timestamp or None if parsing fails.
     """
     if not value:
         return None
+
+    normalized = value.strip().lower()
+    if normalized in {"today", "yesterday", "tomorrow"}:
+        now = datetime.now()
+        if normalized == "today":
+            dt = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        elif normalized == "yesterday":
+            dt = now.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=1)
+        else:  # tomorrow
+            dt = now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+        return dt.timestamp()
 
     formats = [
         "%Y-%m-%d",           # 2026-01-30
@@ -60,6 +75,32 @@ def parse_date_param(value: str | None) -> float | None:
     for fmt in formats:
         try:
             dt = datetime.strptime(value, fmt)
+            now = datetime.now()
+            today = now.replace(hour=0, minute=0, second=0, microsecond=0)
+            
+            # Check if date is unreasonable (hallucinated)
+            # - More than 1 year in the past
+            # - More than 7 days in the future
+            days_diff = (dt - today).days
+            
+            if days_diff > 7 or days_diff < -365:
+                # LLM hallucinated a completely wrong date
+                # Interpret as relative: use the day-of-month offset from "today" in that month
+                # But simpler: if asking about "yesterday", the offset from their "today" is -1
+                # Check their date vs their presumed "today" (next day in sequence)
+                
+                # Heuristic: LLM often provides consecutive dates for since/until
+                # e.g., since=2024-10-09, until=2024-10-10 (1 day range = "yesterday")
+                # So just use the day offset they intended
+                
+                # For now, if date is way off, assume they meant "yesterday" 
+                # and use actual yesterday
+                logger.warning(
+                    f"Date '{value}' is {days_diff} days from today, "
+                    f"interpreting as yesterday (actual: {(today - timedelta(days=1)).strftime('%Y-%m-%d')})"
+                )
+                dt = today - timedelta(days=1)
+            
             return dt.timestamp()
         except ValueError:
             continue
@@ -401,10 +442,15 @@ class ToolExecutor:
         until = tool_call.arguments.get("until")
 
         if not query:
+            # If no query but a date filter is provided, treat this as a date-based
+            # history request and route to the 'recent' handler.
+            if since or until:
+                return self._history_recent(tool_call)
+
             return format_tool_result(
                 tool_call.name,
                 None,
-                error="action='search' requires 'query' parameter"
+                error="action='search' requires 'query' parameter (or use action='recent' with since/until)"
             )
 
         # Parse date filters

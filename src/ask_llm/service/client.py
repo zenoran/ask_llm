@@ -67,6 +67,7 @@ class ServiceClient:
         self._available: bool | None = None
         self._last_check: float = 0
         self._check_interval = 30.0  # Re-check availability every 30 seconds
+        self.last_error: str | None = None  # Track last error for better user feedback
     
     def is_available(self, force_check: bool = False) -> bool:
         """Check if the background service is available."""
@@ -229,8 +230,10 @@ class ServiceClient:
                 return self._stream_chat_completion(payload)
             else:
                 response = self._request("POST", "/v1/chat/completions", data=payload)
+                self.last_error = None  # Clear on success
                 return response
         except Exception as e:
+            self.last_error = str(e)
             logger.warning(f"Chat completion via service failed: {e}")
             return None
     
@@ -274,9 +277,16 @@ class ServiceClient:
                         except json.JSONDecodeError:
                             continue
         except urllib.error.HTTPError as e:
-            logger.warning(f"Service streaming failed: HTTP {e.code}")
+            error_body = ""
+            try:
+                error_body = e.read().decode()[:500]  # Read error body, limit size
+            except Exception:
+                pass
+            self.last_error = f"HTTP {e.code}: {error_body}" if error_body else f"HTTP {e.code}"
+            logger.warning(f"Service streaming failed: {self.last_error}")
             return
         except Exception as e:
+            self.last_error = str(e)
             logger.warning(f"Service streaming failed: {e}")
             return
     

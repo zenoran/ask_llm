@@ -108,7 +108,7 @@ MEMORY_TOOL = Tool(
 # History tool - combines search_history, get_recent_history, forget_history
 HISTORY_TOOL = Tool(
     name="history",
-    description="Search, retrieve, or forget conversation messages. Use action='search' for keywords, 'recent' for last N messages, 'forget' to delete.",
+    description="Search, retrieve, or forget conversation messages. Use action='search' for keywords, 'recent' for date-based or last-N retrieval, 'forget' to delete.",
     parameters=[
         ToolParameter(
             name="action",
@@ -118,7 +118,7 @@ HISTORY_TOOL = Tool(
         ToolParameter(
             name="query",
             type="string",
-            description="Keywords to search (for search)",
+            description="Keywords to search (for search). Omit for date-only retrieval with since/until (uses action='recent').",
             required=False
         ),
         ToolParameter(
@@ -335,8 +335,17 @@ LEGACY_TOOL_MAP = {
 # Tool Calling Instructions
 # =============================================================================
 
-TOOL_CALLING_INSTRUCTIONS = '''
-## Tools
+def get_tool_calling_instructions(tools_list: str, search_guidance: str) -> str:
+    """Generate tool calling instructions with current date/time."""
+    from datetime import datetime, timedelta
+    now = datetime.now()
+    current_date = now.strftime("%Y-%m-%d")
+    current_time = now.strftime("%H:%M")
+    yesterday = (now - timedelta(days=1)).strftime("%Y-%m-%d")
+    
+    return f'''## Tools
+
+**Current date/time: {current_date} {current_time}** (yesterday was {yesterday})
 
 Use this EXACT format for tool calls:
 <tool_call>
@@ -351,13 +360,14 @@ Output the <tool_call> block IMMEDIATELY when needed, then STOP and wait for <to
 ### Tool Selection:
 - **profile**: For user facts/preferences - check FIRST for "what do you know about me"
 - **memory**: For learned facts and important information
-- **history**: For searching/retrieving raw conversation messages
+- **history**: For searching/retrieving raw conversation messages (use action="recent" with since/until dates for date-based retrieval)
 
 ### Rules:
 - Only use tools when you NEED information you don't have
 - Call ONE tool at a time, wait for result
 - TRUST tool results exactly - never contradict them
 - Before saying "I don't know" about the user: check system prompt "About the User" section, then use memory action=search
+- For date-based history queries: use ISO format dates (e.g., since="{yesterday}", until="{current_date}")
 '''
 
 # Guidance added when search tools are enabled
@@ -434,7 +444,7 @@ def get_tools_prompt(
         if include_model_tools or any(t.name == "model" for t in tools):
             search_guidance += MODEL_GUIDANCE
 
-        return TOOL_CALLING_INSTRUCTIONS.format(
+        return get_tool_calling_instructions(
             tools_list=tools_list,
             search_guidance=search_guidance,
         )

@@ -86,6 +86,25 @@ def _looks_like_regular_text(text: str) -> bool:
     return False
 
 
+# Patterns that indicate ReAct junk at end of response
+_REACT_LINE_MARKERS = (
+    "thought:",
+    "action:",
+    "action input:",
+    "observation:",
+    "final answer:",
+)
+
+
+def _contains_react_marker(text: str) -> bool:
+    """Check if text contains a ReAct marker that should stop streaming."""
+    lower = text.lower()
+    for marker in _REACT_LINE_MARKERS:
+        if marker in lower:
+            return True
+    return False
+
+
 def stream_with_tools(
     messages: list["Message"],
     stream_fn: Callable[[list["Message"], list[str] | None], Iterator[str]],
@@ -159,13 +178,41 @@ def stream_with_tools(
         initial_chunks: list[str] = []
         streaming_mode = False  # True = stream immediately, False = still deciding/buffering
         full_response = ""
+        
+        # Line buffer for detecting ReAct markers mid-stream
+        line_buffer = ""
+        react_junk_detected = False
 
         for chunk in stream_fn(current_messages, current_stop_sequences):
             full_response += chunk
 
+            if react_junk_detected:
+                # Already detected ReAct junk - consume but don't yield
+                continue
+
             if streaming_mode:
-                # Already decided to stream - yield immediately
-                yield chunk
+                # Already decided to stream - check for ReAct markers before yielding
+                # Buffer the current line to detect markers
+                line_buffer += chunk
+                
+                # Check if we have a complete line
+                if '\n' in line_buffer:
+                    lines = line_buffer.split('\n')
+                    # Process all complete lines
+                    for i, line in enumerate(lines[:-1]):
+                        if _contains_react_marker(line):
+                            # Found ReAct marker - stop streaming, don't yield this or anything after
+                            log.debug(f"Detected ReAct marker in line: {line[:50]}...")
+                            react_junk_detected = True
+                            break
+                        # Safe line - yield it with the newline
+                        yield line + '\n'
+                    
+                    if react_junk_detected:
+                        continue
+                    
+                    # Keep the incomplete last line in buffer
+                    line_buffer = lines[-1]
                 continue
 
             # Still deciding - buffer
@@ -182,9 +229,19 @@ def stream_with_tools(
                 # Regular text - switch to streaming mode
                 log.debug(f"Response looks like regular text - streaming")
                 streaming_mode = True
-                # Yield all buffered chunks
-                for buffered_chunk in initial_chunks:
-                    yield buffered_chunk
+                # Yield all buffered chunks (check each for ReAct markers)
+                combined = "".join(initial_chunks)
+                if '\n' in combined:
+                    lines = combined.split('\n')
+                    for i, line in enumerate(lines[:-1]):
+                        if _contains_react_marker(line):
+                            react_junk_detected = True
+                            break
+                        yield line + '\n'
+                    if not react_junk_detected:
+                        line_buffer = lines[-1]
+                else:
+                    line_buffer = combined
                 initial_chunks = []
                 continue
 
@@ -193,9 +250,25 @@ def stream_with_tools(
                 # Buffered enough without tool markers - assume it's text
                 log.debug(f"Decision threshold reached - streaming")
                 streaming_mode = True
-                for buffered_chunk in initial_chunks:
-                    yield buffered_chunk
+                combined = "".join(initial_chunks)
+                if '\n' in combined:
+                    lines = combined.split('\n')
+                    for i, line in enumerate(lines[:-1]):
+                        if _contains_react_marker(line):
+                            react_junk_detected = True
+                            break
+                        yield line + '\n'
+                    if not react_junk_detected:
+                        line_buffer = lines[-1]
+                else:
+                    line_buffer = combined
                 initial_chunks = []
+
+        # After stream ends, yield any remaining safe content in line buffer
+        if streaming_mode and line_buffer and not react_junk_detected:
+            # Check final partial line for markers
+            if not _contains_react_marker(line_buffer):
+                yield line_buffer
 
         log.debug(f"Response received: {len(full_response)} chars")
 
@@ -209,7 +282,7 @@ def stream_with_tools(
                 log.debug("No tool calls found in buffered response - yielding")
                 sanitized = handler.sanitize_response(full_response)
                 yield sanitized
-            # If streaming_mode was True, we already yielded everything
+            # If streaming_mode was True, we already yielded filtered content
             return
 
         # Tool call detected - execute it

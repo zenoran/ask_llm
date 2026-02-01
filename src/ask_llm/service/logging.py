@@ -530,13 +530,17 @@ class ServiceLogger:
         if isinstance(result, list):
             if len(result) == 0:
                 self._console.print(f"  [dim]result: (empty)[/dim]")
-            elif is_history and len(result) > 6:
-                # Condensed: first 3, ..., last 3
-                for i in range(3):
-                    self._log_result_item(result[i], i, condensed=True)
-                self._console.print(f"  [dim]... ({len(result) - 6} more) ...[/dim]")
-                for i in range(len(result) - 3, len(result)):
-                    self._log_result_item(result[i], i, condensed=True)
+            elif is_history:
+                # Very condensed for history: just first and last
+                if len(result) == 1:
+                    self._log_result_item(result[0], 0, condensed=True)
+                elif len(result) <= 3:
+                    for i, item in enumerate(result):
+                        self._log_result_item(item, i, condensed=True)
+                else:
+                    self._log_result_item(result[0], 0, condensed=True)
+                    self._console.print(f"  [dim]... ({len(result) - 2} more) ...[/dim]")
+                    self._log_result_item(result[-1], len(result) - 1, condensed=True)
             else:
                 # Full output for memory searches, etc.
                 for i, item in enumerate(result):
