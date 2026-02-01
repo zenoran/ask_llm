@@ -1361,6 +1361,8 @@ class BackgroundService:
                 result = await self._process_meaning_update(task)
             elif task.task_type == TaskType.MEMORY_MAINTENANCE:
                 result = await self._process_maintenance(task)
+            elif task.task_type == TaskType.PROFILE_MAINTENANCE:
+                result = await self._process_profile_maintenance(task)
             else:
                 raise ValueError(f"Unknown task type: {task.task_type}")
             
@@ -1614,7 +1616,53 @@ class BackgroundService:
             ),
         )
         return result
-    
+
+    async def _process_profile_maintenance(self, task: Task) -> dict:
+        """Process a profile maintenance task (consolidate profile attributes via LLM)."""
+        entity_id = task.payload.get("entity_id")
+        entity_type = task.payload.get("entity_type", "user")
+        dry_run = task.payload.get("dry_run", False)
+
+        if not entity_id:
+            return {"error": "entity_id is required"}
+
+        loop = asyncio.get_event_loop()
+
+        def run_maintenance():
+            from ..profiles import ProfileManager
+            from ..memory.profile_maintenance import ProfileMaintenanceService
+
+            profile_manager = ProfileManager(self.config)
+
+            # Try to get a cached LLM client; avoid loading a new model
+            llm_client = None
+            for model_alias, client in self._client_cache.items():
+                llm_client = client
+                log.debug(f"Using cached client '{model_alias}' for profile maintenance")
+                break
+
+            if not llm_client:
+                log.warning("No cached LLM client available for profile maintenance; skipping")
+                return {
+                    "entity_id": entity_id,
+                    "attributes_before": 0,
+                    "attributes_after": 0,
+                    "categories_updated": [],
+                    "error": "No LLM client available",
+                }
+
+            service = ProfileMaintenanceService(profile_manager, llm_client)
+            result = service.run(entity_id, entity_type, dry_run)
+            return {
+                "entity_id": result.entity_id,
+                "attributes_before": result.attributes_before,
+                "attributes_after": result.attributes_after,
+                "categories_updated": result.categories_updated,
+                "error": result.error,
+            }
+
+        return await loop.run_in_executor(None, run_maintenance)
+
     def submit_task(self, task: Task) -> str:
         """Submit a task to the processing queue."""
         from dataclasses import dataclass, field as dataclass_field
@@ -1757,10 +1805,40 @@ async def lifespan(app):
         "mcp" if getattr(config, "MEMORY_SERVER_URL", None) else "embedded",
         getattr(config, "MEMORY_SERVER_URL", ""),
     )
+
+    # Start job scheduler if enabled
+    scheduler = None
+    if config.SCHEDULER_ENABLED:
+        try:
+            from sqlmodel import create_engine
+            from urllib.parse import quote_plus
+            from .scheduler import JobScheduler, create_scheduler_tables, init_default_jobs
+
+            # Build postgres URL
+            encoded_password = quote_plus(config.POSTGRES_PASSWORD)
+            postgres_url = (
+                f"postgresql+psycopg2://{config.POSTGRES_USER}:{encoded_password}"
+                f"@{config.POSTGRES_HOST}:{config.POSTGRES_PORT}/{config.POSTGRES_DATABASE}"
+            )
+            engine = create_engine(postgres_url)
+            create_scheduler_tables(engine)
+            init_default_jobs(engine, config)
+
+            scheduler = JobScheduler(
+                engine=engine,
+                task_processor=_service,
+                check_interval=config.SCHEDULER_CHECK_INTERVAL_SECONDS,
+            )
+            await scheduler.start()
+            log.info("JobScheduler started")
+        except Exception as e:
+            log.warning(f"Failed to start scheduler: {e}")
     
     yield
     
     # Shutdown
+    if scheduler:
+        await scheduler.stop()
     await _service.shutdown()
 
 

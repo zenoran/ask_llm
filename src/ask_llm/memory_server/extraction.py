@@ -88,6 +88,25 @@ def extract_profile_attributes_from_fact(
             confidence=importance,  # Map importance to confidence
             source="extracted",
         )
+        
+        # If this is a name attribute, also set display_name on the profile
+        if key.lower() == "name":
+            # Try to extract just the name from content like "User's name is Nick"
+            import re
+            name_match = re.search(r"(?:name\s+is\s+|named\s+|I'?m\s+|call\s+me\s+)([A-Z][a-z]+)", content, re.IGNORECASE)
+            if name_match:
+                name = name_match.group(1)
+            else:
+                # Fallback: use the content directly if it looks like a name
+                name = content.strip()
+                if len(name) > 30 or " is " in name.lower():
+                    # Too long or still a sentence - extract first capitalized word
+                    words = [w for w in name.split() if w[0].isupper()]
+                    name = words[-1] if words else None  # Last capitalized word is often the name
+            
+            if name:
+                manager.set_display_name(EntityType.USER, user_id, name)
+                logger.info(f"[Profile] ✓ Set display_name to '{name}' for user {user_id}")
 
         # Determine if this was a create or update based on timestamps
         is_new = attr.created_at == attr.updated_at

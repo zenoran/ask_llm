@@ -431,9 +431,26 @@ def handle_list_attrs(user_id: str):
         console.print(f"[red]Failed to get profile for user '{user_id}'[/red]")
         return
 
+    # Show profile summary if present (from maintenance job)
+    profile = data.get("profile", {})
+    display_name = profile.get("display_name")
+    summary = profile.get("summary")
+    
+    if display_name or summary:
+        console.print(Panel.fit(f"[bold cyan]Profile: {user_id}[/bold cyan]", border_style="cyan"))
+        if display_name:
+            console.print(f"[bold]Name:[/bold] {display_name}")
+        if summary:
+            console.print(f"\n[bold]Summary:[/bold]")
+            console.print(summary)
+        console.print()
+
     attributes = data.get("attributes", [])
     if not attributes:
-        console.print(f"[yellow]No attributes found for user '{user_id}'[/yellow]")
+        if not summary:
+            console.print(f"[yellow]No attributes found for user '{user_id}'[/yellow]")
+        else:
+            console.print(f"[dim]Individual attributes consolidated into summary above.[/dim]")
         return
 
     table = Table(title=f"Profile Attributes for {user_id}")

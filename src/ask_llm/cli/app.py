@@ -736,6 +736,203 @@ def show_bots(config: Config):
     console.print()
 
 
+def show_job_status(config: Config):
+    """Display scheduled background jobs and recent run history."""
+    if not has_database_credentials(config):
+        console.print("[yellow]Job scheduler requires database connection.[/yellow]")
+        console.print("[dim]Set ASK_LLM_POSTGRES_PASSWORD in ~/.config/ask-llm/.env[/dim]")
+        return
+
+    try:
+        from sqlmodel import Session, create_engine, select
+        from urllib.parse import quote_plus
+        from ask_llm.service.scheduler import ScheduledJob, JobRun, JobStatus, create_scheduler_tables
+        from datetime import datetime
+
+        encoded_password = quote_plus(config.POSTGRES_PASSWORD)
+        postgres_url = (
+            f"postgresql+psycopg2://{config.POSTGRES_USER}:{encoded_password}"
+            f"@{config.POSTGRES_HOST}:{config.POSTGRES_PORT}/{config.POSTGRES_DATABASE}"
+        )
+        engine = create_engine(postgres_url)
+        
+        # Ensure tables exist
+        create_scheduler_tables(engine)
+
+        with Session(engine) as session:
+            # Get scheduled jobs
+            jobs = session.exec(select(ScheduledJob).order_by(ScheduledJob.job_type)).all()
+            
+            # Get recent runs (last 10)
+            runs = session.exec(
+                select(JobRun)
+                .order_by(JobRun.started_at.desc())
+                .limit(10)
+            ).all()
+
+        # Display scheduled jobs
+        console.print(Panel.fit("[bold cyan]Scheduled Jobs[/bold cyan]", border_style="cyan"))
+        console.print()
+
+        if not jobs:
+            console.print("[dim]No scheduled jobs found. Start the service to initialize default jobs.[/dim]")
+        else:
+            job_table = Table(show_header=True, box=None, padding=(0, 2))
+            job_table.add_column("Job Type", style="cyan")
+            job_table.add_column("Bot", style="bold")
+            job_table.add_column("Enabled", justify="center")
+            job_table.add_column("Interval")
+            job_table.add_column("Last Run")
+            job_table.add_column("Next Run")
+
+            now = datetime.utcnow()  # Use UTC to match database timestamps
+            for job in jobs:
+                enabled_icon = "[green]✓[/green]" if job.enabled else "[red]✗[/red]"
+                interval_str = f"{job.interval_minutes}m"
+                
+                if job.last_run_at:
+                    # Handle both naive and aware datetimes - convert to naive UTC
+                    last_run = job.last_run_at.replace(tzinfo=None) if job.last_run_at.tzinfo else job.last_run_at
+                    ago = now - last_run
+                    if ago.total_seconds() < 3600:
+                        last_run_str = f"{int(ago.total_seconds() // 60)}m ago"
+                    elif ago.total_seconds() < 86400:
+                        last_run_str = f"{int(ago.total_seconds() // 3600)}h ago"
+                    else:
+                        last_run_str = f"{int(ago.total_seconds() // 86400)}d ago"
+                else:
+                    last_run_str = "[dim]never[/dim]"
+
+                if job.next_run_at:
+                    # Handle both naive and aware datetimes
+                    next_run = job.next_run_at.replace(tzinfo=None) if job.next_run_at.tzinfo else job.next_run_at
+                    until = next_run - now
+                    if until.total_seconds() < 0:
+                        next_run_str = "[yellow]overdue[/yellow]"
+                    elif until.total_seconds() < 3600:
+                        next_run_str = f"in {int(until.total_seconds() // 60)}m"
+                    else:
+                        next_run_str = f"in {int(until.total_seconds() // 3600)}h"
+                else:
+                    next_run_str = "[dim]pending[/dim]"
+
+                job_table.add_row(
+                    job.job_type.value,
+                    job.bot_id,
+                    enabled_icon,
+                    interval_str,
+                    last_run_str,
+                    next_run_str,
+                )
+
+            console.print(job_table)
+        
+        console.print()
+
+        # Display recent runs
+        console.print(Panel.fit("[bold cyan]Recent Job Runs[/bold cyan]", border_style="cyan"))
+        console.print()
+
+        if not runs:
+            console.print("[dim]No job runs recorded yet.[/dim]")
+        else:
+            run_table = Table(show_header=True, box=None, padding=(0, 2))
+            run_table.add_column("Started", style="dim")
+            run_table.add_column("Bot", style="bold")
+            run_table.add_column("Status", justify="center")
+            run_table.add_column("Duration")
+            run_table.add_column("Error")
+
+            for run in runs:
+                if run.status == JobStatus.SUCCESS:
+                    status_str = "[green]✓ success[/green]"
+                elif run.status == JobStatus.FAILED:
+                    status_str = "[red]✗ failed[/red]"
+                elif run.status == JobStatus.RUNNING:
+                    status_str = "[yellow]⟳ running[/yellow]"
+                elif run.status == JobStatus.SKIPPED:
+                    status_str = "[dim]○ skipped[/dim]"
+                else:
+                    status_str = "[dim]○ pending[/dim]"
+
+                duration_str = f"{run.duration_ms}ms" if run.duration_ms else "[dim]-[/dim]"
+                error_str = run.error_message[:40] + "..." if run.error_message and len(run.error_message) > 40 else (run.error_message or "[dim]-[/dim]")
+                started_str = run.started_at.strftime("%Y-%m-%d %H:%M") if run.started_at else "[dim]-[/dim]"
+
+                run_table.add_row(
+                    started_str,
+                    run.bot_id,
+                    status_str,
+                    duration_str,
+                    error_str,
+                )
+
+            console.print(run_table)
+
+        console.print()
+        console.print(f"[dim]Scheduler enabled: {config.SCHEDULER_ENABLED} | Check interval: {config.SCHEDULER_CHECK_INTERVAL_SECONDS}s[/dim]")
+        console.print()
+
+    except Exception as e:
+        console.print(f"[red]Could not load job status: {e}[/red]")
+        import traceback
+        traceback.print_exc()
+
+
+def trigger_job(config: Config, job_type: str):
+    """Trigger a scheduled job to run immediately."""
+    if not has_database_credentials(config):
+        console.print("[yellow]Job scheduler requires database connection.[/yellow]")
+        console.print("[dim]Set ASK_LLM_POSTGRES_PASSWORD in ~/.config/ask-llm/.env[/dim]")
+        return
+
+    valid_types = ["profile_maintenance", "memory_consolidation", "memory_decay"]
+    if job_type not in valid_types:
+        console.print(f"[red]Unknown job type: {job_type}[/red]")
+        console.print(f"[dim]Valid types: {', '.join(valid_types)}[/dim]")
+        return
+
+    try:
+        from sqlmodel import Session, create_engine, select
+        from urllib.parse import quote_plus
+        from ask_llm.service.scheduler import ScheduledJob, JobType, create_scheduler_tables
+        from datetime import datetime, timedelta
+
+        encoded_password = quote_plus(config.POSTGRES_PASSWORD)
+        postgres_url = (
+            f"postgresql+psycopg2://{config.POSTGRES_USER}:{encoded_password}"
+            f"@{config.POSTGRES_HOST}:{config.POSTGRES_PORT}/{config.POSTGRES_DATABASE}"
+        )
+        engine = create_engine(postgres_url)
+        create_scheduler_tables(engine)
+
+        with Session(engine) as session:
+            # Find the job
+            job_type_enum = JobType(job_type)
+            job = session.exec(
+                select(ScheduledJob).where(ScheduledJob.job_type == job_type_enum)
+            ).first()
+
+            if not job:
+                console.print(f"[yellow]No scheduled job found for type: {job_type}[/yellow]")
+                console.print("[dim]Start the service first to initialize default jobs.[/dim]")
+                return
+
+            # Set next_run_at to past to trigger immediate run
+            job.next_run_at = datetime.utcnow() - timedelta(minutes=1)
+            session.add(job)
+            session.commit()
+
+            console.print(f"[green]✓ Triggered job: {job_type}[/green]")
+            console.print(f"[dim]The scheduler will pick it up within {config.SCHEDULER_CHECK_INTERVAL_SECONDS} seconds.[/dim]")
+            console.print(f"[dim]Run 'llm --job-status' to check the result.[/dim]")
+
+    except Exception as e:
+        console.print(f"[red]Could not trigger job: {e}[/red]")
+        import traceback
+        traceback.print_exc()
+
+
 def show_user_profile(config: Config, user_id: str):
     """Display user profile."""
     if not has_database_credentials(config):
@@ -957,6 +1154,8 @@ def parse_arguments(config_obj: Config) -> argparse.Namespace:
     parser.add_argument("-b", "--bot", type=str, default=None, help="Bot to use (nova, spark, mira). Use --list-bots to see all.")
     parser.add_argument("--list-bots", action="store_true", help="List available bots and exit")
     parser.add_argument("--status", action="store_true", help="Show memory system status and configuration")
+    parser.add_argument("--job-status", action="store_true", help="Show scheduled background jobs and recent run history")
+    parser.add_argument("--run-job", type=str, metavar="TYPE", help="Trigger a scheduled job immediately (profile_maintenance, memory_consolidation, memory_decay)")
     parser.add_argument("--user", type=str, default=None, help="User profile to use (creates if not exists). Defaults to config.DEFAULT_USER")
     parser.add_argument("--list-users", action="store_true", help="List all user profiles")
     parser.add_argument("--user-profile", action="store_true", help="Show current user profile")
@@ -1066,6 +1265,14 @@ def main():
 
     elif getattr(args, 'status', False):
         show_status(config_obj, args)
+        sys.exit(0)
+
+    elif getattr(args, 'job_status', False):
+        show_job_status(config_obj)
+        sys.exit(0)
+
+    elif getattr(args, 'run_job', None):
+        trigger_job(config_obj, args.run_job)
         sys.exit(0)
 
     elif getattr(args, 'list_bots', False):

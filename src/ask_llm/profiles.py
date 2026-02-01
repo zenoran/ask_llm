@@ -77,6 +77,9 @@ class EntityProfile(SQLModel, table=True):
     display_name: str | None = Field(default=None, max_length=100)
     description: str | None = Field(default=None, max_length=500)
     
+    # Pre-computed summary for system prompt injection (set by maintenance job)
+    summary: str | None = Field(default=None)
+    
     # Timestamps
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
@@ -211,6 +214,7 @@ class ProfileManager:
         entity_id: str,
         display_name: str | None = None,
         description: str | None = None,
+        summary: str | None = None,
     ) -> EntityProfile | None:
         """Update basic profile info."""
         entity_id = entity_id.lower().strip()
@@ -229,6 +233,8 @@ class ProfileManager:
                 profile.display_name = display_name
             if description is not None:
                 profile.description = description
+            if summary is not None:
+                profile.summary = summary
             profile.updated_at = datetime.utcnow()
             
             session.add(profile)
@@ -236,6 +242,34 @@ class ProfileManager:
             session.refresh(profile)
             
             return profile
+    
+    def set_display_name(
+        self,
+        entity_type: EntityType,
+        entity_id: str,
+        display_name: str,
+    ) -> EntityProfile | None:
+        """Set the display name for an entity's profile.
+        
+        Convenience method that ensures profile exists before updating.
+        """
+        # Ensure profile exists
+        self.get_or_create_profile(entity_type, entity_id)
+        return self.update_profile(entity_type, entity_id, display_name=display_name)
+    
+    def set_profile_summary(
+        self,
+        entity_type: EntityType,
+        entity_id: str,
+        summary: str,
+    ) -> EntityProfile | None:
+        """Set the pre-computed summary for an entity's profile.
+        
+        This summary is used directly in system prompt injection.
+        """
+        # Ensure profile exists
+        self.get_or_create_profile(entity_type, entity_id)
+        return self.update_profile(entity_type, entity_id, summary=summary)
     
     # =========================================================================
     # Attribute CRUD
@@ -453,6 +487,32 @@ class ProfileManager:
                 return True
             return False
     
+    def delete_attributes_by_category(
+        self,
+        entity_type: EntityType,
+        entity_id: str,
+        category: str,
+    ) -> int:
+        """Delete all attributes in a category for an entity. Returns count deleted."""
+        entity_id = entity_id.lower().strip()
+        category = category.lower().strip()
+        
+        with Session(self.engine) as session:
+            statement = select(ProfileAttribute).where(
+                ProfileAttribute.entity_type == entity_type,
+                ProfileAttribute.entity_id == entity_id,
+                ProfileAttribute.category == category,
+            )
+            attributes = session.exec(statement).all()
+            count = len(attributes)
+            
+            for attr in attributes:
+                session.delete(attr)
+            
+            session.commit()
+            logger.debug(f"Deleted {count} attributes from {entity_type}/{entity_id} in category {category}")
+            return count
+    
     def get_attribute_by_id(self, attribute_id: int) -> ProfileAttribute | None:
         """Get a specific attribute by its database ID.
         
@@ -500,7 +560,17 @@ class ProfileManager:
             )
             profile = session.exec(profile_stmt).first()
             
-            # Get attributes
+            # If profile has a pre-computed summary, use it (from maintenance job)
+            if profile and profile.summary:
+                lines = []
+                # Always start with name
+                if profile.display_name:
+                    prefix = "User's name" if entity_type == EntityType.USER else "Your name"
+                    lines.append(f"{prefix}: {profile.display_name}")
+                lines.append(profile.summary)
+                return "\n".join(lines)
+            
+            # Fallback: build from individual attributes
             attr_stmt = select(ProfileAttribute).where(
                 ProfileAttribute.entity_type == entity_type,
                 ProfileAttribute.entity_id == entity_id,
@@ -549,8 +619,20 @@ class ProfileManager:
             else:
                 label = f"Your {label.lower()}"
             
+            # Check if this category has a single "summary" entry (from maintenance)
+            # If so, output the summary directly without key prefix
+            if len(attrs) == 1 and attrs[0].key == "summary":
+                summary_value = str(attrs[0].value).strip()
+                if summary_value:
+                    lines.append(f"{label}: {summary_value}")
+                continue
+            
             items = []
             for attr in attrs:
+                # Skip summary entries when mixed with other attributes
+                if attr.key == "summary":
+                    continue
+                    
                 # Format value
                 if isinstance(attr.value, list):
                     val_str = ", ".join(str(v) for v in attr.value)

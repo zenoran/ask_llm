@@ -102,6 +102,12 @@ class Config(BaseSettings):
     # --- Memory Consolidation Settings --- #
     MEMORY_CONSOLIDATION_THRESHOLD: float = Field(default=0.75, description="Cosine similarity threshold for clustering similar memories (0.0-1.0)")
 
+    # --- Scheduler Settings --- #
+    SCHEDULER_ENABLED: bool = Field(default=True, description="Enable background job scheduler")
+    SCHEDULER_CHECK_INTERVAL_SECONDS: int = Field(default=30, description="How often to check for due jobs")
+    PROFILE_MAINTENANCE_INTERVAL_MINUTES: int = Field(default=60, description="Run profile summarization every N minutes")
+    PROFILE_MAINTENANCE_MODEL: str = Field(default="", description="Model to use for profile summarization (empty = default)")
+
     # --- Service Settings --- #
     USE_SERVICE: bool = Field(default=False, description="Route queries through the background service by default (same as --service flag)")
     SERVICE_MODEL: Optional[str] = Field(default=None, description="Default model alias for the background service API")

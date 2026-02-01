@@ -155,7 +155,12 @@ def parse_arguments(config_obj: "Config") -> argparse.Namespace:
         action="store_true",
         help="Show memory system status and configuration"
     )
-    
+    parser.add_argument(
+        "--job-status",
+        action="store_true",
+        help="Show scheduled background jobs and recent run history"
+    )
+
     # User profile management
     parser.add_argument(
         "--user",

@@ -280,3 +280,49 @@ def estimate_importance(text: str) -> float:
     
     # Default to medium-low importance
     return 0.5
+
+
+# Profile consolidation prompt for maintenance job
+# Based on best practices from Mem0, LangGraph, and OpenAI:
+# - Use natural language prose, not key-value pairs
+# - Write concise summaries that can be injected directly into system prompts
+# - Focus on information that helps personalize responses
+PROFILE_CONSOLIDATION_PROMPT = '''You are consolidating user profile information for an AI assistant's context window.
+
+## Current raw profile data:
+{attributes}
+
+## Task:
+Write a concise "About the User" section that an AI assistant can use to personalize responses.
+
+## Output Format:
+Return a JSON object with these EXACT keys:
+```json
+{{
+  "name": "The user's name if known, otherwise null",
+  "identity": "Brief: location, occupation, key facts about who they are",
+  "preferences": "How they like to communicate, what they value, dislikes",
+  "interests": "Hobbies, topics they enjoy",
+  "context": "Current projects, situation, time-sensitive info"
+}}
+```
+
+## CRITICAL RULES:
+1. **ALWAYS extract the user's name** into the "name" field if it appears ANYWHERE in the data
+2. The "name" field should be JUST the name (e.g., "Nick"), not a sentence
+3. Write other fields in third person prose ("They prefer...", "They enjoy...")
+4. Be concise - 1-3 sentences per field max
+5. Merge duplicates, resolve contradictions (prefer recent/specific info)
+6. Omit fields with no data (use null or empty string)
+7. Do NOT lose any names, locations, or key identifying info
+
+## Example:
+```json
+{{
+  "name": "Nick",
+  "identity": "Software developer in Ohio. Single, has a dog.",
+  "preferences": "Prefers direct, honest conversation. Values privacy and dislikes cold weather.",
+  "interests": "Literature, poetry, piano, Souls-like games, and Hytale.",
+  "context": "Working on an LLM chatbot with Nextcloud integration."
+}}
+```'''

@@ -17,6 +17,7 @@ class TaskType(Enum):
     MEMORY_CONSOLIDATION = "memory_consolidation"
     MEANING_UPDATE = "meaning_update"
     MEMORY_MAINTENANCE = "memory_maintenance"
+    PROFILE_MAINTENANCE = "profile_maintenance"
 
 
 class TaskStatus(Enum):
@@ -185,6 +186,7 @@ def create_meaning_update_task(
 
 def create_maintenance_task(
     bot_id: str = "nova",
+    user_id: str = "system",
     run_consolidation: bool = True,
     run_recurrence_detection: bool = True,
     run_decay_pruning: bool = False,
@@ -209,5 +211,29 @@ def create_maintenance_task(
             "dry_run": dry_run,
         },
         bot_id=bot_id,
+        user_id=user_id,
         priority=-1,  # Lower priority - background job
+    )
+
+
+def create_profile_maintenance_task(
+    entity_id: str,
+    entity_type: str = "user",
+    bot_id: str = "nova",
+    dry_run: bool = False,
+    priority: int = 5,
+) -> Task:
+    """Create a profile maintenance task."""
+    # Task requires user_id; for profile maintenance, treat entity_id as user_id.
+    # (If entity_type is "bot", this is still a required identifier for service routing.)
+    return Task(
+        task_type=TaskType.PROFILE_MAINTENANCE,
+        bot_id=bot_id,
+        user_id=entity_id,
+        priority=priority,
+        payload={
+            "entity_id": entity_id,
+            "entity_type": entity_type,
+            "dry_run": dry_run,
+        },
     )
