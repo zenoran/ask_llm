@@ -3,10 +3,14 @@
 Defines the available tools that bots can use, with their descriptions
 and parameters in a format suitable for prompt injection.
 
-Tool categories:
-- MEMORY_TOOLS: Search/store/delete memories
-- PROFILE_TOOLS: Manage user/bot attributes
-- SEARCH_TOOLS: Web search capabilities
+Consolidated tools (7 total):
+- memory: Search/store/delete facts (action-based)
+- history: Search/retrieve/forget messages (action-based, with date filtering)
+- profile: Get/set/delete user attributes (action-based)
+- bot_trait: Record bot personality traits
+- search: Web/news search (type-based)
+- model: List/current/switch models (action-based)
+- time: Get current time
 """
 
 from dataclasses import dataclass, field
@@ -31,7 +35,7 @@ class Tool:
     name: str
     description: str
     parameters: list[ToolParameter] = field(default_factory=list)
-    
+
     def to_prompt_string(self) -> str:
         """Format tool for inclusion in system prompt."""
         params_str = ""
@@ -41,306 +45,295 @@ class Tool:
                 req = "(required)" if p.required else "(optional)"
                 param_lines.append(f"    - {p.name} ({p.type}): {p.description} {req}")
             params_str = "\n" + "\n".join(param_lines)
-        
+
         return f"- **{self.name}**: {self.description}{params_str}"
 
 
-# Profile tools for managing user and bot attributes
-PROFILE_TOOLS = [
-    Tool(
-        name="set_user_attribute",
-        description="Store a persistent user fact/preference for cross-conversation recall.",
-        parameters=[
-            ToolParameter(
-                name="category",
-                type="string",
-                description="'preference', 'fact', 'interest', or 'communication'"
-            ),
-            ToolParameter(
-                name="key",
-                type="string",
-                description="Attribute name, e.g. 'occupation', 'favorite_color'"
-            ),
-            ToolParameter(
-                name="value",
-                type="any",
-                description="Value to store (string, number, boolean, or list)"
-            ),
-            ToolParameter(
-                name="confidence",
-                type="float",
-                description="0.0-1.0 (1.0=explicit statement, 0.6-0.8=inferred)",
-                required=False,
-                default=0.8
-            ),
-        ]
-    ),
-    Tool(
-        name="get_user_profile",
-        description="Get all stored user preferences, facts, and interests.",
-        parameters=[]
-    ),
-    Tool(
-        name="delete_user_attribute",
-        description="Remove a user attribute by category+key or by query.",
-        parameters=[
-            ToolParameter(
-                name="category",
-                type="string",
-                description="'preference', 'fact', 'interest', 'communication' (optional if using query)",
-                required=False
-            ),
-            ToolParameter(
-                name="key",
-                type="string",
-                description="Attribute key to delete (optional if using query)",
-                required=False
-            ),
-            ToolParameter(
-                name="query",
-                type="string",
-                description="Search term to find/delete matching attributes",
-                required=False
-            ),
-        ]
-    ),
-    Tool(
-        name="set_my_trait",
-        description="Record your own personality trait (e.g. humor_style, topic_expertise).",
-        parameters=[
-            ToolParameter(
-                name="key",
-                type="string",
-                description="Trait name"
-            ),
-            ToolParameter(
-                name="value",
-                type="any",
-                description="Trait value"
-            ),
-        ]
-    ),
-]
+# =============================================================================
+# Consolidated Tool Definitions (7 tools total)
+# =============================================================================
+
+# Memory tool - combines search_memories, store_memory, delete_memory
+MEMORY_TOOL = Tool(
+    name="memory",
+    description="Search, store, or delete facts from long-term memory. Use action='search' to find, 'store' to save, 'delete' to remove.",
+    parameters=[
+        ToolParameter(
+            name="action",
+            type="string",
+            description="'search', 'store', or 'delete'"
+        ),
+        ToolParameter(
+            name="query",
+            type="string",
+            description="Search query or delete filter (for search/delete)",
+            required=False
+        ),
+        ToolParameter(
+            name="content",
+            type="string",
+            description="Fact to remember (for store)",
+            required=False
+        ),
+        ToolParameter(
+            name="memory_id",
+            type="string",
+            description="Specific memory ID to delete (for delete)",
+            required=False
+        ),
+        ToolParameter(
+            name="n_results",
+            type="integer",
+            description="Max search results (default 5)",
+            required=False,
+            default=5
+        ),
+        ToolParameter(
+            name="importance",
+            type="float",
+            description="0.0-1.0 importance score (for store, default 0.6)",
+            required=False,
+            default=0.6
+        ),
+        ToolParameter(
+            name="tags",
+            type="list[string]",
+            description="Categories like ['preference'], ['fact', 'work'] (for store)",
+            required=False,
+            default=["misc"]
+        ),
+    ]
+)
+
+# History tool - combines search_history, get_recent_history, forget_history
+HISTORY_TOOL = Tool(
+    name="history",
+    description="Search, retrieve, or forget conversation messages. Use action='search' for keywords, 'recent' for last N messages, 'forget' to delete.",
+    parameters=[
+        ToolParameter(
+            name="action",
+            type="string",
+            description="'search', 'recent', or 'forget'"
+        ),
+        ToolParameter(
+            name="query",
+            type="string",
+            description="Keywords to search (for search)",
+            required=False
+        ),
+        ToolParameter(
+            name="n_results",
+            type="integer",
+            description="Max results (default 10)",
+            required=False,
+            default=10
+        ),
+        ToolParameter(
+            name="role_filter",
+            type="string",
+            description="'user', 'assistant', or omit for all",
+            required=False
+        ),
+        ToolParameter(
+            name="since",
+            type="string",
+            description="ISO date - get messages after this (e.g., '2026-01-30')",
+            required=False
+        ),
+        ToolParameter(
+            name="until",
+            type="string",
+            description="ISO date - get messages before this",
+            required=False
+        ),
+        ToolParameter(
+            name="count",
+            type="integer",
+            description="Number of messages to forget (for forget)",
+            required=False
+        ),
+        ToolParameter(
+            name="minutes",
+            type="integer",
+            description="Forget messages from last N minutes (for forget)",
+            required=False
+        ),
+    ]
+)
+
+# Profile tool - combines set_user_attribute, get_user_profile, delete_user_attribute
+PROFILE_TOOL = Tool(
+    name="profile",
+    description="Get, set, or delete user profile attributes. Use action='get' for full profile, 'set' to store, 'delete' to remove.",
+    parameters=[
+        ToolParameter(
+            name="action",
+            type="string",
+            description="'get', 'set', or 'delete'"
+        ),
+        ToolParameter(
+            name="category",
+            type="string",
+            description="'preference', 'fact', 'interest', or 'communication' (for set/delete)",
+            required=False
+        ),
+        ToolParameter(
+            name="key",
+            type="string",
+            description="Attribute name, e.g., 'occupation' (for set/delete)",
+            required=False
+        ),
+        ToolParameter(
+            name="value",
+            type="any",
+            description="Value to store (for set)",
+            required=False
+        ),
+        ToolParameter(
+            name="confidence",
+            type="float",
+            description="0.0-1.0 (1.0=explicit, 0.6-0.8=inferred, default 0.8)",
+            required=False,
+            default=0.8
+        ),
+        ToolParameter(
+            name="query",
+            type="string",
+            description="Search term to find/delete matching attributes (for delete)",
+            required=False
+        ),
+    ]
+)
+
+# Bot trait tool - kept simple for bot self-development
+BOT_TRAIT_TOOL = Tool(
+    name="bot_trait",
+    description="Record your own personality trait (e.g., humor_style, topic_expertise).",
+    parameters=[
+        ToolParameter(
+            name="key",
+            type="string",
+            description="Trait name"
+        ),
+        ToolParameter(
+            name="value",
+            type="any",
+            description="Trait value"
+        ),
+    ]
+)
+
+# Search tool - combines web_search, news_search
+SEARCH_TOOL = Tool(
+    name="search",
+    description="Search the internet for information. Use type='web' for general search, 'news' for recent news.",
+    parameters=[
+        ToolParameter(
+            name="query",
+            type="string",
+            description="Search query"
+        ),
+        ToolParameter(
+            name="type",
+            type="string",
+            description="'web' (default) or 'news'",
+            required=False,
+            default="web"
+        ),
+        ToolParameter(
+            name="max_results",
+            type="integer",
+            description="Max results (default 5)",
+            required=False,
+            default=5
+        ),
+        ToolParameter(
+            name="time_range",
+            type="string",
+            description="For news: 'd' (day), 'w' (week), 'm' (month)",
+            required=False,
+            default="w"
+        ),
+    ]
+)
+
+# Model tool - combines list_models, get_current_model, switch_model
+MODEL_TOOL = Tool(
+    name="model",
+    description="List available models, check current model, or switch models. Use action='list', 'current', or 'switch'.",
+    parameters=[
+        ToolParameter(
+            name="action",
+            type="string",
+            description="'list', 'current', or 'switch'"
+        ),
+        ToolParameter(
+            name="model_name",
+            type="string",
+            description="Model shortcut to switch to (for switch)",
+            required=False
+        ),
+    ]
+)
+
+# Time tool - simple utility
+TIME_TOOL = Tool(
+    name="time",
+    description="Get current date and time.",
+    parameters=[]
+)
 
 
-# Memory tools available to bots
-MEMORY_TOOLS = [
-    Tool(
-        name="search_memories",
-        description="Semantic search of stored facts and learned information.",
-        parameters=[
-            ToolParameter(
-                name="query",
-                type="string",
-                description="Search query"
-            ),
-            ToolParameter(
-                name="n_results",
-                type="integer",
-                description="Max results (default 5)",
-                required=False,
-                default=5
-            ),
-        ]
-    ),
-    Tool(
-        name="store_memory",
-        description="Save an important fact for future recall.",
-        parameters=[
-            ToolParameter(
-                name="content",
-                type="string",
-                description="Fact to remember"
-            ),
-            ToolParameter(
-                name="importance",
-                type="float",
-                description="0.0-1.0 (0.9+=core facts, 0.5-0.7=preferences)",
-                required=False,
-                default=0.6
-            ),
-            ToolParameter(
-                name="tags",
-                type="list[string]",
-                description="Categories, e.g. ['preference'], ['fact', 'work']",
-                required=False,
-                default=["misc"]
-            ),
-        ]
-    ),
-    Tool(
-        name="delete_memory",
-        description="Remove memories by ID or query.",
-        parameters=[
-            ToolParameter(
-                name="memory_id",
-                type="string",
-                description="Specific memory ID from search results",
-                required=False
-            ),
-            ToolParameter(
-                name="query",
-                type="string",
-                description="Delete all memories matching this query",
-                required=False
-            ),
-        ]
-    ),
-    Tool(
-        name="search_history",
-        description="Full-text search of raw conversation messages (not extracted facts).",
-        parameters=[
-            ToolParameter(
-                name="query",
-                type="string",
-                description="Keywords to search"
-            ),
-            ToolParameter(
-                name="n_results",
-                type="integer",
-                description="Max results (default 10)",
-                required=False,
-                default=10
-            ),
-            ToolParameter(
-                name="role_filter",
-                type="string",
-                description="'user', 'assistant', or omit for all",
-                required=False,
-                default=None
-            ),
-        ]
-    ),
-    Tool(
-        name="get_recent_history",
-        description="Get the most recent N messages from conversation history (no search query needed).",
-        parameters=[
-            ToolParameter(
-                name="n_messages",
-                type="integer",
-                description="Number of recent messages to retrieve (default 10)",
-                required=False,
-                default=10
-            ),
-            ToolParameter(
-                name="role_filter",
-                type="string",
-                description="'user', 'assistant', or omit for all",
-                required=False,
-                default=None
-            ),
-        ]
-    ),
-    Tool(
-        name="forget_history",
-        description="Delete recent messages and their extracted memories.",
-        parameters=[
-            ToolParameter(
-                name="count",
-                type="integer",
-                description="Number of messages to forget (use count OR minutes)",
-                required=False,
-                default=None
-            ),
-            ToolParameter(
-                name="minutes",
-                type="integer",
-                description="Forget messages from last N minutes (use count OR minutes)",
-                required=False,
-                default=None
-            ),
-        ]
-    ),
-]
+# =============================================================================
+# Tool Categories (for selective inclusion)
+# =============================================================================
 
+# Core tools always included
+CORE_TOOLS = [MEMORY_TOOL, HISTORY_TOOL, PROFILE_TOOL, BOT_TRAIT_TOOL, TIME_TOOL]
 
-# Model management tools for switching/listing models
-MODEL_TOOLS = [
-    Tool(
-        name="list_models",
-        description="List all available AI models.",
-        parameters=[]
-    ),
-    Tool(
-        name="get_current_model",
-        description="Get currently loaded model info.",
-        parameters=[]
-    ),
-    Tool(
-        name="switch_model",
-        description="Switch to a different AI model.",
-        parameters=[
-            ToolParameter(
-                name="model_name",
-                type="string",
-                description="Model shortcut (e.g. 'gpt4', 'claude'). Use list_models for options."
-            ),
-        ]
-    ),
-]
-
-
-# Web search tools for internet access
-SEARCH_TOOLS = [
-    Tool(
-        name="web_search",
-        description="Search internet for current info, facts, or recent events.",
-        parameters=[
-            ToolParameter(
-                name="query",
-                type="string",
-                description="Search query"
-            ),
-            ToolParameter(
-                name="max_results",
-                type="integer",
-                description="Max results (default 5)",
-                required=False,
-                default=5
-            ),
-        ]
-    ),
-    Tool(
-        name="news_search",
-        description="Search recent news articles.",
-        parameters=[
-            ToolParameter(
-                name="query",
-                type="string",
-                description="News topic"
-            ),
-            ToolParameter(
-                name="time_range",
-                type="string",
-                description="'d' (day), 'w' (week), 'm' (month)",
-                required=False,
-                default="w"
-            ),
-            ToolParameter(
-                name="max_results",
-                type="integer",
-                description="Max results (default 5)",
-                required=False,
-                default=5
-            ),
-        ]
-    ),
-]
-
-
-# Utility tools for general assistance
-UTILITY_TOOLS = [
-    Tool(
-        name="get_current_time",
-        description="Get current date and time.",
-        parameters=[]
-    ),
-]
-
+# Optional tool categories
+SEARCH_TOOLS = [SEARCH_TOOL]
+MODEL_TOOLS = [MODEL_TOOL]
 
 # All tools combined
-ALL_TOOLS = MEMORY_TOOLS + PROFILE_TOOLS + MODEL_TOOLS + UTILITY_TOOLS
+ALL_TOOLS = CORE_TOOLS + SEARCH_TOOLS + MODEL_TOOLS
 
+
+# =============================================================================
+# Legacy Tool Name Mapping (for backward compatibility)
+# =============================================================================
+
+# Maps old tool names to (new_tool_name, default_arguments)
+LEGACY_TOOL_MAP = {
+    # Memory tools
+    "search_memories": ("memory", {"action": "search"}),
+    "store_memory": ("memory", {"action": "store"}),
+    "delete_memory": ("memory", {"action": "delete"}),
+    # History tools
+    "search_history": ("history", {"action": "search"}),
+    "get_recent_history": ("history", {"action": "recent"}),
+    "forget_history": ("history", {"action": "forget"}),
+    # Profile tools
+    "set_user_attribute": ("profile", {"action": "set"}),
+    "get_user_profile": ("profile", {"action": "get"}),
+    "delete_user_attribute": ("profile", {"action": "delete"}),
+    # Bot trait
+    "set_my_trait": ("bot_trait", {}),
+    # Search tools
+    "web_search": ("search", {"type": "web"}),
+    "news_search": ("search", {"type": "news"}),
+    # Model tools
+    "list_models": ("model", {"action": "list"}),
+    "get_current_model": ("model", {"action": "current"}),
+    "switch_model": ("model", {"action": "switch"}),
+    # Time
+    "get_current_time": ("time", {}),
+}
+
+
+# =============================================================================
+# Tool Calling Instructions
+# =============================================================================
 
 TOOL_CALLING_INSTRUCTIONS = '''
 ## Tools
@@ -356,31 +349,35 @@ Output the <tool_call> block IMMEDIATELY when needed, then STOP and wait for <to
 {tools_list}
 {search_guidance}
 ### Tool Selection:
-- **Profile** (get_user_profile, set_user_attribute): For persistent user facts - check FIRST for "what do you know about me"
-- **Memory** (search_memories, store_memory): For learned facts and important information
-- **History** (search_history, forget_history): For raw conversation search or deletion
+- **profile**: For user facts/preferences - check FIRST for "what do you know about me"
+- **memory**: For learned facts and important information
+- **history**: For searching/retrieving raw conversation messages
 
 ### Rules:
 - Only use tools when you NEED information you don't have
 - Call ONE tool at a time, wait for result
 - TRUST tool results exactly - never contradict them
-- Before saying "I don't know" about the user: check system prompt "About the User" section, then search_memories
+- Before saying "I don't know" about the user: check system prompt "About the User" section, then use memory action=search
 '''
 
 # Guidance added when search tools are enabled
 SEARCH_GUIDANCE = '''
-- **Search** (web_search, news_search): For current events, facts you're unsure about, or recent information
+- **search**: For current events, facts you're unsure about, or recent information (type=web or news)
 '''
 
 # Guidance added when model tools are enabled
 MODEL_GUIDANCE = '''
-- **Models** (list_models, get_current_model, switch_model): For switching AI models
+- **model**: For listing or switching AI models
 '''
 
 
+# =============================================================================
+# Tool Selection Functions
+# =============================================================================
+
 def get_tools_list(
     tools: list[Tool] | None = None,
-    include_profile_tools: bool = True,
+    include_profile_tools: bool = True,  # Kept for API compatibility (always included in CORE)
     include_search_tools: bool = False,
     include_model_tools: bool = False,
 ) -> list[Tool]:
@@ -388,9 +385,7 @@ def get_tools_list(
     if tools is not None:
         return tools
 
-    resolved = MEMORY_TOOLS.copy()
-    if include_profile_tools:
-        resolved.extend(PROFILE_TOOLS)
+    resolved = CORE_TOOLS.copy()
     if include_search_tools:
         resolved.extend(SEARCH_TOOLS)
     if include_model_tools:
@@ -406,14 +401,14 @@ def get_tools_prompt(
     tool_format: ToolFormat | str = ToolFormat.XML,
 ) -> str:
     """Generate the tools instruction prompt.
-    
+
     Args:
         tools: List of tools to include. If None, auto-selects based on flags.
-        include_profile_tools: Whether to include profile tools (default True).
+        include_profile_tools: Kept for API compatibility (profile always included).
         include_search_tools: Whether to include web search tools (default False).
         include_model_tools: Whether to include model management tools (default False).
         tool_format: Tool format to use for prompt instructions.
-        
+
     Returns:
         Formatted prompt string to inject into system message.
     """
@@ -432,11 +427,11 @@ def get_tools_prompt(
 
         # Add search guidance if search tools are included
         search_guidance = ""
-        if include_search_tools or any(t.name in ("web_search", "news_search") for t in tools):
+        if include_search_tools or any(t.name == "search" for t in tools):
             search_guidance = SEARCH_GUIDANCE
 
         # Add model guidance if model tools are included
-        if include_model_tools or any(t.name in ("list_models", "switch_model", "get_current_model") for t in tools):
+        if include_model_tools or any(t.name == "model" for t in tools):
             search_guidance += MODEL_GUIDANCE
 
         return TOOL_CALLING_INSTRUCTIONS.format(
@@ -456,3 +451,21 @@ def get_tool_by_name(name: str, tools: list[Tool] | None = None) -> Tool | None:
         if tool.name == name:
             return tool
     return None
+
+
+def normalize_legacy_tool_call(name: str, arguments: dict) -> tuple[str, dict]:
+    """Convert legacy tool names to new consolidated tools.
+
+    Args:
+        name: Tool name (may be legacy or new)
+        arguments: Tool arguments
+
+    Returns:
+        Tuple of (new_tool_name, merged_arguments)
+    """
+    if name in LEGACY_TOOL_MAP:
+        new_name, default_args = LEGACY_TOOL_MAP[name]
+        # Merge defaults with provided arguments (provided takes priority)
+        merged = {**default_args, **arguments}
+        return new_name, merged
+    return name, arguments

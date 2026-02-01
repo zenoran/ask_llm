@@ -143,10 +143,10 @@ class ToolLoop:
                 if tool_calls:
                     # Execute tools
                     tool_messages, tool_results = self._execute_tools(tool_calls, handler)
-                    
+
                     logger.info(
                         "🔧 Tool calls (native): %s",
-                        ", ".join(tc.name for tc in tool_calls)
+                        ", ".join(f"{tc.name}({tc.arguments})" for tc in tool_calls)
                     )
                     
                     # Track tool interactions for history/context
@@ -207,10 +207,10 @@ class ToolLoop:
             # Execute tools
             tool_messages, tool_results = self._execute_tools(tool_calls, effective_handler)
             has_executed_tools = True  # Mark that we've executed tools
-            
+
             logger.info(
                 "🔧 Tool calls: %s",
-                ", ".join(tc.name for tc in tool_calls)
+                ", ".join(f"{tc.name}({tc.arguments})" for tc in tool_calls)
             )
             
             # Track tool interactions for history/context

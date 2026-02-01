@@ -549,7 +549,24 @@ class MemoryClient:
     # History Operations (MCP-backed)
     # -------------------------------------------------------------------------
 
-    def get_messages(self, since_seconds: int | None = None, limit: int | None = None) -> list[dict[str, Any]]:
+    def get_messages(
+        self,
+        since_seconds: int | None = None,
+        limit: int | None = None,
+        since: float | None = None,
+        until: float | None = None,
+    ) -> list[dict[str, Any]]:
+        """Get conversation messages with optional filtering.
+
+        Args:
+            since_seconds: Only messages from last N seconds (legacy param).
+            limit: Maximum messages to return.
+            since: Unix timestamp - only include messages after this time.
+            until: Unix timestamp - only include messages before this time.
+
+        Returns:
+            List of message dicts with role, content, timestamp.
+        """
         self._ensure_initialized()
         if self.server_url:
             return self._call_server(
@@ -558,7 +575,21 @@ class MemoryClient:
             )
         storage = self._get_storage()
         # Use storage API directly (async) via helper
-        return _run_async(storage.get_messages(bot_id=self.bot_id, since_seconds=since_seconds, limit=limit))
+        messages = _run_async(storage.get_messages(bot_id=self.bot_id, since_seconds=since_seconds, limit=limit))
+
+        # Apply timestamp filtering if specified (post-filter for now)
+        if since is not None or until is not None:
+            filtered = []
+            for msg in messages:
+                ts = msg.get("timestamp", 0)
+                if since is not None and ts < since:
+                    continue
+                if until is not None and ts > until:
+                    continue
+                filtered.append(msg)
+            return filtered
+
+        return messages
 
     def clear_messages(self) -> int:
         self._ensure_initialized()
@@ -694,36 +725,42 @@ class MemoryClient:
         query: str,
         n_results: int = 10,
         role_filter: str | None = None,
+        since: float | None = None,
+        until: float | None = None,
     ) -> list[MessageResult]:
         """Search ALL conversation history using full-text search.
-        
+
         Uses PostgreSQL full-text search for efficient keyword matching
         across the entire message history.
-        
+
         Args:
             query: Search query (keywords, phrases).
             n_results: Maximum results to return.
             role_filter: Only include messages with this role (user/assistant/None for all).
-            
+            since: Unix timestamp - only include messages after this time.
+            until: Unix timestamp - only include messages before this time.
+
         Returns:
             List of MessageResult sorted by relevance.
         """
         self._ensure_initialized()
-        
+
         # For message search, we need direct database access
         # Create a backend connection directly since this isn't routed through MCP
         from ..memory.postgresql import PostgreSQLMemoryBackend
-        
+
         backend = PostgreSQLMemoryBackend(self.config, bot_id=self.bot_id)
-        
+
         # Use the existing search_messages_by_text method
         results = backend.search_messages_by_text(
             query=query,
             n_results=n_results,
             exclude_recent_seconds=0,  # Don't exclude recent for explicit searches
             role_filter=role_filter,
+            since=since,
+            until=until,
         )
-        
+
         return [
             MessageResult(
                 id=r.get("id", ""),

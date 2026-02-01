@@ -1046,26 +1046,30 @@ class PostgreSQLMemoryBackend(MemoryBackend):
         n_results: int = 5,
         exclude_recent_seconds: float = 5.0,
         role_filter: str | None = "user",
+        since: float | None = None,
+        until: float | None = None,
     ) -> list[dict]:
         """Search raw messages using PostgreSQL full-text search.
-        
+
         This is a fallback when no distilled memories exist yet.
         Uses OR logic so any matching word will return results.
-        
+
         Args:
             query: Search query
             n_results: Max number of results
             exclude_recent_seconds: Exclude messages from the last N seconds to avoid
                                    finding the query message itself
             role_filter: Only include messages with this role (default: "user" to avoid
-                        retrieving assistant hallucinations as facts). Set to None to 
+                        retrieving assistant hallucinations as facts). Set to None to
                         include all roles.
+            since: Unix timestamp - only include messages after this time.
+            until: Unix timestamp - only include messages before this time.
         """
         if not query or query.isspace():
             return []
-        
+
         cutoff_time = time.time() - exclude_recent_seconds
-        
+
         with self.engine.connect() as conn:
             try:
                 # Use websearch_to_tsquery for better handling, but we need OR logic
@@ -1073,9 +1077,9 @@ class PostgreSQLMemoryBackend(MemoryBackend):
                 # Filter out common words AND conversational meta-words that don't help find content
                 stop_words = {
                     # Standard English stop words
-                    'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 
+                    'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for',
                     'of', 'with', 'by', 'from', 'as', 'is', 'was', 'are', 'were', 'been',
-                    'be', 'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 
+                    'be', 'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would',
                     'could', 'should', 'may', 'might', 'must', 'shall', 'can', 'need',
                     'we', 'you', 'i', 'he', 'she', 'it', 'they', 'them', 'their', 'our',
                     'my', 'your', 'his', 'her', 'its', 'what', 'which', 'who', 'whom',
@@ -1088,25 +1092,27 @@ class PostgreSQLMemoryBackend(MemoryBackend):
                     'everything', 'nothing', 'past', 'previous', 'earlier', 'last', 'time',
                     'when', 'where', 'how', 'why', 'like', 'want', 'wanted', 'please',
                 }
-                
+
                 # Extract meaningful words
                 import re
                 words = re.findall(r'\b[a-zA-Z]+\b', query.lower())
                 meaningful_words = [w for w in words if w not in stop_words and len(w) > 2]
-                
+
                 if not meaningful_words:
                     # Fall back to simple search if no meaningful words
                     meaningful_words = [w for w in words if len(w) > 2][:3]
-                
+
                 if not meaningful_words:
                     return []
-                
+
                 # Build OR query: word1 | word2 | word3
                 or_query = ' | '.join(meaningful_words)
-                
-                # Build role filter clause
+
+                # Build filter clauses
                 role_clause = "AND role = :role" if role_filter else ""
-                
+                since_clause = "AND timestamp >= :since" if since is not None else ""
+                until_clause = "AND timestamp <= :until" if until is not None else ""
+
                 sql = text(f"""
                     SELECT id, role, content, timestamp,
                            ts_rank(to_tsvector('english', content), to_tsquery('english', :query)) AS rank
@@ -1114,20 +1120,26 @@ class PostgreSQLMemoryBackend(MemoryBackend):
                     WHERE to_tsvector('english', content) @@ to_tsquery('english', :query)
                     AND timestamp < :cutoff
                     {role_clause}
+                    {since_clause}
+                    {until_clause}
                     ORDER BY rank DESC, timestamp DESC
                     LIMIT :limit
                 """)
-                
-                params = {
+
+                params: dict[str, Any] = {
                     "query": or_query,
                     "limit": n_results,
                     "cutoff": cutoff_time,
                 }
                 if role_filter:
                     params["role"] = role_filter
-                
+                if since is not None:
+                    params["since"] = since
+                if until is not None:
+                    params["until"] = until
+
                 rows = conn.execute(sql, params).fetchall()
-                
+
                 return [
                     {
                         "id": row.id,
@@ -1138,7 +1150,7 @@ class PostgreSQLMemoryBackend(MemoryBackend):
                     }
                     for row in rows
                 ]
-                
+
             except Exception as e:
                 logger.error(f"Failed to search messages: {e}")
                 return []

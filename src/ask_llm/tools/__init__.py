@@ -3,29 +3,82 @@
 This module provides prompt-based tool calling that works with any model,
 allowing bots to autonomously search memories, store facts, manage profiles,
 search the web, and switch models.
+
+Consolidated tools (7 total):
+- memory: Search/store/delete facts
+- history: Search/retrieve/forget messages (with date filtering)
+- profile: Get/set/delete user attributes
+- bot_trait: Record bot personality traits
+- search: Web/news search
+- model: List/current/switch models
+- time: Get current time
 """
 
-from .definitions import MEMORY_TOOLS, PROFILE_TOOLS, SEARCH_TOOLS, MODEL_TOOLS, ALL_TOOLS, get_tools_prompt, get_tools_list, Tool
-from .parser import parse_tool_calls, ToolCall, has_tool_call, format_tool_result
+from .definitions import (
+    # Tool instances
+    MEMORY_TOOL,
+    HISTORY_TOOL,
+    PROFILE_TOOL,
+    BOT_TRAIT_TOOL,
+    SEARCH_TOOL,
+    MODEL_TOOL,
+    TIME_TOOL,
+    # Tool categories
+    CORE_TOOLS,
+    SEARCH_TOOLS,
+    MODEL_TOOLS,
+    ALL_TOOLS,
+    # Legacy mapping
+    LEGACY_TOOL_MAP,
+    normalize_legacy_tool_call,
+    # Functions
+    get_tools_prompt,
+    get_tools_list,
+    get_tool_by_name,
+    # Types
+    Tool,
+    ToolParameter,
+)
+from .parser import parse_tool_calls, ToolCall, has_tool_call, format_tool_result, KNOWN_TOOLS
 from .executor import ToolExecutor
 from .loop import ToolLoop, query_with_tools
 from .streaming import stream_with_tools
 
 __all__ = [
-    "MEMORY_TOOLS",
-    "PROFILE_TOOLS",
+    # Tool instances
+    "MEMORY_TOOL",
+    "HISTORY_TOOL",
+    "PROFILE_TOOL",
+    "BOT_TRAIT_TOOL",
+    "SEARCH_TOOL",
+    "MODEL_TOOL",
+    "TIME_TOOL",
+    # Tool categories
+    "CORE_TOOLS",
     "SEARCH_TOOLS",
     "MODEL_TOOLS",
     "ALL_TOOLS",
-    "get_tools_prompt", 
+    # Legacy mapping
+    "LEGACY_TOOL_MAP",
+    "normalize_legacy_tool_call",
+    # Functions
+    "get_tools_prompt",
     "get_tools_list",
+    "get_tool_by_name",
+    # Types
     "Tool",
+    "ToolParameter",
+    # Parser
     "parse_tool_calls",
     "ToolCall",
     "has_tool_call",
     "format_tool_result",
+    "KNOWN_TOOLS",
+    # Executor
     "ToolExecutor",
+    # Loop
     "ToolLoop",
     "query_with_tools",
+    # Streaming
     "stream_with_tools",
 ]

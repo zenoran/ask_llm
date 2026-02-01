@@ -214,7 +214,7 @@ def stream_with_tools(
 
         # Tool call detected - execute it
         tc = tool_calls[0]  # Process one tool at a time
-        # log.info(f"🔧 Calling tool: {tc.name}")
+        log.info(f"🔧 Calling tool: {tc.name} with args: {tc.arguments}")
 
         from .parser import ToolCall
         tool_call = ToolCall(name=tc.name, arguments=tc.arguments, raw_text=tc.raw_text or "")

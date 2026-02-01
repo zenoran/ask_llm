@@ -62,11 +62,18 @@ class ToolCall:
 
 
 # Known tool names for detecting raw JSON tool calls
+# Includes both new consolidated tools and legacy names for backward compatibility
 KNOWN_TOOLS = {
-    "get_user_profile", "search_memories", "store_memory", "delete_memory",
-    "search_history", "get_recent_history", "forget_history", "set_user_attribute", "delete_user_attribute",
-    "web_search", "news_search", "list_models", "get_current_model", "switch_model",
-    "get_current_time"
+    # New consolidated tools (7 total)
+    "memory", "history", "profile", "bot_trait", "search", "model", "time",
+    # Legacy tool names (for backward compatibility)
+    "search_memories", "store_memory", "delete_memory",
+    "search_history", "get_recent_history", "forget_history",
+    "set_user_attribute", "get_user_profile", "delete_user_attribute",
+    "set_my_trait",
+    "web_search", "news_search",
+    "list_models", "get_current_model", "switch_model",
+    "get_current_time",
 }
 
 # Pattern to match tool calls: <tool_call>{"name": "...", "arguments": {...}}</tool_call>
