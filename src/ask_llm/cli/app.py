@@ -1287,11 +1287,18 @@ def run_app(args: argparse.Namespace, config_obj: Config, resolved_alias: str):
         use_service = True
     elif config_obj.USE_SERVICE:
         use_service = True
-    
+
     # Get model type for fallback logic (used when service unavailable)
     defined_models = config_obj.defined_models.get("models", {})
     model_def = defined_models.get(resolved_alias, {}) if resolved_alias else {}
     effective_model_type = model_def.get("type")
+
+    # Auto-enable service mode when bot uses tools and not in local mode
+    use_tools = getattr(bot, 'uses_tools', False)
+    if use_tools and not use_service and not args.local:
+        use_service = True
+        if config_obj.VERBOSE:
+            console.print(f"[dim]Bot '{bot.name}' uses tools; enabling service mode[/dim]")
     
     ask_llm = None
     
@@ -1416,9 +1423,16 @@ def run_app(args: argparse.Namespace, config_obj: Config, resolved_alias: str):
                 return
             # Service unavailable
             if effective_model_type and effective_model_type != "openai":
-                console.print(
-                    "[bold red]Service unavailable for local model. Start the service or use an OpenAI-compatible model.[/bold red]"
-                )
+                if use_tools:
+                    console.print(
+                        "[bold red]Error: Tool usage with local models requires the background service.[/bold red]"
+                    )
+                    console.print("[yellow]Start the service with:[/yellow] llm-service")
+                    console.print("[yellow]Or use an OpenAI-compatible model:[/yellow] llm -m gpt4o -b proto")
+                else:
+                    console.print(
+                        "[bold red]Service unavailable for local model. Start the service or use an OpenAI-compatible model.[/bold red]"
+                    )
                 return
             # Fall back to local for OpenAI-compatible models
             if config_obj.VERBOSE:

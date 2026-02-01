@@ -214,7 +214,7 @@ def stream_with_tools(
 
         # Tool call detected - execute it
         tc = tool_calls[0]  # Process one tool at a time
-        log.info(f"🔧 Calling tool: {tc.name}")
+        # log.info(f"🔧 Calling tool: {tc.name}")
 
         from .parser import ToolCall
         tool_call = ToolCall(name=tc.name, arguments=tc.arguments, raw_text=tc.raw_text or "")
@@ -255,14 +255,25 @@ def stream_with_tools(
         current_messages.append(Message(role="assistant", content=tool_call_text))
 
         # For ReAct format, the observation goes in a user message
+        # Append guidance to help model provide final answer instead of looping
+        observation_content = ""
+        if isinstance(formatted_result, dict):
+            observation_content = formatted_result.get("content", str(tool_result))
+        else:
+            observation_content = str(formatted_result)
+        
+        # Add continuation prompt after observation to guide toward final answer
+        if not has_executed_tools:  # Only on first tool use to avoid repetition
+            observation_content += "\n\nBased on this information, provide your answer to the user's question."
+        
         if isinstance(formatted_result, dict):
             current_messages.append(Message(
                 role=formatted_result.get("role", "user"),
-                content=formatted_result.get("content", str(tool_result)),
+                content=observation_content,
                 tool_call_id=formatted_result.get("tool_call_id"),
             ))
         else:
-            current_messages.append(Message(role="user", content=str(formatted_result)))
+            current_messages.append(Message(role="user", content=observation_content))
 
         # Continue to next iteration for follow-up response
 

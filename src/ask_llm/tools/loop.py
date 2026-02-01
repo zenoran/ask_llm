@@ -249,6 +249,7 @@ class ToolLoop:
         from ..models.message import Message
         results = []
         tool_messages: list[Message] = []
+        first_tool = True  # Track first tool to add guidance
         
         for tc in tool_calls:
             if not self.executor.can_execute_more():
@@ -259,7 +260,7 @@ class ToolLoop:
                     error="Too many tool calls this turn",
                 )
                 results.append(format_tool_result(tc.name, None, error="Too many tool calls this turn"))
-                tool_messages.append(self._result_to_message(formatted, tc))
+                tool_messages.append(self._result_to_message(formatted, tc, add_guidance=False))
                 break
             
             tool_call = ToolCall(name=tc.name, arguments=tc.arguments, raw_text=tc.raw_text or "")
@@ -270,20 +271,29 @@ class ToolLoop:
                 result,
                 tool_call_id=getattr(tc, "tool_call_id", None),
             )
-            tool_messages.append(self._result_to_message(formatted, tc))
+            # Add guidance only for first tool result to avoid repetition
+            tool_messages.append(self._result_to_message(formatted, tc, add_guidance=first_tool))
+            first_tool = False
             logger.debug(f"Tool {tc.name} executed: {str(result)[:100]}...")
         
         return tool_messages, results
 
-    def _result_to_message(self, formatted_result, tool_call) -> "Message":
+    def _result_to_message(self, formatted_result, tool_call, add_guidance: bool = False) -> "Message":
         from ..models.message import Message
         if isinstance(formatted_result, dict):
+            content = formatted_result.get("content", "")
+            # Add guidance to help model provide final answer
+            if add_guidance and content:
+                content += "\n\nBased on this information, provide your answer to the user's question."
             return Message(
                 role=formatted_result.get("role", "tool"),
-                content=formatted_result.get("content", ""),
+                content=content,
                 tool_call_id=formatted_result.get("tool_call_id"),
             )
-        return Message(role="user", content=str(formatted_result))
+        content = str(formatted_result)
+        if add_guidance:
+            content += "\n\nBased on this information, provide your answer to the user's question."
+        return Message(role="user", content=content)
 
     def _build_assistant_message(self, response, tool_calls: list) -> "Message":
         from ..models.message import Message
