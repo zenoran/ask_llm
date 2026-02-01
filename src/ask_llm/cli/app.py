@@ -26,13 +26,19 @@ console = Console()
 # Cache for service client
 _service_client = None
 
-def get_service_client():
+def get_service_client(config: Config | None = None):
     """Get or create the service client singleton."""
     global _service_client
     if _service_client is None:
         try:
             from ask_llm.service import ServiceClient
-            _service_client = ServiceClient()
+            # Build service URL from config if not provided
+            if config is None:
+                config = Config()
+            service_url = getattr(config, 'SERVICE_URL', None)
+            if not service_url and hasattr(config, 'SERVICE_HOST') and hasattr(config, 'SERVICE_PORT'):
+                service_url = f"http://{config.SERVICE_HOST}:{config.SERVICE_PORT}"
+            _service_client = ServiceClient(http_url=service_url)
         except ImportError:
             _service_client = False  # Mark as unavailable
     return _service_client if _service_client else None
@@ -45,6 +51,7 @@ def query_via_service(
     user_id: str | None,
     plaintext_output: bool,
     stream: bool,
+    config: Config | None = None,
 ) -> bool:
     """
     Query via the background service if available.
@@ -54,7 +61,9 @@ def query_via_service(
     from rich.markdown import Markdown
     from rich.align import Align
 
-    client = get_service_client()
+    if config is None:
+        config = Config()
+    client = get_service_client(config)
     if not client or not client.is_available():
         return False
 
@@ -164,11 +173,11 @@ def query_via_service(
                     return True
     except Exception as e:
         # Store error in service client for later display
-        service_client = get_service_client()
+        service_client = get_service_client(config)
         if service_client:
             service_client.last_error = str(e)
         logging.warning(f"Service query failed: {e}")
-        if Config().VERBOSE:
+        if config.VERBOSE:
             import traceback
             traceback.print_exc()
 
@@ -225,7 +234,7 @@ def show_status(config: Config, args: argparse.Namespace | None = None):
     service_available = False
     service_error = None
     try:
-        service_client = get_service_client()
+        service_client = get_service_client(config)
         if service_client and service_client.is_available(force_check=True):
             service_available = True
             try:
@@ -1419,7 +1428,7 @@ def main():
     model_def = defined_models.get(effective_model, {}) if effective_model else {}
     effective_model_type = model_def.get("type")
     if not use_service and not args.local and effective_model_type and effective_model_type != "openai":
-        service_client = get_service_client()
+        service_client = get_service_client(config_obj)
         if service_client and service_client.is_available(force_check=True):
             use_service = True
             if config_obj.VERBOSE:
@@ -1630,10 +1639,11 @@ def run_app(args: argparse.Namespace, config_obj: Config, resolved_alias: str):
                 user_id=user_id,  # Use resolved user_id
                 plaintext_output=plaintext_flag,
                 stream=stream_flag,
+                config=config_obj,
             ):
                 return
             # Service unavailable or failed
-            service_client = get_service_client()
+            service_client = get_service_client(config_obj)
             error_detail = ""
             if service_client and hasattr(service_client, 'last_error') and service_client.last_error:
                 error_detail = f"\n[dim]Error: {service_client.last_error}[/dim]"

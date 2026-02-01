@@ -623,7 +623,7 @@ class BackgroundService:
     
     def _on_model_unloaded(self, model_alias: str):
         """Called when a model is unloaded - clears related caches."""
-        log.info(f"Model '{model_alias}' unloaded - clearing related caches")
+        log.debug(f"Model '{model_alias}' unloaded - clearing caches")
         
         # Clear client cache for this model
         if model_alias in self._client_cache:
@@ -668,7 +668,7 @@ class BackgroundService:
         with self._cancel_lock:
             # Cancel any existing generation and wait for it to finish
             if self._current_generation_cancel is not None:
-                log.info("New request received - cancelling previous generation")
+                log.debug("Cancelling previous generation for new request")
                 self._current_generation_cancel.set()
                 
                 # Wait for the previous generation to signal it's done
@@ -750,7 +750,7 @@ class BackgroundService:
         # Check for pending model switch (from switch_model tool)
         pending = self._model_lifecycle.clear_pending_switch()
         if pending:
-            log.info(f"Processing pending model switch to: {pending}")
+            log.info(f"🤖 Switching to model: {pending}")
             # Store as session override so subsequent requests use this model
             self._session_model_overrides[session_key] = pending
             model_alias = pending
@@ -764,7 +764,7 @@ class BackgroundService:
         # Check if we need to switch models (different model requested)
         current_model = self._model_lifecycle.current_model
         if current_model and current_model != model_alias:
-            log.info(f"Model switch requested: {current_model} -> {model_alias}")
+            log.info(f"🤖 Switching model: {current_model} → {model_alias}")
             # Unloading will trigger _on_model_unloaded callback which clears caches
             self._model_lifecycle.unload_current_model()
         
@@ -1166,8 +1166,6 @@ class BackgroundService:
                                         if not tool_calls:
                                             return  # No tools, done
 
-                                        log.info(f"🔧 Tool calls: {[tc['function']['name'] for tc in tool_calls]}")
-
                                         # Execute tools
                                         tool_results = []
                                         for tc in tool_calls:
@@ -1398,7 +1396,7 @@ class BackgroundService:
         bot_id = task.bot_id
         user_id = task.user_id
         
-        log.info(f"[Extraction] Processing task for bot={bot_id} user={user_id} with {len(messages)} messages")
+        log.debug(f"Processing extraction for bot={bot_id} user={user_id} ({len(messages)} messages)")
         
         # Get the model from task payload (passed from chat request)
         # This ensures we use the same model that handled the chat
@@ -1453,10 +1451,10 @@ class BackgroundService:
             use_llm = False
         
         if not facts:
-            log.info(f"[Extraction] No facts extracted from messages")
+            log.debug("No new facts to remember")
             return {"facts_extracted": 0, "facts_stored": 0, "llm_used": use_llm}
 
-        log.info(f"[Extraction] Extracted {len(facts)} facts, checking for duplicates...")
+        log.debug(f"Checking {len(facts)} extracted facts for duplicates...")
 
         memory_client = self.get_memory_client(bot_id, user_id)
         stored_count = 0
@@ -1471,7 +1469,7 @@ class BackgroundService:
             facts = [f for f in facts if f.importance >= min_importance]
 
             if not facts:
-                log.info("[Extraction] No facts above min importance threshold")
+                log.debug("No important facts to store")
                 return {"facts_extracted": 0, "facts_stored": 0, "llm_used": use_llm}
 
             # Fetch existing memories to check for duplicates
@@ -1487,7 +1485,7 @@ class BackgroundService:
                 # Count how many facts were skipped (duplicates)
                 skipped_count = len(facts) - len(actions)
                 if skipped_count > 0:
-                    log.info(f"[Extraction] Skipped {skipped_count} duplicate/existing facts")
+                    log.debug(f"Skipped {skipped_count} duplicate facts")
 
                 # Process only the actions (ADD, UPDATE, DELETE)
                 for action in actions:
@@ -1495,7 +1493,7 @@ class BackgroundService:
                     if not fact:
                         continue
 
-                    log.debug(f"[Extraction] {action.action}: '{fact.content[:50]}...' importance={fact.importance:.2f}")
+                    log.debug(f"{action.action}: '{fact.content[:50]}...'")
 
                     try:
                         if action.action == "ADD":
@@ -1531,7 +1529,7 @@ class BackgroundService:
             else:
                 # No existing memories - store all facts directly
                 for fact in facts:
-                    log.debug(f"[Extraction] ADD (no existing): '{fact.content[:50]}...' importance={fact.importance:.2f}")
+                    log.debug(f"ADD: '{fact.content[:50]}...'")
                     try:
                         memory_client.add_memory(
                             content=fact.content,
@@ -1551,7 +1549,8 @@ class BackgroundService:
                     except Exception as e:
                         log.warning(f"Failed to store memory: {e}")
         
-        log.info(f"[Extraction] Stored {stored_count} memories, {profile_count} profile attributes, skipped {skipped_count} duplicates")
+        if stored_count > 0 or profile_count > 0:
+            log.info(f"💾 Learned {stored_count} new things" + (f" + {profile_count} profile updates" if profile_count > 0 else ""))
         log.memory_operation("extraction", bot_id, count=stored_count, details=f"extracted={len(facts)}, stored={stored_count}, skipped={skipped_count}, profiles={profile_count}, llm={use_llm}")
         return {"facts_extracted": len(facts), "facts_stored": stored_count, "facts_skipped": skipped_count, "profile_attrs": profile_count, "llm_used": use_llm}
     
@@ -1700,7 +1699,7 @@ class BackgroundService:
     
     async def worker_loop(self):
         """Main worker loop that processes tasks from the queue."""
-        log.info("Background task worker started")
+        log.debug("Background task worker started")
         
         while not self._shutdown_event.is_set():
             try:
@@ -1733,7 +1732,7 @@ class BackgroundService:
                 log.exception(f"Worker loop error: {e}")
                 await asyncio.sleep(1)
         
-        log.info("Background task worker stopped")
+        log.debug("Background task worker stopped")
     
     def start_worker(self):
         """Start the background worker task."""
@@ -1955,7 +1954,7 @@ try:
         manager = get_nextcloud_manager()
         manager.reload()
         bots = manager.list_bots()
-        log.info(f"Nextcloud bot config reloaded: {len(bots)} bots ({[b.ask_llm_bot for b in bots]})")
+        log.info(f"🔄 Reloaded {len(bots)} bot configs")
         return {
             "status": "reloaded",
             "bots_count": len(bots),

@@ -86,10 +86,10 @@ class ServiceClient:
         """Actually check if service is reachable.
         
         Uses raw TCP socket connect which fails immediately on connection refused,
-        avoiding HTTP timeout delays.
+        avoiding HTTP timeout delays. Also supports HTTP health check for remote hosts.
         """
-        # Try Unix socket first (Linux/macOS)
-        if self.socket_path.exists():
+        # Try Unix socket first (Linux/macOS) - only for local connections
+        if self.socket_path.exists() and self._is_local_url():
             try:
                 sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
                 sock.setblocking(False)
@@ -100,21 +100,63 @@ class ServiceClient:
             except (socket.error, OSError, BlockingIOError) as e:
                 logger.debug(f"Unix socket unavailable: {e}")
         
+        # Parse host from http_url for TCP check
+        host, port = self._parse_url_host_port()
+        
         # Try raw TCP connect (fast - fails immediately if port not listening)
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(0.1)  # 100ms timeout max
-            result = sock.connect_ex(("127.0.0.1", DEFAULT_HTTP_PORT))
+            sock.settimeout(0.5)  # 500ms timeout for remote hosts
+            result = sock.connect_ex((host, port))
             sock.close()
             if result == 0:
-                logger.debug(f"Background service available via TCP port {DEFAULT_HTTP_PORT}")
+                logger.debug(f"Background service available at {host}:{port}")
                 return True
             else:
-                logger.debug(f"TCP port {DEFAULT_HTTP_PORT} not listening (errno={result})")
+                logger.debug(f"TCP {host}:{port} not listening (errno={result})")
         except Exception as e:
-            logger.debug(f"TCP check failed: {e}")
+            logger.debug(f"TCP check failed for {host}:{port}: {e}")
+        
+        # For non-local hosts, also try HTTP health endpoint as fallback
+        if not self._is_local_url():
+            try:
+                import urllib.request
+                import urllib.error
+                req = urllib.request.Request(f"{self.http_url}/health", method="GET")
+                with urllib.request.urlopen(req, timeout=2.0) as resp:
+                    if resp.status == 200:
+                        logger.debug(f"Background service available via HTTP health check")
+                        return True
+            except Exception as e:
+                logger.debug(f"HTTP health check failed: {e}")
         
         return False
+    
+    def _parse_url_host_port(self) -> tuple[str, int]:
+        """Parse host and port from http_url."""
+        url = self.http_url
+        # Remove protocol prefix
+        if "://" in url:
+            url = url.split("://", 1)[1]
+        # Remove path
+        if "/" in url:
+            url = url.split("/", 1)[0]
+        # Parse host:port
+        if ":" in url:
+            host, port_str = url.rsplit(":", 1)
+            try:
+                port = int(port_str)
+            except ValueError:
+                port = DEFAULT_HTTP_PORT
+        else:
+            host = url
+            port = DEFAULT_HTTP_PORT
+        return host, port
+    
+    def _is_local_url(self) -> bool:
+        """Check if URL points to localhost."""
+        host, _ = self._parse_url_host_port()
+        return host in ("localhost", "127.0.0.1", "::1")
     
     def get_status(self, silent: bool = False) -> ServiceStatus:
         """Get detailed status of the background service."""

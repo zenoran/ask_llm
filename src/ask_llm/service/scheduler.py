@@ -95,7 +95,7 @@ class JobScheduler:
         
         self._running = True
         self._task = asyncio.create_task(self._run_loop())
-        logger.info(f"JobScheduler started (check interval: {self.check_interval}s)")
+        logger.debug(f"Scheduler started (check interval: {self.check_interval}s)")
     
     async def stop(self) -> None:
         """Stop the scheduler loop gracefully."""
@@ -106,7 +106,7 @@ class JobScheduler:
                 await self._task
             except asyncio.CancelledError:
                 pass
-        logger.info("JobScheduler stopped")
+        logger.debug("Scheduler stopped")
     
     async def _run_loop(self) -> None:
         """Main scheduler loop."""
@@ -138,7 +138,7 @@ class JobScheduler:
     
     async def _execute_job(self, job: ScheduledJob) -> None:
         """Execute a single job."""
-        logger.info(f"Running job: {job.job_type} for bot {job.bot_id}")
+        logger.debug(f"Running scheduled job: {job.job_type}")
         
         loop = asyncio.get_event_loop()
         
@@ -209,7 +209,7 @@ class JobScheduler:
                 session.commit()
         
         await loop.run_in_executor(None, update_run)
-        logger.info(f"Job {job.job_type} completed with status {status}")
+        logger.debug(f"Job {job.job_type} completed with status {status}")
     
     def _create_task_for_job(self, job: ScheduledJob):
         """Create a Task from a ScheduledJob."""
@@ -266,4 +266,4 @@ def init_default_jobs(engine, config) -> None:
             )
             session.add(job)
             session.commit()
-            logger.info("Created default profile maintenance job")
+            logger.debug("Created default profile maintenance job")

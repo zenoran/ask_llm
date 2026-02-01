@@ -239,7 +239,7 @@ class ServiceAskLLM(BaseAskLLM):
             slog.debug("Skipping extraction - no memory client")
             return
         
-        slog.info(f"[Extraction] Triggering for bot={self.bot_id} user={self.user_id}")
+        slog.debug(f"Triggering memory extraction for bot={self.bot_id}")
         
         def extract():
             try:
@@ -257,11 +257,11 @@ class ServiceAskLLM(BaseAskLLM):
                         model=self.resolved_model_alias,
                     )
                     client.submit_task(task)
-                    slog.info(f"[Extraction] Task submitted: {task.task_id}")
+                    slog.debug(f"Extraction task submitted: {task.task_id}")
                 else:
-                    slog.warning("[Extraction] Service not available")
+                    slog.warning("Service not available for extraction")
             except Exception as e:
-                logger.exception(f"[Extraction] Failed: {e}")
+                logger.exception(f"Memory extraction failed: {e}")
         
         thread = threading.Thread(target=extract, daemon=True)
         thread.start()

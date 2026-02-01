@@ -8,6 +8,7 @@ Handles the iterative process of:
 5. Repeating until final response
 """
 
+import json
 import logging
 from typing import TYPE_CHECKING
 
@@ -100,14 +101,14 @@ class ToolLoop:
         self._using_native_tools = self._should_use_native_tools() and client.supports_native_tools()
         
         if self._using_native_tools:
-            logger.info("🔧 Using native tool calling")
+            logger.debug("Using native tool calling")
 
         has_executed_tools = False  # Track if we've already run tools
         
         for iteration in range(1, self.max_iterations + 1):
             # Only log iteration if we're past the first one (indicates tool use)
             if iteration > 1:
-                logger.info(f"🔄 Tool loop iteration {iteration}/{self.max_iterations}")
+                logger.debug(f"Tool loop iteration {iteration}/{self.max_iterations}")
             
             # Never stream in tool loop - we need to check for tool calls before rendering
             # The caller (AskLLM.query) handles rendering the final response
@@ -133,9 +134,18 @@ class ToolLoop:
                 tool_calls = []
                 for tc in native_tool_calls:
                     func = tc.get("function", {})
+                    args = func.get("arguments", "{}")
+                    # Parse JSON string arguments into dict
+                    if isinstance(args, str):
+                        try:
+                            args = json.loads(args)
+                        except json.JSONDecodeError:
+                            args = {}
+                    elif not isinstance(args, dict):
+                        args = {}
                     tool_calls.append(ToolCallRequest(
                         name=func.get("name", ""),
-                        arguments=func.get("arguments", "{}"),
+                        arguments=args,
                         raw_text="",
                         tool_call_id=tc.get("id"),
                     ))
@@ -143,11 +153,6 @@ class ToolLoop:
                 if tool_calls:
                     # Execute tools
                     tool_messages, tool_results = self._execute_tools(tool_calls, handler)
-
-                    logger.info(
-                        "🔧 Tool calls (native): %s",
-                        ", ".join(f"{tc.name}({tc.arguments})" for tc in tool_calls)
-                    )
                     
                     # Track tool interactions for history/context
                     tool_summary = "\n\n".join(tool_results)
@@ -207,11 +212,6 @@ class ToolLoop:
             # Execute tools
             tool_messages, tool_results = self._execute_tools(tool_calls, effective_handler)
             has_executed_tools = True  # Mark that we've executed tools
-
-            logger.info(
-                "🔧 Tool calls: %s",
-                ", ".join(f"{tc.name}({tc.arguments})" for tc in tool_calls)
-            )
             
             # Track tool interactions for history/context
             tool_summary = "\n\n".join(tool_results)
