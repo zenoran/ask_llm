@@ -623,7 +623,7 @@ class BackgroundService:
     
     def _on_model_unloaded(self, model_alias: str):
         """Called when a model is unloaded - clears related caches."""
-        log.debug(f"Model '{model_alias}' unloaded - clearing caches")
+        log.info(f"Model '{model_alias}' unloaded - clearing related caches")
         
         # Clear client cache for this model
         if model_alias in self._client_cache:
@@ -668,7 +668,7 @@ class BackgroundService:
         with self._cancel_lock:
             # Cancel any existing generation and wait for it to finish
             if self._current_generation_cancel is not None:
-                log.debug("Cancelling previous generation for new request")
+                log.info("New request received - cancelling previous generation")
                 self._current_generation_cancel.set()
                 
                 # Wait for the previous generation to signal it's done
@@ -750,7 +750,7 @@ class BackgroundService:
         # Check for pending model switch (from switch_model tool)
         pending = self._model_lifecycle.clear_pending_switch()
         if pending:
-            log.info(f"🤖 Switching to model: {pending}")
+            log.info(f"Processing pending model switch to: {pending}")
             # Store as session override so subsequent requests use this model
             self._session_model_overrides[session_key] = pending
             model_alias = pending
@@ -764,7 +764,7 @@ class BackgroundService:
         # Check if we need to switch models (different model requested)
         current_model = self._model_lifecycle.current_model
         if current_model and current_model != model_alias:
-            log.info(f"🤖 Switching model: {current_model} → {model_alias}")
+            log.info(f"Model switch requested: {current_model} -> {model_alias}")
             # Unloading will trigger _on_model_unloaded callback which clears caches
             self._model_lifecycle.unload_current_model()
         
@@ -1166,7 +1166,7 @@ class BackgroundService:
                                         if not tool_calls:
                                             return  # No tools, done
 
-                                        # Execute tools
+                                        # Execute tools and log with their arguments
                                         tool_results = []
                                         for tc in tool_calls:
                                             func = tc.get("function", {})
@@ -1177,9 +1177,8 @@ class BackgroundService:
                                             except _json.JSONDecodeError:
                                                 args = {}
 
-                                            # Log tool call with args
-                                            args_summary = self._format_tool_args(name, args)
-                                            log.info(f"🔧 {name}({args_summary})")
+                                            # Log tool call with full arguments
+                                            log.info(f"🔧 Tool: {name} | args: {args}")
 
                                             tool_call_obj = ToolCall(name=name, arguments=args, raw_text="")
                                             result = executor.execute(tool_call_obj)
@@ -1363,8 +1362,6 @@ class BackgroundService:
                 result = await self._process_meaning_update(task)
             elif task.task_type == TaskType.MEMORY_MAINTENANCE:
                 result = await self._process_maintenance(task)
-            elif task.task_type == TaskType.PROFILE_MAINTENANCE:
-                result = await self._process_profile_maintenance(task)
             else:
                 raise ValueError(f"Unknown task type: {task.task_type}")
             
@@ -1400,7 +1397,14 @@ class BackgroundService:
         bot_id = task.bot_id
         user_id = task.user_id
         
-        log.debug(f"Processing extraction for bot={bot_id} user={user_id} ({len(messages)} messages)")
+        log.info(f"[Extraction] Processing task for bot={bot_id} user={user_id} with {len(messages)} messages")
+        
+        # Log the messages being analyzed
+        for msg in messages:
+            role = msg.get("role", "?") if isinstance(msg, dict) else getattr(msg, "role", "?")
+            content = msg.get("content", "") if isinstance(msg, dict) else getattr(msg, "content", "")
+            short = content[:80] + "..." if len(content) > 80 else content
+            log.info(f"  [{role}] {short}")
         
         # Get the model from task payload (passed from chat request)
         # This ensures we use the same model that handled the chat
@@ -1455,10 +1459,10 @@ class BackgroundService:
             use_llm = False
         
         if not facts:
-            log.debug("No new facts to remember")
+            log.info(f"[Extraction] No facts extracted from messages")
             return {"facts_extracted": 0, "facts_stored": 0, "llm_used": use_llm}
 
-        log.debug(f"Checking {len(facts)} extracted facts for duplicates...")
+        log.info(f"[Extraction] Extracted {len(facts)} facts, checking for duplicates...")
 
         memory_client = self.get_memory_client(bot_id, user_id)
         stored_count = 0
@@ -1473,7 +1477,7 @@ class BackgroundService:
             facts = [f for f in facts if f.importance >= min_importance]
 
             if not facts:
-                log.debug("No important facts to store")
+                log.info("[Extraction] No facts above min importance threshold")
                 return {"facts_extracted": 0, "facts_stored": 0, "llm_used": use_llm}
 
             # Fetch existing memories to check for duplicates
@@ -1489,7 +1493,7 @@ class BackgroundService:
                 # Count how many facts were skipped (duplicates)
                 skipped_count = len(facts) - len(actions)
                 if skipped_count > 0:
-                    log.debug(f"Skipped {skipped_count} duplicate facts")
+                    log.info(f"[Extraction] Skipped {skipped_count} duplicate/existing facts")
 
                 # Process only the actions (ADD, UPDATE, DELETE)
                 for action in actions:
@@ -1497,7 +1501,7 @@ class BackgroundService:
                     if not fact:
                         continue
 
-                    log.info(f"  💾 {action.action}: \"{fact.content[:60]}{'...' if len(fact.content) > 60 else ''}\"")
+                    log.debug(f"[Extraction] {action.action}: '{fact.content[:50]}...' importance={fact.importance:.2f}")
 
                     try:
                         if action.action == "ADD":
@@ -1533,7 +1537,7 @@ class BackgroundService:
             else:
                 # No existing memories - store all facts directly
                 for fact in facts:
-                    log.info(f"  💾 ADD: \"{fact.content[:60]}{'...' if len(fact.content) > 60 else ''}\"")
+                    log.debug(f"[Extraction] ADD (no existing): '{fact.content[:50]}...' importance={fact.importance:.2f}")
                     try:
                         memory_client.add_memory(
                             content=fact.content,
@@ -1553,8 +1557,7 @@ class BackgroundService:
                     except Exception as e:
                         log.warning(f"Failed to store memory: {e}")
         
-        if stored_count > 0 or profile_count > 0:
-            log.info(f"💾 Learned {stored_count} new things" + (f" + {profile_count} profile updates" if profile_count > 0 else ""))
+        log.info(f"[Extraction] Stored {stored_count} memories, {profile_count} profile attributes, skipped {skipped_count} duplicates")
         log.memory_operation("extraction", bot_id, count=stored_count, details=f"extracted={len(facts)}, stored={stored_count}, skipped={skipped_count}, profiles={profile_count}, llm={use_llm}")
         return {"facts_extracted": len(facts), "facts_stored": stored_count, "facts_skipped": skipped_count, "profile_attrs": profile_count, "llm_used": use_llm}
     
@@ -1619,53 +1622,7 @@ class BackgroundService:
             ),
         )
         return result
-
-    async def _process_profile_maintenance(self, task: Task) -> dict:
-        """Process a profile maintenance task (consolidate profile attributes via LLM)."""
-        entity_id = task.payload.get("entity_id")
-        entity_type = task.payload.get("entity_type", "user")
-        dry_run = task.payload.get("dry_run", False)
-
-        if not entity_id:
-            return {"error": "entity_id is required"}
-
-        loop = asyncio.get_event_loop()
-
-        def run_maintenance():
-            from ..profiles import ProfileManager
-            from ..memory.profile_maintenance import ProfileMaintenanceService
-
-            profile_manager = ProfileManager(self.config)
-
-            # Try to get a cached LLM client; avoid loading a new model
-            llm_client = None
-            for model_alias, client in self._client_cache.items():
-                llm_client = client
-                log.debug(f"Using cached client '{model_alias}' for profile maintenance")
-                break
-
-            if not llm_client:
-                log.warning("No cached LLM client available for profile maintenance; skipping")
-                return {
-                    "entity_id": entity_id,
-                    "attributes_before": 0,
-                    "attributes_after": 0,
-                    "categories_updated": [],
-                    "error": "No LLM client available",
-                }
-
-            service = ProfileMaintenanceService(profile_manager, llm_client)
-            result = service.run(entity_id, entity_type, dry_run)
-            return {
-                "entity_id": result.entity_id,
-                "attributes_before": result.attributes_before,
-                "attributes_after": result.attributes_after,
-                "categories_updated": result.categories_updated,
-                "error": result.error,
-            }
-
-        return await loop.run_in_executor(None, run_maintenance)
-
+    
     def submit_task(self, task: Task) -> str:
         """Submit a task to the processing queue."""
         from dataclasses import dataclass, field as dataclass_field
@@ -1703,7 +1660,7 @@ class BackgroundService:
     
     async def worker_loop(self):
         """Main worker loop that processes tasks from the queue."""
-        log.debug("Background task worker started")
+        log.info("Background task worker started")
         
         while not self._shutdown_event.is_set():
             try:
@@ -1736,7 +1693,7 @@ class BackgroundService:
                 log.exception(f"Worker loop error: {e}")
                 await asyncio.sleep(1)
         
-        log.debug("Background task worker stopped")
+        log.info("Background task worker stopped")
     
     def start_worker(self):
         """Start the background worker task."""
@@ -1749,65 +1706,6 @@ class BackgroundService:
         self._shutdown_event.set()
         if self._worker_task:
             self._worker_task.cancel()
-    
-    def _format_tool_args(self, tool_name: str, arguments: dict) -> str:
-        """Format tool arguments for concise logging."""
-        if not arguments:
-            return ""
-        
-        action = arguments.get("action", "")
-        query = arguments.get("query", "")
-        content = arguments.get("content", "")
-        
-        if tool_name == "memory":
-            if action == "store" and content:
-                short = content[:40] + "..." if len(content) > 40 else content
-                return f'"{short}"'
-            elif action == "search" and query:
-                return f'"{query}"'
-            elif action == "delete":
-                return f"id={arguments.get('memory_id', query or 'unknown')}"
-            else:
-                return f"{action}: {query or content or str(arguments)}"
-        
-        elif tool_name == "search":
-            q = arguments.get("query", "")
-            return f'"{q}"' if q else str(arguments)
-        
-        elif tool_name == "history":
-            if action == "search" and query:
-                return f'"{query}"'
-            elif action == "recent":
-                since = arguments.get("since", "")
-                return f"since={since}" if since else "recent"
-            else:
-                return action
-        
-        elif tool_name == "profile":
-            if action == "set":
-                cat = arguments.get("category", "")
-                key = arguments.get("key", "")
-                return f"{cat}.{key}"
-            else:
-                return action
-        
-        elif tool_name == "model":
-            if action == "switch":
-                return f"→ {arguments.get('model_name', 'unknown')}"
-            else:
-                return action
-        
-        elif tool_name == "time":
-            return ""
-        
-        if query:
-            return f'"{query}"'
-        if content:
-            short = content[:30] + "..." if len(content) > 30 else content
-            return f'"{short}"'
-        
-        items = list(arguments.items())[:2]
-        return ", ".join(f"{k}={v}" for k, v in items)
     
     def get_status(self) -> ServiceStatusResponse:
         """Get service status."""
@@ -1867,40 +1765,10 @@ async def lifespan(app):
         "mcp" if getattr(config, "MEMORY_SERVER_URL", None) else "embedded",
         getattr(config, "MEMORY_SERVER_URL", ""),
     )
-
-    # Start job scheduler if enabled
-    scheduler = None
-    if config.SCHEDULER_ENABLED:
-        try:
-            from sqlmodel import create_engine
-            from urllib.parse import quote_plus
-            from .scheduler import JobScheduler, create_scheduler_tables, init_default_jobs
-
-            # Build postgres URL
-            encoded_password = quote_plus(config.POSTGRES_PASSWORD)
-            postgres_url = (
-                f"postgresql+psycopg2://{config.POSTGRES_USER}:{encoded_password}"
-                f"@{config.POSTGRES_HOST}:{config.POSTGRES_PORT}/{config.POSTGRES_DATABASE}"
-            )
-            engine = create_engine(postgres_url)
-            create_scheduler_tables(engine)
-            init_default_jobs(engine, config)
-
-            scheduler = JobScheduler(
-                engine=engine,
-                task_processor=_service,
-                check_interval=config.SCHEDULER_CHECK_INTERVAL_SECONDS,
-            )
-            await scheduler.start()
-            log.info("JobScheduler started")
-        except Exception as e:
-            log.warning(f"Failed to start scheduler: {e}")
     
     yield
     
     # Shutdown
-    if scheduler:
-        await scheduler.stop()
     await _service.shutdown()
 
 
@@ -2017,7 +1885,7 @@ try:
         manager = get_nextcloud_manager()
         manager.reload()
         bots = manager.list_bots()
-        log.info(f"🔄 Reloaded {len(bots)} bot configs")
+        log.info(f"Nextcloud bot config reloaded: {len(bots)} bots ({[b.ask_llm_bot for b in bots]})")
         return {
             "status": "reloaded",
             "bots_count": len(bots),
