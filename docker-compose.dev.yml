@@ -3,6 +3,9 @@
 
 services:
   app:
+    # Dev mode: source mounted, manual restart needed after code changes
+    # (--dev flag with auto-reload causes issues, so we skip it)
+    
     volumes:
       # Mount source code for live development
       - ./src:/app/src

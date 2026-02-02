@@ -432,6 +432,16 @@ class ProfileManager:
                     logger.debug(f"Deleted attribute {entity_type}/{entity_id}: {desc}")
             
             if deleted:
+                # Invalidate cached summary so profile regenerates on next request
+                profile_stmt = select(EntityProfile).where(
+                    EntityProfile.entity_type == entity_type,
+                    EntityProfile.entity_id == entity_id
+                )
+                profile = session.exec(profile_stmt).first()
+                if profile and profile.summary:
+                    profile.summary = None
+                    session.add(profile)
+                    logger.debug(f"Invalidated profile summary for {entity_type}/{entity_id}")
                 session.commit()
             
             return len(deleted), deleted
@@ -459,6 +469,15 @@ class ProfileManager:
             
             if attr:
                 session.delete(attr)
+                # Invalidate cached summary
+                profile_stmt = select(EntityProfile).where(
+                    EntityProfile.entity_type == entity_type,
+                    EntityProfile.entity_id == entity_id
+                )
+                profile = session.exec(profile_stmt).first()
+                if profile and profile.summary:
+                    profile.summary = None
+                    session.add(profile)
                 session.commit()
                 logger.debug(f"Deleted attribute {entity_type}/{entity_id}: {category}.{key}")
                 return True

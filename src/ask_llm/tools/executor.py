@@ -221,7 +221,7 @@ class ToolExecutor:
         if original_name != new_name:
             logger.debug(f"Normalized legacy tool '{original_name}' -> '{new_name}'")
 
-        logger.info(f"Executing tool: {normalized_call.name} with args: {normalized_call.arguments}")
+        logger.debug(f"Executing: {normalized_call.name}({normalized_call.arguments})")
 
         result: str
         try:

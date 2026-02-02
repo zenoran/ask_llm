@@ -623,7 +623,7 @@ class BackgroundService:
     
     def _on_model_unloaded(self, model_alias: str):
         """Called when a model is unloaded - clears related caches."""
-        log.info(f"Model '{model_alias}' unloaded - clearing related caches")
+        log.debug(f"Model '{model_alias}' unloaded - clearing caches")
         
         # Clear client cache for this model
         if model_alias in self._client_cache:
@@ -668,7 +668,7 @@ class BackgroundService:
         with self._cancel_lock:
             # Cancel any existing generation and wait for it to finish
             if self._current_generation_cancel is not None:
-                log.info("New request received - cancelling previous generation")
+                log.debug("Cancelling previous generation for new request")
                 self._current_generation_cancel.set()
                 
                 # Wait for the previous generation to signal it's done
@@ -750,7 +750,7 @@ class BackgroundService:
         # Check for pending model switch (from switch_model tool)
         pending = self._model_lifecycle.clear_pending_switch()
         if pending:
-            log.info(f"Processing pending model switch to: {pending}")
+            log.info(f"🔄 Switching to model: {pending}")
             # Store as session override so subsequent requests use this model
             self._session_model_overrides[session_key] = pending
             model_alias = pending
@@ -764,7 +764,7 @@ class BackgroundService:
         # Check if we need to switch models (different model requested)
         current_model = self._model_lifecycle.current_model
         if current_model and current_model != model_alias:
-            log.info(f"Model switch requested: {current_model} -> {model_alias}")
+            log.info(f"🔄 Model: {current_model} → {model_alias}")
             # Unloading will trigger _on_model_unloaded callback which clears caches
             self._model_lifecycle.unload_current_model()
         
@@ -807,10 +807,7 @@ class BackgroundService:
             # Also cache the client for future reuse by extraction tasks
             if model_alias not in self._client_cache:
                 self._client_cache[model_alias] = ask_llm.client
-                
-            # Register with lifecycle manager as the primary model
-            self._model_lifecycle.register_client(model_alias, ask_llm.client)
-            # Note: ServiceAskLLM already logs model_loaded, don't duplicate
+            # Note: BaseAskLLM.__init__ already registers with lifecycle manager
             
         except Exception as e:
             log.model_error(model_alias, str(e))
@@ -1177,8 +1174,7 @@ class BackgroundService:
                                             except _json.JSONDecodeError:
                                                 args = {}
 
-                                            # Log tool call with full arguments
-                                            log.info(f"🔧 Tool: {name} | args: {args}")
+                                            log.info(f"🔧 {name}({args})")
 
                                             tool_call_obj = ToolCall(name=name, arguments=args, raw_text="")
                                             result = executor.execute(tool_call_obj)
@@ -1362,6 +1358,8 @@ class BackgroundService:
                 result = await self._process_meaning_update(task)
             elif task.task_type == TaskType.MEMORY_MAINTENANCE:
                 result = await self._process_maintenance(task)
+            elif task.task_type == TaskType.PROFILE_MAINTENANCE:
+                result = await self._process_profile_maintenance(task)
             else:
                 raise ValueError(f"Unknown task type: {task.task_type}")
             
@@ -1397,14 +1395,7 @@ class BackgroundService:
         bot_id = task.bot_id
         user_id = task.user_id
         
-        log.info(f"[Extraction] Processing task for bot={bot_id} user={user_id} with {len(messages)} messages")
-        
-        # Log the messages being analyzed
-        for msg in messages:
-            role = msg.get("role", "?") if isinstance(msg, dict) else getattr(msg, "role", "?")
-            content = msg.get("content", "") if isinstance(msg, dict) else getattr(msg, "content", "")
-            short = content[:80] + "..." if len(content) > 80 else content
-            log.info(f"  [{role}] {short}")
+        log.debug(f"Extraction: {len(messages)} messages for {bot_id}/{user_id}")
         
         # Get the model from task payload (passed from chat request)
         # This ensures we use the same model that handled the chat
@@ -1459,10 +1450,10 @@ class BackgroundService:
             use_llm = False
         
         if not facts:
-            log.info(f"[Extraction] No facts extracted from messages")
+            log.debug("Extraction: no facts found")
             return {"facts_extracted": 0, "facts_stored": 0, "llm_used": use_llm}
 
-        log.info(f"[Extraction] Extracted {len(facts)} facts, checking for duplicates...")
+        log.debug(f"Extraction: {len(facts)} facts, checking duplicates")
 
         memory_client = self.get_memory_client(bot_id, user_id)
         stored_count = 0
@@ -1477,7 +1468,7 @@ class BackgroundService:
             facts = [f for f in facts if f.importance >= min_importance]
 
             if not facts:
-                log.info("[Extraction] No facts above min importance threshold")
+                log.debug("Extraction: no facts above importance threshold")
                 return {"facts_extracted": 0, "facts_stored": 0, "llm_used": use_llm}
 
             # Fetch existing memories to check for duplicates
@@ -1493,7 +1484,7 @@ class BackgroundService:
                 # Count how many facts were skipped (duplicates)
                 skipped_count = len(facts) - len(actions)
                 if skipped_count > 0:
-                    log.info(f"[Extraction] Skipped {skipped_count} duplicate/existing facts")
+                    log.debug(f"Extraction: skipped {skipped_count} duplicates")
 
                 # Process only the actions (ADD, UPDATE, DELETE)
                 for action in actions:
@@ -1557,7 +1548,8 @@ class BackgroundService:
                     except Exception as e:
                         log.warning(f"Failed to store memory: {e}")
         
-        log.info(f"[Extraction] Stored {stored_count} memories, {profile_count} profile attributes, skipped {skipped_count} duplicates")
+        if stored_count > 0 or profile_count > 0:
+            log.info(f"💾 Stored {stored_count} memories" + (f", {profile_count} profile attrs" if profile_count > 0 else ""))
         log.memory_operation("extraction", bot_id, count=stored_count, details=f"extracted={len(facts)}, stored={stored_count}, skipped={skipped_count}, profiles={profile_count}, llm={use_llm}")
         return {"facts_extracted": len(facts), "facts_stored": stored_count, "facts_skipped": skipped_count, "profile_attrs": profile_count, "llm_used": use_llm}
     
@@ -1622,6 +1614,67 @@ class BackgroundService:
             ),
         )
         return result
+
+    async def _process_profile_maintenance(self, task: Task) -> dict:
+        """Process profile maintenance - consolidate attributes into summary.
+        
+        Uses the same model as chat to avoid loading new model into VRAM.
+        Falls back to loading the default model if no cached client available.
+        """
+        from ..memory.profile_maintenance import ProfileMaintenanceService
+        from ..profiles import ProfileManager
+        
+        entity_id = task.payload.get("entity_id", task.user_id)
+        entity_type = task.payload.get("entity_type", "user")
+        dry_run = task.payload.get("dry_run", False)
+        model_to_use = task.payload.get("model") or self._default_model
+        
+        log.info(f"🔧 Profile maintenance: {entity_type}/{entity_id}")
+        
+        # Get or create profile manager
+        profile_manager = ProfileManager(self.config)
+        
+        # Get LLM client - try cached first
+        llm_client = None
+        if model_to_use and model_to_use in self._client_cache:
+            llm_client = self._client_cache[model_to_use]
+        else:
+            # Check AskLLM cache
+            for (cached_model, _, _), ask_llm in self._ask_llm_cache.items():
+                if not model_to_use or cached_model == model_to_use:
+                    llm_client = ask_llm.client
+                    break
+        
+        # If no cached client, load the default model
+        if not llm_client:
+            log.info(f"⏳ Loading model for profile maintenance: {model_to_use}")
+            try:
+                # Create an AskLLM instance which will load the model
+                ask_llm = self._get_or_create_ask_llm(
+                    model_alias=model_to_use,
+                    bot_id=task.bot_id or "nova",
+                    user_id=entity_id,
+                )
+                llm_client = ask_llm.client
+            except Exception as e:
+                log.error(f"Failed to load model for profile maintenance: {e}")
+                return {"error": f"Failed to load model: {e}"}
+        
+        service = ProfileMaintenanceService(profile_manager, llm_client)
+        
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(
+            self._llm_executor,  # Use same executor as extraction
+            lambda: service.run(entity_id, entity_type, dry_run)
+        )
+        
+        return {
+            "entity_id": result.entity_id,
+            "attributes_before": result.attributes_before,
+            "attributes_after": result.attributes_after,
+            "categories_updated": result.categories_updated,
+            "error": result.error,
+        }
     
     def submit_task(self, task: Task) -> str:
         """Submit a task to the processing queue."""
@@ -1660,7 +1713,7 @@ class BackgroundService:
     
     async def worker_loop(self):
         """Main worker loop that processes tasks from the queue."""
-        log.info("Background task worker started")
+        log.debug("Background task worker started")
         
         while not self._shutdown_event.is_set():
             try:
@@ -1673,7 +1726,7 @@ class BackgroundService:
                     continue
                 
                 task = prioritized.task
-                log.task_submitted(task.task_id, task.task_type.value, task.bot_id)
+                log.task_submitted(task.task_id, task.task_type.value, task.bot_id, task.payload)
                 
                 result = await self.process_task(task)
                 self._results[task.task_id] = result
@@ -1693,7 +1746,7 @@ class BackgroundService:
                 log.exception(f"Worker loop error: {e}")
                 await asyncio.sleep(1)
         
-        log.info("Background task worker stopped")
+        log.debug("Background task worker stopped")
     
     def start_worker(self):
         """Start the background worker task."""
@@ -1751,6 +1804,25 @@ async def lifespan(app):
     _service = BackgroundService(config)
     _service.start_worker()
     
+    # Start job scheduler if enabled
+    scheduler = None
+    if config.SCHEDULER_ENABLED:
+        from .scheduler import JobScheduler, create_scheduler_tables, init_default_jobs
+        from ..profiles import ProfileManager
+        
+        # Get engine from profile manager (reuse existing connection)
+        pm = ProfileManager(config)
+        create_scheduler_tables(pm.engine)
+        init_default_jobs(pm.engine, config)
+        
+        scheduler = JobScheduler(
+            engine=pm.engine,
+            task_processor=_service,
+            check_interval=config.SCHEDULER_CHECK_INTERVAL_SECONDS,
+        )
+        await scheduler.start()
+        log.info(f"📅 Scheduler started (interval={config.SCHEDULER_CHECK_INTERVAL_SECONDS}s)")
+    
     # Log startup with rich formatting
     log.startup(
         version=SERVICE_VERSION,
@@ -1769,6 +1841,8 @@ async def lifespan(app):
     yield
     
     # Shutdown
+    if scheduler:
+        await scheduler.stop()
     await _service.shutdown()
 
 
@@ -1885,7 +1959,7 @@ try:
         manager = get_nextcloud_manager()
         manager.reload()
         bots = manager.list_bots()
-        log.info(f"Nextcloud bot config reloaded: {len(bots)} bots ({[b.ask_llm_bot for b in bots]})")
+        log.info(f"🔄 Reloaded {len(bots)} Nextcloud bots: {[b.ask_llm_bot for b in bots]}")
         return {
             "status": "reloaded",
             "bots_count": len(bots),
@@ -3062,11 +3136,15 @@ def main():
         # When using our rich logging, set uvicorn to warning to reduce noise
         uvicorn_log_level = "debug" if args.debug else "warning"
         
+        # Exclude __pycache__ and .pyc files from reload watching to prevent loops
+        reload_excludes = ["__pycache__", "*.pyc", ".git"] if args.reload else None
+        
         uvicorn.run(
             "ask_llm.service.server:app",
             host=args.host,
             port=args.port,
             reload=args.reload,
+            reload_excludes=reload_excludes,
             log_level=uvicorn_log_level,
         )
     except ImportError:

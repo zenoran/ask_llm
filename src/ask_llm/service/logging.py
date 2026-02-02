@@ -425,73 +425,63 @@ class ServiceLogger:
         params: dict[str, Any] | None = None,
         result: Any | None = None,
     ) -> None:
-        """Log MCP tool operations with human-friendly descriptions.
+        """Log MCP tool operations - single line, always with context."""
         
-        Translates technical tool names to meaningful actions:
-        - get_messages -> "Fetching conversation history"
-        - search_memories -> "Searching memories"
-        - add_message -> "Saving message"
-        - store_memory -> "Storing memory"
+        def _sanitize(text: str, max_len: int = 40) -> str:
+            """Sanitize text for single-line logging."""
+            text = " ".join(text.split())  # Collapse all whitespace
+            return text[:max_len] + "..." if len(text) > max_len else text
         
-        In verbose mode, also shows params and result summaries.
-        """
-        # Map technical tool names to human-readable descriptions
-        friendly_names = {
-            "get_messages": "Fetching history",
-            "search_memories": "Searching memories", 
-            "add_message": "Saving message",
-            "store_memory": "Storing memory",
-            "get_recent_context": "Loading context",
-            "stats": "Fetching stats",
-            "update_memory": "Updating memory",
-            "delete_memory": "Deleting memory",
-            "clear_messages": "Clearing history",
-        }
-        
-        friendly = friendly_names.get(operation, operation)
-        
-        # Select appropriate icon based on operation type
-        if "memor" in operation.lower():
-            icon = ICONS["memory"]  # 💾 for memory operations
-        elif operation in ("add_message",):
-            icon = ICONS["success"]  # ✓ for saving (quick confirmation)
-        elif operation in ("get_messages", "clear_messages"):
-            icon = ICONS["history"]  # 📜 for history operations
+        if operation == "get_messages":
+            icon = ICONS["history"]
+            if count == 0 or not result:
+                msg = f"{icon} History: empty"
+            else:
+                first = result[0] if isinstance(result, list) else result
+                first_content = first.get("content", "") if isinstance(first, dict) else str(first)
+                if count == 1:
+                    msg = f"{icon} History ({count}): \"{_sanitize(first_content)}\""
+                else:
+                    last = result[-1] if isinstance(result, list) else result
+                    last_content = last.get("content", "") if isinstance(last, dict) else str(last)
+                    msg = f"{icon} History ({count}): \"{_sanitize(first_content, 30)}\" → \"{_sanitize(last_content, 30)}\""
+                
+        elif operation == "add_message":
+            icon = ICONS["success"]
+            role = params.get("role", "?") if params else "?"
+            content = params.get("content", "") if params else ""
+            msg = f"{icon} Saved [{role}]: \"{_sanitize(content, 50)}\""
+            
+        elif operation == "search_memories":
+            icon = ICONS["memory"]
+            query = params.get("query", "") if params else ""
+            msg = f"{icon} Memory search \"{_sanitize(query, 30)}\": {count or 0} results"
+            
+        elif operation == "store_memory":
+            icon = ICONS["memory"]
+            content = params.get("content", "") if params else ""
+            importance = params.get("importance", 0.5) if params else 0.5
+            msg = f"{icon} Stored (imp={importance:.1f}): \"{_sanitize(content, 50)}\""
+            
+        elif operation == "delete_memory":
+            icon = ICONS["memory"]
+            memory_id = params.get("memory_id", "?") if params else "?"
+            msg = f"{icon} Deleted memory: {memory_id}"
+            
+        elif operation == "clear_messages":
+            icon = ICONS["history"]
+            msg = f"{icon} Cleared history"
+            
         else:
-            icon = ICONS["tool"]  # 🔧 default
-        
-        parts = [f"{icon} [tool]{friendly}[/tool]"]
-        
-        if count is not None:
-            parts.append(f"[muted]({count} items)[/muted]")
+            icon = ICONS["tool"]
+            msg = f"{icon} {operation}"
+            if count is not None:
+                msg += f" ({count})"
         
         if duration_ms is not None:
-            parts.append(f"[timing]{duration_ms:.0f}ms[/timing]")
+            msg += f" [{duration_ms:.0f}ms]"
             
-        if details:
-            parts.append(f"[muted]{details}[/muted]")
-        
-        if success:
-            self._logger.info(" ".join(parts))
-        else:
-            self._logger.warning(" ".join(parts) + " [bold red]failed[/bold red]")
-        
-        # Verbose mode: show params and result details
-        # Skip redundant info for simple operations
-        if _verbose:
-            # Operations that are simple confirmations - no extra detail needed
-            simple_operations = {"add_message"}  # store_memory SHOULD show content
-            
-            if operation not in simple_operations:
-                if params:
-                    # Show relevant params (skip bot_id since it's usually obvious)
-                    show_params = {k: v for k, v in params.items() if k not in ("bot_id",)}
-                    if show_params:
-                        self._log_mcp_params(operation, show_params)
-                
-                # Show result for read operations
-                if result is not None:
-                    self._log_mcp_result(operation, result)
+        self._logger.info(msg) if success else self._logger.warning(msg + " [FAILED]")
 
     def _log_mcp_params(self, operation: str, params: dict[str, Any]) -> None:
         """Log MCP operation parameters in verbose mode - one line."""
@@ -609,37 +599,38 @@ class ServiceLogger:
 
         self._logger.info(" ".join(parts))
 
-    def task_submitted(self, task_id: str, task_type: str, bot_id: str) -> None:
-        """Log background task submission."""
-        self._logger.info(
-            f"{ICONS['loading']} [task]{task_type}[/task] [muted]queued[/muted]"
-        )
+    def task_submitted(self, task_id: str, task_type: str, bot_id: str, payload: dict | None = None) -> None:
+        """Log background task submission with context - single line."""
+        if task_type == "memory_extraction" and payload:
+            messages = payload.get("messages", [])
+            if messages:
+                user_msgs = [m for m in messages if m.get("role") == "user"]
+                if user_msgs:
+                    content = user_msgs[-1].get("content", "")
+                    preview = " ".join(content.split())[:40] + "..." if len(content) > 40 else content
+                    self._logger.info(f"{ICONS['loading']} Extracting: \"{preview}\"")
+                    return
+        self._logger.info(f"{ICONS['loading']} {task_type} queued")
 
     def task_completed(self, task_id: str, task_type: str, elapsed_ms: float, result: dict | None = None) -> None:
-        """Log background task completion."""
-        # Format result as compact single line if present
-        result_str = ""
-        if result:
-            # Create a compact summary for extraction tasks
-            if task_type == "memory_extraction" and isinstance(result, dict):
+        """Log background task completion with meaningful results."""
+        if task_type == "memory_extraction" and isinstance(result, dict):
+            stored = result.get("facts_stored", 0)
+            profiles = result.get("profile_attrs", 0)
+            
+            if stored > 0 or profiles > 0:
+                # Only log if something was actually stored
                 parts = []
-                if result.get("facts_extracted"):
-                    parts.append(f"extracted={result['facts_extracted']}")
-                if result.get("facts_stored"):
-                    parts.append(f"stored={result['facts_stored']}")
-                if result.get("profile_attrs"):
-                    parts.append(f"profiles={result['profile_attrs']}")
-                if result.get("llm_used") is not None:
-                    parts.append(f"llm={result['llm_used']}")
-                if parts:
-                    result_str = f" [dim]({', '.join(parts)})[/dim]"
-            elif _verbose:
-                # For other tasks in verbose mode, show compact JSON
-                result_str = f" [dim]{result}[/dim]"
+                if stored > 0:
+                    parts.append(f"{stored} memories")
+                if profiles > 0:
+                    parts.append(f"{profiles} profile attrs")
+                self._logger.info(f"{ICONS['memory']} Extracted: {', '.join(parts)} [{elapsed_ms:.0f}ms]")
+            # If nothing stored, don't log (reduces noise)
+            return
         
-        self._logger.info(
-            f"{ICONS['done']} [task]{task_type}[/task] [success]done[/success] [timing]{elapsed_ms:.0f}ms[/timing]{result_str}"
-        )
+        # Generic task completion
+        self._logger.info(f"{ICONS['done']} {task_type} done [{elapsed_ms:.0f}ms]")
 
     def task_failed(self, task_id: str, task_type: str, error: str, elapsed_ms: float) -> None:
         """Log background task failure."""

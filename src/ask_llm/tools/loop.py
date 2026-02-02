@@ -8,6 +8,7 @@ Handles the iterative process of:
 5. Repeating until final response
 """
 
+import json
 import logging
 from typing import TYPE_CHECKING
 
@@ -133,21 +134,29 @@ class ToolLoop:
                 tool_calls = []
                 for tc in native_tool_calls:
                     func = tc.get("function", {})
+                    args = func.get("arguments", "{}")
+                    # Parse JSON string arguments into dict
+                    if isinstance(args, str):
+                        try:
+                            args = json.loads(args)
+                        except json.JSONDecodeError:
+                            args = {}
+                    elif not isinstance(args, dict):
+                        args = {}
                     tool_calls.append(ToolCallRequest(
                         name=func.get("name", ""),
-                        arguments=func.get("arguments", "{}"),
+                        arguments=args,
                         raw_text="",
                         tool_call_id=tc.get("id"),
                     ))
                 
                 if tool_calls:
+                    # Log before execution so we see what's being attempted
+                    for tc in tool_calls:
+                        logger.info(f"🔧 {tc.name}({tc.arguments})")
+                    
                     # Execute tools
                     tool_messages, tool_results = self._execute_tools(tool_calls, handler)
-
-                    logger.info(
-                        "🔧 Tool calls (native): %s",
-                        ", ".join(f"{tc.name}({tc.arguments})" for tc in tool_calls)
-                    )
                     
                     # Track tool interactions for history/context
                     tool_summary = "\n\n".join(tool_results)
@@ -204,14 +213,13 @@ class ToolLoop:
                         return ReActFormatHandler().sanitize_response(final_text)
                 return handler.sanitize_response(final_text)
             
+            # Log before execution so we see what's being attempted
+            for tc in tool_calls:
+                logger.info(f"🔧 {tc.name}({tc.arguments})")
+            
             # Execute tools
             tool_messages, tool_results = self._execute_tools(tool_calls, effective_handler)
             has_executed_tools = True  # Mark that we've executed tools
-
-            logger.info(
-                "🔧 Tool calls: %s",
-                ", ".join(f"{tc.name}({tc.arguments})" for tc in tool_calls)
-            )
             
             # Track tool interactions for history/context
             tool_summary = "\n\n".join(tool_results)
