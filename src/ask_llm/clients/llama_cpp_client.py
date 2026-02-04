@@ -83,12 +83,12 @@ class LlamaCppClient(LLMClient):
     def stream_raw(self, messages: List[Message], stop: list[str] | str | None = None, **kwargs: Any) -> Iterator[str]:
         """
         Stream raw text chunks from llama.cpp without console formatting.
-        
+
         Used by the API service for SSE streaming.
         """
         if not self.model:
             raise RuntimeError("Llama.cpp model not properly initialized.")
-        
+
         api_messages = [msg.to_api_format() for msg in messages]
         generation_params = {
             "messages": api_messages,
@@ -99,8 +99,10 @@ class LlamaCppClient(LLMClient):
         }
         if stop:
             generation_params["stop"] = stop
-        
+
+        logger.debug(f"stream_raw: calling create_chat_completion with {len(stop) if stop else 0} stop sequences")
         raw_stream = self.model.create_chat_completion(**generation_params)
+        logger.debug("stream_raw: got raw_stream, iterating chunks")
         yield from self._iterate_llama_cpp_chunks(raw_stream)
 
     def query(self, messages: List[Message], plaintext_output: bool = False, stream: bool = True, stop: list[str] | str | None = None, **kwargs: Any) -> str:

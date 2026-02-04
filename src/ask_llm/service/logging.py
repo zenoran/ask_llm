@@ -30,6 +30,7 @@ Usage:
 import json
 import logging
 import os
+import sys
 import time
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -37,11 +38,11 @@ from functools import wraps
 from typing import Any
 from uuid import uuid4
 
+from logging.handlers import RotatingFileHandler
 from rich.console import Console
 from rich.logging import RichHandler
 from rich.panel import Panel
 from rich.table import Table
-from rich.text import Text
 from rich.theme import Theme
 
 # Context variable to track request IDs across async operations
@@ -109,7 +110,7 @@ def setup_service_logging(verbose: bool = False, debug: bool = False) -> None:
     """
     global _verbose, _debug
 
-    _verbose = verbose
+    _verbose = verbose or debug
     _debug = debug
 
     # Suppress Hugging Face / Transformers progress noise in non-debug mode
@@ -119,19 +120,17 @@ def setup_service_logging(verbose: bool = False, debug: bool = False) -> None:
         os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
         os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
-    # Determine log level
-    if debug:
-        level = logging.DEBUG
-    elif verbose:
-        level = logging.INFO
-    else:
-        level = logging.INFO
+    # Determine log levels
+    console_level = logging.INFO if (verbose or debug) else logging.WARNING
+    root_level = logging.DEBUG if debug else console_level
 
     console = get_console()
 
     # Configure root logger for the service
     log_prefix = os.getenv("ASK_LLM_LOG_PREFIX", "").strip()
-    
+    log_time_format = "[%I:%M %p]"
+    log_dir = os.getenv("ASK_LLM_LOG_DIR", ".logs")
+
     class _PrefixFilter(logging.Filter):
         def filter(self, record: logging.LogRecord) -> bool:
             if not log_prefix:
@@ -143,36 +142,57 @@ def setup_service_logging(verbose: bool = False, debug: bool = False) -> None:
             # Use plain text prefix - escape [ for Rich markup
             record.msg = f"\\[{log_prefix}] {record.msg}"
             return True
+
+    def _add_debug_file_handler() -> None:
+        os.makedirs(log_dir, exist_ok=True)
+        log_path = os.path.join(log_dir, "llm-service.debug.log")
+        try:
+            with open(log_path, "a", encoding="utf-8"):
+                pass
+        except OSError as exc:
+            print(f"[ask-llm] Failed to open debug log file: {log_path} ({exc})", file=sys.stderr)
+            return
+        root_logger = logging.getLogger()
+        for handler in root_logger.handlers:
+            if isinstance(handler, RotatingFileHandler) and handler.baseFilename == os.path.abspath(log_path):
+                return
+
+        handler = RotatingFileHandler(
+            log_path,
+            maxBytes=10 * 1024 * 1024,
+            backupCount=5,
+            encoding="utf-8",
+        )
+        handler.setLevel(logging.DEBUG)
+        handler.setFormatter(logging.Formatter(
+            "%(asctime)s | %(name)s | %(levelname)s | %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        ))
+        handler.addFilter(_PrefixFilter())
+        root_logger.addHandler(handler)
     
+    # Rich formatted output to stdout
+    logging.basicConfig(
+        level=root_level,
+        format="%(message)s",
+        handlers=[RichHandler(
+            console=console,
+            show_path=False,
+            show_time=True,
+            omit_repeated_times=False,
+            log_time_format=log_time_format,
+            show_level=False,
+            rich_tracebacks=True,
+            tracebacks_show_locals=verbose,
+            markup=True,
+        )],
+        force=True,
+    )
+    for handler in logging.getLogger().handlers:
+        handler.addFilter(_PrefixFilter())
+        handler.setLevel(console_level)
     if debug:
-        # Debug mode: simple format, no rich
-        logging.basicConfig(
-            level=level,
-            format="%(asctime)s | %(name)s | %(levelname)s | %(message)s",
-            datefmt="%H:%M:%S",
-            force=True,
-        )
-        for handler in logging.getLogger().handlers:
-            handler.addFilter(_PrefixFilter())
-    else:
-        # Normal/verbose mode: rich formatted output
-        logging.basicConfig(
-            level=level,
-            format="%(message)s",
-            datefmt="[%X]",
-            handlers=[RichHandler(
-                console=console,
-                show_path=False,
-                show_time=False,
-                show_level=False,
-                rich_tracebacks=True,
-                tracebacks_show_locals=verbose,
-                markup=True,
-            )],
-            force=True,
-        )
-        for handler in logging.getLogger().handlers:
-            handler.addFilter(_PrefixFilter())
+        _add_debug_file_handler()
 
     # Reduce noise from third-party libraries
     # These libraries produce a lot of INFO/DEBUG messages that clutter the output

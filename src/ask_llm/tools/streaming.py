@@ -165,9 +165,9 @@ def stream_with_tools(
     adapter_stops = adapter.get_stop_sequences()
     stop_sequences = list(set(handler_stops + adapter_stops))
 
-    # Escape brackets for Rich logging to avoid markup interpretation of tags like [HUMAN]
-    from rich.markup import escape
-    log.info(f"🛑 Tool streaming with stop_sequences: {escape(str(stop_sequences))}")
+    # Log stop sequences compactly (repr escapes newlines, join keeps it single-line)
+    stops_repr = ", ".join(repr(s) for s in stop_sequences)
+    log.info(f"🛑 Tool streaming with {len(stop_sequences)} stop sequences")
 
     executor = ToolExecutor(
         memory_client=memory_client,
@@ -194,7 +194,12 @@ def stream_with_tools(
         is_tool_call = False  # True if response looks like a tool call
         full_response = ""
 
+        log.debug(f"Starting stream_fn with {len(current_messages)} messages")
+        chunk_count = 0
         for chunk in stream_fn(current_messages, current_stop_sequences):
+            chunk_count += 1
+            if chunk_count == 1:
+                log.debug(f"Got first chunk: {repr(chunk[:50]) if len(chunk) > 50 else repr(chunk)}")
             full_response += chunk
             
             if is_tool_call:
@@ -224,7 +229,7 @@ def stream_with_tools(
                 log.debug(f"Decision threshold reached - treating as text")
                 is_tool_call = False
 
-        log.debug(f"Response received: {len(full_response)} chars")
+        log.debug(f"Stream ended: {chunk_count} chunks, {len(full_response)} chars")
 
         # Parse for tool calls using format handler
         tool_calls, remaining_text = handler.parse_response(full_response)
@@ -239,6 +244,14 @@ def stream_with_tools(
                 log.info(f"Adapter '{adapter.name}' cleaned response: {len(full_response)} -> {len(cleaned)} chars")
                 log.debug(f"Cleaned response: {repr(cleaned[:200])}")
             sanitized = handler.sanitize_response(cleaned)
+
+            # If sanitized is empty but original had tool-like content, the model
+            # tried to call a tool but failed (invalid name, bad JSON, etc.)
+            if not sanitized.strip() and ("action:" in full_response.lower()):
+                log.warning(f"Model attempted invalid tool call: {repr(full_response)}")
+                yield f"[Model tried to use a tool but the format was invalid. Raw output: {full_response}]"
+                return
+
             yield sanitized
             return
 
@@ -293,7 +306,8 @@ def stream_with_tools(
             observation_content = str(formatted_result)
         
         # Add continuation prompt after observation to guide toward final answer
-        if not has_executed_tools:  # Only on first tool use to avoid repetition
+        # Use iteration == 1 since has_executed_tools is already True at this point
+        if iteration == 1:
             observation_content += "\n\nBased on this information, provide your answer to the user's question."
         
         if isinstance(formatted_result, dict):

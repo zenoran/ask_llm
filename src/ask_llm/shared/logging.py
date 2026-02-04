@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import logging
+import sys
 import os
 import threading
 import time
@@ -13,6 +14,7 @@ from datetime import datetime
 from enum import Enum, auto
 from typing import Any, Iterator
 
+from logging.handlers import RotatingFileHandler
 from rich.console import Console
 from rich.panel import Panel
 from rich.tree import Tree
@@ -220,6 +222,10 @@ class LogConfig:
             logging.getLogger(logger_name).setLevel(logging.ERROR)
         
         log_prefix = os.getenv("ASK_LLM_LOG_PREFIX", "").strip()
+        log_dir = os.getenv("ASK_LLM_LOG_DIR", ".logs")
+        console_level = logging.INFO if (verbose or debug) else logging.WARNING
+        root_level = logging.DEBUG if debug else console_level
+        log_file_name = f"{log_prefix}.debug.log" if log_prefix else "ask-llm.debug.log"
         class _PrefixFilter(logging.Filter):
             def filter(self, record: logging.LogRecord) -> bool:
                 if not log_prefix:
@@ -231,19 +237,53 @@ class LogConfig:
                 # Escape [ for Rich markup
                 record.msg = f"\\[{log_prefix}] {record.msg}"
                 return True
+
+        def _add_debug_file_handler() -> None:
+            os.makedirs(log_dir, exist_ok=True)
+            log_path = os.path.join(log_dir, log_file_name)
+            try:
+                with open(log_path, "a", encoding="utf-8"):
+                    pass
+            except OSError as exc:
+                print(f"[ask-llm] Failed to open debug log file: {log_path} ({exc})", file=sys.stderr)
+                return
+            for handler in root.handlers:
+                if isinstance(handler, RotatingFileHandler) and handler.baseFilename == os.path.abspath(log_path):
+                    return
+
+            handler = RotatingFileHandler(
+                log_path,
+                maxBytes=10 * 1024 * 1024,
+                backupCount=5,
+                encoding="utf-8",
+            )
+            handler.setLevel(logging.DEBUG)
+            handler.setFormatter(logging.Formatter(
+                "%(asctime)s | %(name)s | %(levelname)s | %(message)s",
+                datefmt="%Y-%m-%d %H:%M:%S",
+            ))
+            handler.addFilter(_PrefixFilter())
+            root.addHandler(handler)
         
         # Create a Rich console that renders even when backgrounded
         console = Console(stderr=True, force_terminal=True)
 
         if debug:
-            # Debug mode: Show everything for ask_llm (plain format for grep-ability)
-            handler = logging.StreamHandler()
-            handler.setFormatter(logging.Formatter(
-                "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-            ))
+            # Debug mode: keep Rich formatting but keep DEBUG out of stdout
+            handler = RichHandler(
+                console=console,
+                show_path=False,
+                show_time=False,
+                show_level=False,
+                rich_tracebacks=True,
+                markup=True,
+            )
             handler.addFilter(_PrefixFilter())
+            handler.setLevel(console_level)
             root.addHandler(handler)
-            root.setLevel(logging.DEBUG)
+            root.setLevel(root_level)
+            _add_debug_file_handler()
+            logging.getLogger("ask_llm").setLevel(logging.INFO)
             return
 
         if verbose:
@@ -258,7 +298,7 @@ class LogConfig:
             )
             handler.addFilter(_PrefixFilter())
             root.addHandler(handler)
-            root.setLevel(logging.WARNING)
+            root.setLevel(root_level)
             logging.getLogger("ask_llm").setLevel(logging.INFO)
             return
 
@@ -273,7 +313,7 @@ class LogConfig:
         )
         handler.addFilter(_PrefixFilter())
         root.addHandler(handler)
-        root.setLevel(logging.WARNING)
+        root.setLevel(root_level)
 
     @classmethod
     def get_renderer(cls, console: Console, *, verbose: bool, debug: bool) -> EventRenderer:

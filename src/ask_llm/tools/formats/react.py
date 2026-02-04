@@ -141,6 +141,20 @@ def _extract_json_object(text: str, start_idx: int) -> tuple[str | None, int | N
             if depth == 0:
                 return text[brace_idx : i + 1], i + 1
 
+    # Incomplete JSON - try to fix by adding missing braces
+    # This handles cases where model stopped mid-JSON (e.g., stop sequence or max tokens)
+    if depth > 0:
+        incomplete_json = text[brace_idx:]
+        # Try adding closing braces
+        fixed = incomplete_json + ("}" * depth)
+        # Verify it's valid JSON
+        try:
+            json.loads(fixed)
+            logger.debug(f"Fixed incomplete JSON by adding {depth} closing brace(s)")
+            return fixed, len(text)
+        except json.JSONDecodeError:
+            pass
+
     return None, None
 
 
@@ -212,13 +226,19 @@ class ReActFormatHandler(ToolFormatHandler):
         )
 
     def get_stop_sequences(self) -> list[str]:
-        # Stop sequences should ONLY stop before tool calls, not before Final Answer
-        # We want to stop when the model is about to hallucinate an Observation
-        # (which it shouldn't - we provide the real observation after tool execution)
+        # After Action Input: {...}, the model should STOP and wait for tool execution.
+        # These sequences catch continuations after the closing brace of Action Input JSON.
         return [
-            "\nObservation:",   # Stop before hallucinating tool result
-            "\nObservation",    # Catch without colon
-            "}\nObservation",   # After JSON closes
+            # After Action Input JSON closes, stop before any continuation
+            "}\nObservation",
+            "}\n\nObservation",
+            "}\nFinal Answer",
+            "}\n\nFinal Answer",
+            "}\nThought",
+            "}\n\nThought",
+            # Fallback patterns (no brace prefix)
+            "\n\nObservation:",
+            "\n\nObservation",
             # Note: Model-specific stop sequences (e.g., [HUMAN], [INST]) are handled
             # by the ModelAdapter, not the format handler.
         ]
@@ -251,7 +271,11 @@ class ReActFormatHandler(ToolFormatHandler):
 
     def _parse_react_format(self, response: str) -> tuple[list[ToolCallRequest], str]:
         """Parse standard ReAct format: Action: / Action Input:"""
+        # Match Action: tool_name - tool name can be on same line or next line
         action_match = re.search(r"(?im)^\s*Action\s*:\s*(.+?)\s*$", response)
+        if not action_match:
+            # Try matching when tool name is on next line: "Action:\n  history"
+            action_match = re.search(r"(?im)^\s*Action\s*:\s*\n\s*(\S+)", response)
         if action_match:
             tool_name = _normalize_tool_name(action_match.group(1))
             search_start = action_match.end()

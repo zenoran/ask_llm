@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     from ..search.base import SearchClient
     from ..core.model_lifecycle import ModelLifecycleManager
     from ..utils.config import Config
+    from ..adapters import ModelAdapter
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +47,7 @@ class ToolLoop:
         max_iterations: int = DEFAULT_MAX_ITERATIONS,
         tool_format: ToolFormat | str = ToolFormat.XML,
         tools: list | None = None,
+        adapter: "ModelAdapter | None" = None,
     ):
         """
         Args:
@@ -57,6 +59,7 @@ class ToolLoop:
             user_id: Current user ID (required).
             bot_id: Current bot ID.
             max_iterations: Maximum tool call iterations per turn.
+            adapter: Model adapter for model-specific stop sequences and output cleaning.
         """
         if not user_id:
             raise ValueError("user_id is required for ToolLoop")
@@ -75,6 +78,7 @@ class ToolLoop:
         self.tools = tools
         self.format_handler = get_format_handler(tool_format)
         self._using_native_tools = False
+        self.adapter = adapter
     
     def run(
         self,
@@ -393,7 +397,15 @@ class ToolLoop:
 
         # For text-based parsing, use stop sequences only on first iteration
         # After tools have run, let the model complete its response naturally
-        stop_sequences = None if skip_stop_sequences else handler.get_stop_sequences()
+        if skip_stop_sequences:
+            stop_sequences = None
+        else:
+            # Combine format handler stop sequences with model adapter stop sequences
+            stop_sequences = list(handler.get_stop_sequences())
+            if self.adapter:
+                adapter_stops = self.adapter.get_stop_sequences()
+                if adapter_stops:
+                    stop_sequences.extend(adapter_stops)
         return client.query(messages, plaintext_output=True, stream=False, stop=stop_sequences)
 
 
@@ -411,9 +423,10 @@ def query_with_tools(
     stream: bool = True,
     tool_format: ToolFormat | str = ToolFormat.XML,
     tools: list | None = None,
+    adapter: "ModelAdapter | None" = None,
 ) -> tuple[str, str]:
     """Convenience function for tool-enabled queries.
-    
+
     Args:
         messages: Conversation messages.
         client: LLM client instance.
@@ -428,7 +441,8 @@ def query_with_tools(
         stream: Whether to stream the final response.
         tool_format: Tool format for this model.
         tools: Tool definitions to include in schema/formatting.
-        
+        adapter: Model adapter for model-specific stop sequences.
+
     Returns:
         Tuple of (final_response, tool_context_summary).
         tool_context_summary contains the tool results that should be saved to history.
@@ -446,6 +460,7 @@ def query_with_tools(
         max_iterations=max_iterations,
         tool_format=tool_format,
         tools=tools,
+        adapter=adapter,
     )
     response = loop.run(messages, client, stream_final=stream)
     tool_context = loop.get_tool_context_summary()

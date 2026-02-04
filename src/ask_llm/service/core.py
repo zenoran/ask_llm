@@ -197,6 +197,7 @@ class ServiceAskLLM(BaseAskLLM):
                 stream=stream,
                 tool_format=self.tool_format,
                 tools=tool_definitions,
+                adapter=self.adapter,
             )
         
         response = self.client.query(

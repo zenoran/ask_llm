@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     from ..bots import Bot
     from ..utils.config import Config
     from .prompt_builder import PromptBuilder
+    from ..adapters import ModelAdapter
 
 logger = logging.getLogger(__name__)
 
@@ -111,11 +112,12 @@ class RequestPipeline:
         model_lifecycle: Any = None,
         history_manager: Any = None,
         llm_client: Any = None,
+        adapter: "ModelAdapter | None" = None,
         verbose: bool = False,
         debug: bool = False,
     ):
         """Initialize the pipeline.
-        
+
         Args:
             config: Application configuration
             bot: Bot configuration for this request
@@ -125,6 +127,7 @@ class RequestPipeline:
             model_lifecycle: Optional model lifecycle manager for model switching
             history_manager: History manager for conversation history
             llm_client: LLM client for query execution
+            adapter: Optional model adapter for model-specific stop sequences
             verbose: Enable verbose logging (--verbose)
             debug: Enable debug logging with full I/O (--debug)
         """
@@ -136,6 +139,7 @@ class RequestPipeline:
         self.model_lifecycle = model_lifecycle
         self.history_manager = history_manager
         self.llm_client = llm_client
+        self.adapter = adapter
         self.verbose = verbose
         self.debug = debug
         
@@ -526,6 +530,7 @@ class RequestPipeline:
                 stream=ctx.stream,
                 tool_format=ctx.tool_format,
                 tools=ctx.tool_definitions,
+                adapter=self.adapter,
             )
             
             ctx.response = response

@@ -3,6 +3,7 @@
 
 services:
   app:
+    command: ["/app/server.sh", "start", "--stdout", "--debug"]
     # Dev mode: source mounted, manual restart needed after code changes
     # (--dev flag with auto-reload causes issues, so we skip it)
     

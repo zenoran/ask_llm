@@ -326,6 +326,7 @@ class BaseAskLLM(ABC):
                     stream=stream,
                     tool_format=self.tool_format,
                     tools=tool_definitions,
+                    adapter=self.adapter,
                 )
 
                 # Render the final response (tool loop returns raw text, never renders)

@@ -1657,9 +1657,9 @@ class BackgroundService:
             log.info(f"⏳ Loading model for profile maintenance: {model_to_use}")
             try:
                 # Create an AskLLM instance which will load the model
-                ask_llm = self._get_or_create_ask_llm(
+                ask_llm = self._get_ask_llm(
                     model_alias=model_to_use,
-                    bot_id=task.bot_id or "nova",
+                    bot_id=task.bot_id or self._default_bot,
                     user_id=entity_id,
                 )
                 llm_client = ask_llm.client
