@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Iterator, Callable
 
 from .executor import ToolExecutor
 from .formats import ToolFormat, get_format_handler
+from ..adapters import ModelAdapter, DefaultAdapter
 
 if TYPE_CHECKING:
     from ..models.message import Message
@@ -117,6 +118,7 @@ def stream_with_tools(
     bot_id: str = "nova",
     max_iterations: int = DEFAULT_MAX_ITERATIONS,
     tool_format: ToolFormat | str = ToolFormat.REACT,
+    adapter: "ModelAdapter | None" = None,
 ) -> Iterator[str]:
     """Stream LLM response with tool calling support.
 
@@ -126,8 +128,8 @@ def stream_with_tools(
 
     Streaming strategy:
     1. Buffer initial tokens to detect if response is a tool call
-    2. If it looks like regular text → switch to immediate streaming
-    3. If it looks like a tool call → buffer everything, execute, loop
+    2. If it looks like regular text -> buffer everything, clean at end, then yield
+    3. If it looks like a tool call -> buffer everything, execute, loop
 
     Args:
         messages: Initial conversation messages.
@@ -141,18 +143,31 @@ def stream_with_tools(
         bot_id: Current bot ID.
         max_iterations: Max tool iterations per turn.
         tool_format: Tool format to use (determines stop sequences and parsing).
+        adapter: Model adapter for model-specific cleaning and stop sequences.
 
     Yields:
-        Text chunks from the LLM response.
+        Text chunks from the LLM response (cleaned by adapter and handler).
     """
     if not user_id:
         raise ValueError("user_id is required for stream_with_tools")
     from ..models.message import Message
 
-    handler = get_format_handler(tool_format)
-    stop_sequences = handler.get_stop_sequences()
+    if adapter is None:
+        log.warning("No adapter provided, using DefaultAdapter")
+        adapter = DefaultAdapter()
+    else:
+        log.debug(f"Using adapter: {adapter.name}")
 
-    log.info(f"🛑 Tool streaming with stop_sequences: {stop_sequences}")
+    handler = get_format_handler(tool_format)
+    
+    # Combine stop sequences from both handler and adapter
+    handler_stops = handler.get_stop_sequences()
+    adapter_stops = adapter.get_stop_sequences()
+    stop_sequences = list(set(handler_stops + adapter_stops))
+
+    # Escape brackets for Rich logging to avoid markup interpretation of tags like [HUMAN]
+    from rich.markup import escape
+    log.info(f"🛑 Tool streaming with stop_sequences: {escape(str(stop_sequences))}")
 
     executor = ToolExecutor(
         memory_client=memory_client,
@@ -176,99 +191,38 @@ def stream_with_tools(
         # Buffer for initial detection
         initial_buffer = ""
         initial_chunks: list[str] = []
-        streaming_mode = False  # True = stream immediately, False = still deciding/buffering
+        is_tool_call = False  # True if response looks like a tool call
         full_response = ""
-        
-        # Line buffer for detecting ReAct markers mid-stream
-        line_buffer = ""
-        react_junk_detected = False
 
         for chunk in stream_fn(current_messages, current_stop_sequences):
             full_response += chunk
-
-            if react_junk_detected:
-                # Already detected ReAct junk - consume but don't yield
+            
+            if is_tool_call:
+                # Already decided it's a tool call - keep buffering
                 continue
-
-            if streaming_mode:
-                # Already decided to stream - check for ReAct markers before yielding
-                # Buffer the current line to detect markers
-                line_buffer += chunk
-                
-                # Check if we have a complete line
-                if '\n' in line_buffer:
-                    lines = line_buffer.split('\n')
-                    # Process all complete lines
-                    for i, line in enumerate(lines[:-1]):
-                        if _contains_react_marker(line):
-                            # Found ReAct marker - stop streaming, don't yield this or anything after
-                            log.debug(f"Detected ReAct marker in line: {line[:50]}...")
-                            react_junk_detected = True
-                            break
-                        # Safe line - yield it with the newline
-                        yield line + '\n'
-                    
-                    if react_junk_detected:
-                        continue
-                    
-                    # Keep the incomplete last line in buffer
-                    line_buffer = lines[-1]
-                continue
-
+            
             # Still deciding - buffer
             initial_buffer += chunk
             initial_chunks.append(chunk)
             stripped = initial_buffer.strip()
 
             if _looks_like_tool_call_start(stripped):
-                # Definitely a tool call - keep buffering, don't stream
+                # Definitely a tool call - keep buffering
                 log.debug(f"Response looks like tool call - buffering")
+                is_tool_call = True
                 continue
 
             if _looks_like_regular_text(stripped):
-                # Regular text - switch to streaming mode
-                log.debug(f"Response looks like regular text - streaming")
-                streaming_mode = True
-                # Yield all buffered chunks (check each for ReAct markers)
-                combined = "".join(initial_chunks)
-                if '\n' in combined:
-                    lines = combined.split('\n')
-                    for i, line in enumerate(lines[:-1]):
-                        if _contains_react_marker(line):
-                            react_junk_detected = True
-                            break
-                        yield line + '\n'
-                    if not react_junk_detected:
-                        line_buffer = lines[-1]
-                else:
-                    line_buffer = combined
-                initial_chunks = []
+                # Regular text - will buffer and clean at end
+                log.debug(f"Response looks like regular text - buffering for cleaning")
+                is_tool_call = False
                 continue
 
             # Haven't decided yet - check threshold
             if len(stripped) >= DECISION_THRESHOLD:
                 # Buffered enough without tool markers - assume it's text
-                log.debug(f"Decision threshold reached - streaming")
-                streaming_mode = True
-                combined = "".join(initial_chunks)
-                if '\n' in combined:
-                    lines = combined.split('\n')
-                    for i, line in enumerate(lines[:-1]):
-                        if _contains_react_marker(line):
-                            react_junk_detected = True
-                            break
-                        yield line + '\n'
-                    if not react_junk_detected:
-                        line_buffer = lines[-1]
-                else:
-                    line_buffer = combined
-                initial_chunks = []
-
-        # After stream ends, yield any remaining safe content in line buffer
-        if streaming_mode and line_buffer and not react_junk_detected:
-            # Check final partial line for markers
-            if not _contains_react_marker(line_buffer):
-                yield line_buffer
+                log.debug(f"Decision threshold reached - treating as text")
+                is_tool_call = False
 
         log.debug(f"Response received: {len(full_response)} chars")
 
@@ -276,13 +230,16 @@ def stream_with_tools(
         tool_calls, remaining_text = handler.parse_response(full_response)
 
         if not tool_calls:
-            # No tool call found
-            if not streaming_mode:
-                # We buffered everything but it's not a tool call - yield sanitized content
-                log.debug("No tool calls found in buffered response - yielding")
-                sanitized = handler.sanitize_response(full_response)
-                yield sanitized
-            # If streaming_mode was True, we already yielded filtered content
+            # No tool call found - clean and yield the final response
+            log.debug("No tool calls found - cleaning and yielding response")
+            log.debug(f"Raw response before cleaning ({len(full_response)} chars): {repr(full_response[:200])}")
+            # Apply adapter cleaning FIRST, then format sanitization
+            cleaned = adapter.clean_output(full_response)
+            if cleaned != full_response:
+                log.info(f"Adapter '{adapter.name}' cleaned response: {len(full_response)} -> {len(cleaned)} chars")
+                log.debug(f"Cleaned response: {repr(cleaned[:200])}")
+            sanitized = handler.sanitize_response(cleaned)
+            yield sanitized
             return
 
         # Tool call detected - execute it

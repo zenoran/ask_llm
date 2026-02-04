@@ -1220,6 +1220,12 @@ class BackgroundService:
                         # Fall back to text-based streaming for non-native models (GGUF, etc.)
                         from ..tools import stream_with_tools
                         log.debug(f"Using stream_with_tools for tool format: {ask_llm.tool_format}")
+                        
+                        adapter = getattr(ask_llm, 'adapter', None)
+                        if adapter:
+                            log.debug(f"Passing adapter '{adapter.name}' to stream_with_tools")
+                        else:
+                            log.warning("No adapter found on ask_llm instance")
 
                         def stream_fn(msgs, stop_sequences=None):
                             return ask_llm.client.stream_raw(msgs, stop=stop_sequences)
@@ -1235,6 +1241,7 @@ class BackgroundService:
                             user_id=ask_llm.user_id,
                             bot_id=ask_llm.bot_id,
                             tool_format=ask_llm.tool_format,
+                            adapter=adapter,
                         )
                 else:
                     stream_iter = ask_llm.client.stream_raw(messages)

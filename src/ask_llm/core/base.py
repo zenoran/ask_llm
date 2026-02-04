@@ -32,6 +32,7 @@ from ..tools import get_tools_prompt, get_tools_list, query_with_tools
 from ..utils.config import Config, has_database_credentials
 from ..utils.paths import resolve_log_dir
 from ..utils.history import HistoryManager, Message
+from ..adapters import get_adapter, ModelAdapter
 from .pipeline import RequestPipeline, PipelineContext
 from .prompt_builder import PromptBuilder, SectionPosition
 from .model_lifecycle import ModelLifecycleManager, get_model_lifecycle
@@ -99,12 +100,19 @@ class BaseAskLLM(ABC):
         self.bot: Bot
         self.history_manager: HistoryManager
         self._db_available: bool = False
+        self.adapter: ModelAdapter
         
         if not self.model_definition:
             raise ValueError(f"Could not find model definition for: '{resolved_model_alias}'")
         
         # Initialize model lifecycle manager (singleton)
         self.model_lifecycle = get_model_lifecycle(config)
+        
+        # Initialize adapter based on model definition
+        self.adapter = get_adapter(
+            self.resolved_model_alias,
+            self.model_definition
+        )
         
         # Initialize LLM client - reuse existing if provided
         if existing_client is not None:

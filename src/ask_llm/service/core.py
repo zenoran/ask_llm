@@ -122,7 +122,9 @@ class ServiceAskLLM(BaseAskLLM):
                     f"Could not download GGUF model: {repo_id}/{filename}"
                 )
             
-            client = LlamaCppClient(model_path, config=self.config)
+            # Get optional chat_format from model definition (for models like MythoMax)
+            chat_format = self.model_definition.get("chat_format")
+            client = LlamaCppClient(model_path, config=self.config, chat_format=chat_format)
             load_time_ms = (time.perf_counter() - start_time) * 1000
             slog.model_loaded(self.resolved_model_alias, model_type, load_time_ms)
             return client

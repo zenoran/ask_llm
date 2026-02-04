@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 class LlamaCppClient(LLMClient):
     """Client for running GGUF models using llama-cpp-python."""
 
-    def __init__(self, model_path: str, config: Config):
+    def __init__(self, model_path: str, config: Config, chat_format: str | None = None):
         if not _llama_cpp_available:
             raise ImportError(
                 "`llama-cpp-python` not found. Install it following instructions: "
@@ -33,6 +33,7 @@ class LlamaCppClient(LLMClient):
             )
         super().__init__(model_path, config) # Pass config to base class
         self.model_path = model_path
+        self.chat_format = chat_format  # Allow explicit chat format override
         self.model = None
         self._load_model()
 
@@ -51,10 +52,9 @@ class LlamaCppClient(LLMClient):
             "n_ctx": n_ctx,
             "n_batch": n_batch,  # Higher batch size = faster prompt processing
             "flash_attn": flash_attn,  # Flash attention reduces VRAM usage for long contexts
-            # Let llama.cpp auto-detect chat format from GGUF metadata
-            # This is better than hardcoding chatml which doesn't work for all models
-            # (e.g., Mistral-based models like Cydonia use mistral-instruct format)
-            "chat_format": None,
+            # Use explicit chat_format if provided, otherwise auto-detect from GGUF metadata
+            # Explicit format is needed for models like MythoMax that have unusual chat formats
+            "chat_format": self.chat_format,  # None = auto-detect
             "verbose": False, # Disable llama-cpp's library-level verbose logging
         }
         final_chat_format = model_load_params["chat_format"]

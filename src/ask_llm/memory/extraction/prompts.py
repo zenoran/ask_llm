@@ -127,15 +127,31 @@ Return JSON with a "facts" array. Each fact needs:
 - tags: From """ + str(MEMORY_TAGS) + """
 - importance: 0.0-1.0 (0.7+ for genuinely important persistent info)
 
-**REQUIRED for core identity facts (name, age, occupation, location, pets):**
+**OPTIONAL - ONLY for core identity/personality traits:**
 - profile_attribute: {{"category": "fact|preference|interest", "key": "short_identifier"}}
 
-Profile attributes are persisted to the user's profile and shown in every conversation. ALWAYS include them for:
+Profile attributes are ONLY for facts that define WHO the user is as a person. They appear in EVERY conversation. Be EXTREMELY selective:
+
+ALLOWED profile attributes (core identity only):
+- name, age, occupation, location, family/pets, relationship_status
+- Persistent health conditions (chronic issues, not temporary)
+- Core personality/preferences (communication style, values, boundaries)
+- High-level interests (hobbies, favorite genres)
+
+NEVER use profile_attribute for:
+- Projects they're working on
+- Tools/services they use
+- Specific apps or systems they've built
+- One-time requests or current tasks
+- Conditional statements ("often", "sometimes", "currently")
+- Technical details about their setup
+
+ALWAYS include profile_attribute for:
 - Name (key: "name", importance: 1.0)
-- Age (key: "age")
-- Occupation/job (key: "occupation")
-- Location (key: "location")
-- Family/pets (key: "family" or "pets")
+- Age (key: "age", importance: 0.9+)
+- Occupation/job (key: "occupation", importance: 0.8+)
+- Location (key: "location", importance: 0.8+)
+- Family/pets (key: "pets" or "family", importance: 0.7+)
 
 Be EXTREMELY selective. When in doubt, return empty list.
 

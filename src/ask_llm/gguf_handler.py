@@ -232,7 +232,15 @@ def _update_models_yaml(repo_id: str, selected_filename: str, config: Config) ->
         existing_aliases = list(models_data.get("models", {}).keys())
         new_alias = generate_gguf_alias(repo_id, selected_filename, existing_aliases)
 
-        model_entry = {"type": "gguf","repo_id": repo_id,"filename": selected_filename,"description": f"{repo_id}/{selected_filename} (GGUF)"}
+        model_entry = {
+            "type": "gguf",
+            "repo_id": repo_id,
+            "filename": selected_filename,
+            "description": f"{repo_id}/{selected_filename} (GGUF)",
+            # chat_format: optional override for models with non-standard chat formats
+            # Common values: None (auto-detect), "llama-2", "alpaca", "chatml", "pygmalion"
+            # "chat_format": None,
+        }
 
         for alias, definition in models_data.get("models", {}).items():
             if (definition.get("type") == "gguf" and definition.get("repo_id") == repo_id and definition.get("filename") == selected_filename):

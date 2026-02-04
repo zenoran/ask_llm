@@ -219,6 +219,8 @@ class ReActFormatHandler(ToolFormatHandler):
             "\nObservation:",   # Stop before hallucinating tool result
             "\nObservation",    # Catch without colon
             "}\nObservation",   # After JSON closes
+            # Note: Model-specific stop sequences (e.g., [HUMAN], [INST]) are handled
+            # by the ModelAdapter, not the format handler.
         ]
 
     def parse_response(self, response: str) -> tuple[list[ToolCallRequest], str]:
@@ -480,8 +482,8 @@ class ReActFormatHandler(ToolFormatHandler):
             flags=re.DOTALL | re.IGNORECASE,
         )
         
-        # Clean up excessive whitespace
-        cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+        # Note: Model-specific markers (e.g., [HUMAN], [INST], BBCode) are handled
+        # by the ModelAdapter.clean_output(), not the format handler.
         
         return cleaned.strip()
 

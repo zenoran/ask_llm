@@ -110,16 +110,67 @@ class HistoryManager:
         Includes:
         - System messages (always)
         - Recent messages (within HISTORY_DURATION)
-        - Summaries of older sessions (role='summary')
+        - Summaries of older sessions (role='summary') with time context
         """
+        import time
+        from datetime import datetime
+        
         cutoff = time.time() - self.config.HISTORY_DURATION
-        active_messages = [
-            msg for msg in self.messages
-            if msg.role == "system" or msg.role == "summary" or msg.timestamp >= cutoff
-        ]
+        active_messages = []
+        
+        for msg in self.messages:
+            if msg.role == "system":
+                active_messages.append(msg)
+            elif msg.role == "summary":
+                # Add time context to summaries
+                time_ago = self._format_time_ago(msg.timestamp)
+                enhanced_content = f"[Previous conversation {time_ago}]\n{msg.content}"
+                active_messages.append(Message(
+                    role="summary",
+                    content=enhanced_content,
+                    timestamp=msg.timestamp
+                ))
+            elif msg.timestamp >= cutoff:
+                # Recent messages
+                active_messages.append(msg)
+        
         if not any(msg.role == "system" for msg in active_messages):
             active_messages.insert(0, Message(role="system", content=self.config.SYSTEM_MESSAGE))
         return active_messages
+    
+    def _format_time_ago(self, timestamp: float) -> str:
+        """Format a timestamp as a human-readable relative time."""
+        import time
+        from datetime import datetime
+        
+        now = time.time()
+        diff = now - timestamp
+        
+        if diff < 60:
+            return "just now"
+        elif diff < 3600:
+            minutes = int(diff / 60)
+            return f"{minutes} minute{'s' if minutes != 1 else ''} ago"
+        elif diff < 7200:
+            return "about 1 hour ago"
+        elif diff < 86400:
+            hours = int(diff / 3600)
+            return f"{hours} hours ago"
+        elif diff < 172800:
+            return "yesterday"
+        elif diff < 604800:
+            days = int(diff / 86400)
+            return f"{days} days ago"
+        elif diff < 1209600:
+            return "last week"
+        elif diff < 2592000:
+            weeks = int(diff / 604800)
+            return f"{weeks} weeks ago"
+        elif diff < 5184000:
+            return "last month"
+        else:
+            months = int(diff / 2592000)
+            return f"{months} months ago"
     
     def get_context_messages_excluding_last(self):
         """Get messages to be used as context, excluding the most recent one."""

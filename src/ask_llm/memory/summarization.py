@@ -30,12 +30,12 @@ SUMMARIZATION_PROMPT = """Summarize this conversation session concisely. Focus o
 3. Important user information shared
 4. Unresolved questions
 
-Keep under 100 words. Write in third person.
+Keep under 100 words. Write in third person. Be specific about what was discussed.
 
 Conversation:
 {messages}
 
-Summary:"""
+Summary (include specific topics and any decisions made):"""
 
 
 @dataclass
@@ -345,14 +345,22 @@ def summarize_session_heuristic(session: Session) -> str:
     first_msg = user_messages[0][:100].strip()
     last_msg = user_messages[-1][:100].strip() if len(user_messages) > 1 else ""
 
-    # Build summary
-    start_time = session.start_datetime.strftime("%Y-%m-%d %H:%M")
+    # Build summary with date for time context
+    start_time = session.start_datetime.strftime("%Y-%m-%d")
+    start_time_full = session.start_datetime.strftime("%Y-%m-%d %H:%M")
     msg_count = session.message_count
 
-    summary_parts = [f"Session on {start_time} ({msg_count} messages)."]
-    summary_parts.append(f"Started with: \"{first_msg}...\"")
+    summary_parts = [f"On {start_time}: Conversation about"]
+    
+    # Include topic hints from first message
+    first_topic = first_msg[:80] + "..." if len(first_msg) > 80 else first_msg
+    summary_parts.append(f"\"{first_topic}\"")
+    
     if last_msg and last_msg != first_msg:
-        summary_parts.append(f"Ended with: \"{last_msg}...\"")
+        last_topic = last_msg[:80] + "..." if len(last_msg) > 80 else last_msg
+        summary_parts.append(f"and later \"{last_topic}\"")
+    
+    summary_parts.append(f"({msg_count} messages total)")
 
     return " ".join(summary_parts)
 

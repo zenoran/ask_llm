@@ -24,6 +24,30 @@ _llm_client: Any = None
 # Minimum importance to consider for profile attributes (fallback)
 PROFILE_ATTRIBUTE_MIN_IMPORTANCE = 0.6
 
+# Allowed profile attribute keys - ONLY core identity/personality traits
+# Project details, tools, one-time requests should be memories, not profile attributes
+ALLOWED_PROFILE_KEYS = {
+    # Core identity facts
+    "name", "age", "location", "occupation", "job", "employer",
+    "family", "pets", "relationship_status", "gender", "pronouns",
+    "nationality", "languages", "timezone",
+    # Core health (persistent conditions only, not temporary)
+    "health_condition", "disability", "chronic_condition", "allergies",
+    # Core preferences (persistent personality/preferences)
+    "communication_style", "content_tone", "conversation_style",
+    "values", "boundaries", "preferences_summary",
+    # Core interests (high-level, not specific projects)
+    "hobbies", "interests", "favorite_genres", "gaming_preferences",
+}
+
+# Blocked patterns - content that should NEVER be profile attributes
+BLOCKED_PROFILE_PATTERNS = [
+    r"(?:has|have|uses|built|developing|working on|project|system|app|tool)",  # Projects/tools
+    r"(?:available|search|internet|integration)",  # Technical capabilities
+    r"(?:often|sometimes|usually|currently|now|today)",  # Temporal/conditional
+    r"(?:open to|willing to|might|maybe)",  # Conditional/vague
+]
+
 
 def extract_profile_attributes_from_fact(
     fact: ExtractedFact | dict,
@@ -72,7 +96,26 @@ def extract_profile_attributes_from_fact(
         logger.debug(f"[Profile] Invalid profile_attribute format: {profile_attr}")
         return False
     
-    logger.info(f"[Profile] LLM identified attribute: {category}.{key} = '{content[:50]}...'")
+    # Validate that this key is allowed as a profile attribute
+    # Only core identity/personality traits should be profile attributes
+    key_lower = key.lower()
+    if key_lower not in ALLOWED_PROFILE_KEYS:
+        logger.debug(f"[Profile] Key '{key}' not in allowed profile keys, storing as memory only")
+        return False
+    
+    # Check for blocked patterns in content (project details, tools, etc.)
+    content_lower = content.lower()
+    for pattern in BLOCKED_PROFILE_PATTERNS:
+        if re.search(pattern, content_lower):
+            logger.debug(f"[Profile] Content matches blocked pattern '{pattern}', storing as memory only")
+            return False
+    
+    # Require higher importance for profile attributes (core identity only)
+    if importance < 0.7:
+        logger.debug(f"[Profile] Importance {importance:.2f} < 0.7 threshold for profile attribute")
+        return False
+    
+    logger.info(f"[Profile] Validated attribute: {category}.{key} = '{content[:50]}...'")
     
     # Store as profile attribute
     try:
@@ -92,7 +135,7 @@ def extract_profile_attributes_from_fact(
         # If this is a name attribute, also set display_name on the profile
         if key.lower() == "name":
             # Try to extract just the name from content like "User's name is Nick"
-            import re
+            # (re is already imported at module level)
             name_match = re.search(r"(?:name\s+is\s+|named\s+|I'?m\s+|call\s+me\s+)([A-Z][a-z]+)", content, re.IGNORECASE)
             if name_match:
                 name = name_match.group(1)
