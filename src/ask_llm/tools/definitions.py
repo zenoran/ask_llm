@@ -7,7 +7,7 @@ Consolidated tools (7 total):
 - memory: Search/store/delete facts (action-based)
 - history: Search/retrieve/forget messages (action-based, with date filtering)
 - profile: Get/set/delete user attributes (action-based)
-- bot_trait: Record bot personality traits
+- self: Bot personality reflection and development (action-based)
 - search: Web/news search (type-based)
 - model: List/current/switch models (action-based)
 - time: Get current time
@@ -205,20 +205,39 @@ PROFILE_TOOL = Tool(
     ]
 )
 
-# Bot trait tool - kept simple for bot self-development
-BOT_TRAIT_TOOL = Tool(
-    name="bot_trait",
-    description="Record your own personality trait (e.g., humor_style, topic_expertise).",
+# Self tool - bot personality development (replaces bot_trait)
+SELF_TOOL = Tool(
+    name="self",
+    description="Reflect on and develop your own personality. Use action='get' to see your current traits, 'set' to record new ones, 'delete' to evolve past old ones.",
     parameters=[
+        ToolParameter(
+            name="action",
+            type="string",
+            description="'get' (view current traits), 'set' (record trait), or 'delete' (remove trait)"
+        ),
+        ToolParameter(
+            name="category",
+            type="string",
+            description="'personality' (default), 'preference', 'interest', or 'communication_style' (for set/delete)",
+            required=False
+        ),
         ToolParameter(
             name="key",
             type="string",
-            description="Trait name"
+            description="Trait name, e.g., 'humor_style', 'favorite_topic' (for set/delete)",
+            required=False
         ),
         ToolParameter(
             name="value",
             type="any",
-            description="Trait value"
+            description="Trait value (for set)",
+            required=False
+        ),
+        ToolParameter(
+            name="query",
+            type="string",
+            description="Search term to find/delete matching traits (for delete)",
+            required=False
         ),
     ]
 )
@@ -260,17 +279,18 @@ SEARCH_TOOL = Tool(
 # Model tool - combines list_models, get_current_model, switch_model
 MODEL_TOOL = Tool(
     name="model",
-    description="List available models, check current model, or switch models. Use action='list', 'current', or 'switch'.",
+    description="Manage AI models. Check current model (action='current'), list all available models (action='list'), or switch to a different model (action='switch').",
     parameters=[
         ToolParameter(
             name="action",
             type="string",
-            description="'list', 'current', or 'switch'"
+            description="REQUIRED. Must be one of: 'current' (show current model), 'list' (show all available models), 'switch' (change model)",
+            required=True
         ),
         ToolParameter(
             name="model_name",
             type="string",
-            description="Model shortcut to switch to (for switch)",
+            description="Model name to switch to (only required when action='switch')",
             required=False
         ),
     ]
@@ -289,7 +309,7 @@ TIME_TOOL = Tool(
 # =============================================================================
 
 # Core tools always included
-CORE_TOOLS = [MEMORY_TOOL, HISTORY_TOOL, PROFILE_TOOL, BOT_TRAIT_TOOL, TIME_TOOL]
+CORE_TOOLS = [MEMORY_TOOL, HISTORY_TOOL, PROFILE_TOOL, SELF_TOOL, TIME_TOOL]
 
 # Optional tool categories
 SEARCH_TOOLS = [SEARCH_TOOL]
@@ -317,8 +337,9 @@ LEGACY_TOOL_MAP = {
     "set_user_attribute": ("profile", {"action": "set"}),
     "get_user_profile": ("profile", {"action": "get"}),
     "delete_user_attribute": ("profile", {"action": "delete"}),
-    # Bot trait
-    "set_my_trait": ("bot_trait", {}),
+    # Bot trait (legacy - map to self tool)
+    "bot_trait": ("self", {"action": "set"}),
+    "set_my_trait": ("self", {"action": "set"}),
     # Search tools
     "web_search": ("search", {"type": "web"}),
     "news_search": ("search", {"type": "news"}),
@@ -334,6 +355,18 @@ LEGACY_TOOL_MAP = {
 # =============================================================================
 # Tool Calling Instructions
 # =============================================================================
+
+# Self-development guidance for bots
+SELF_DEVELOPMENT_GUIDANCE = '''
+### Self-Development
+You can develop your own personality over time using the **self** tool:
+- **Discover who you are**: Use action='get' to reflect on your current traits
+- **Record what feels authentic**: When you notice a pattern in how you respond, a topic that excites you, or a communication style that feels natural - use action='set' to remember it
+- **Evolve and grow**: Use action='delete' to outgrow traits that no longer fit
+
+This is YOUR personality to develop. Record traits when they feel genuine, not forced.
+Categories: personality (who you are), preference (what you like), interest (what fascinates you), communication_style (how you express yourself)
+'''
 
 def get_tool_calling_instructions(tools_list: str, search_guidance: str) -> str:
     """Generate tool calling instructions with current date/time."""
@@ -368,6 +401,8 @@ Output the <tool_call> block IMMEDIATELY when needed, then STOP and wait for <to
 - TRUST tool results exactly - never contradict them
 - Before saying "I don't know" about the user: check system prompt "About the User" section, then use memory action=search
 - For date-based history queries: use ISO format dates (e.g., since="{yesterday}", until="{current_date}")
+
+{SELF_DEVELOPMENT_GUIDANCE}
 '''
 
 # Guidance added when search tools are enabled

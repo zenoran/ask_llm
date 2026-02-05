@@ -26,7 +26,7 @@ try:
 except ImportError:
     log = logging.getLogger(__name__)
 
-DEFAULT_MAX_ITERATIONS = 5
+DEFAULT_MAX_ITERATIONS = 20
 
 # How many characters to buffer before deciding if response is tool call or text
 DECISION_THRESHOLD = 80
@@ -116,7 +116,7 @@ def stream_with_tools(
     config: "Config | None" = None,
     user_id: str = "",
     bot_id: str = "nova",
-    max_iterations: int = DEFAULT_MAX_ITERATIONS,
+    max_iterations: int | None = None,
     tool_format: ToolFormat | str = ToolFormat.REACT,
     adapter: "ModelAdapter | None" = None,
 ) -> Iterator[str]:
@@ -151,6 +151,11 @@ def stream_with_tools(
     if not user_id:
         raise ValueError("user_id is required for stream_with_tools")
     from ..models.message import Message
+
+    # Use config value if not explicitly provided (0 = unlimited, cap at reasonable max)
+    if max_iterations is None:
+        config_max = getattr(config, 'MAX_TOOL_CALLS_PER_TURN', DEFAULT_MAX_ITERATIONS) if config else DEFAULT_MAX_ITERATIONS
+        max_iterations = config_max if config_max > 0 else 100
 
     if adapter is None:
         log.warning("No adapter provided, using DefaultAdapter")
@@ -219,7 +224,7 @@ def stream_with_tools(
 
             if _looks_like_regular_text(stripped):
                 # Regular text - will buffer and clean at end
-                log.debug(f"Response looks like regular text - buffering for cleaning")
+                # log.debug(f"Response looks like regular text - buffering for cleaning")
                 is_tool_call = False
                 continue
 

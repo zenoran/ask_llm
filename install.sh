@@ -444,7 +444,7 @@ echo
 echo -e "Web Search:"
 echo -e "  Bots with ${YELLOW}uses_search: true${NC} can now search the internet"
 echo -e "  Default: DuckDuckGo (free)"
-echo -e "  Set ${YELLOW}TAVILY_API_KEY${NC} in .env for production search"
+echo -e "  Set ${YELLOW}ASK_LLM_TAVILY_API_KEY${NC} in .env for production search"
 fi
 echo
 echo -e "Configuration: ${YELLOW}~/.config/ask-llm/.env${NC}"

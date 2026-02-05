@@ -76,7 +76,7 @@ def reload_bots():
 @click.option('--bot', 'ask_llm_bot', required=True, help='ask_llm bot ID (e.g., nova, monika)')
 @click.option('--room-name', help='Room name (default: bot name)')
 @click.option('--bot-name', help='Bot display name (default: bot ID title-cased)')
-@click.option('--owner', default='nick', help='Room owner user ID')
+@click.option('--owner', default='user', help='Room owner user ID')
 def provision(ask_llm_bot, room_name, bot_name, owner):
     """Provision a new Nextcloud Talk room and bot via provisioner service."""
     manager = get_nextcloud_manager()

@@ -559,6 +559,24 @@ class UserListResponse(BaseModel):
     total_count: int
 
 
+# Unified Profile Models
+class ProfileDetail(BaseModel):
+    """Generic profile detail with attributes for any entity type (user or bot)."""
+    entity_type: str  # "user" or "bot"
+    entity_id: str
+    display_name: str | None = None
+    description: str | None = None
+    summary: str | None = None
+    attributes: list[UserProfileAttribute] = []
+    created_at: str | None = None
+
+
+class ProfileListResponse(BaseModel):
+    """Response for listing profiles of a given type."""
+    profiles: list[ProfileDetail]
+    total_count: int
+
+
 # =============================================================================
 # Background Service
 # =============================================================================
@@ -645,10 +663,39 @@ class BackgroundService:
         self._available_models = list(models.keys())
         log.debug(f"Loaded {len(self._available_models)} models from config")
         
-        # Set default model from config or use first available
-        self._default_model = self.config.SERVICE_MODEL
+        # Set default model from bot/config selection or use first available
+        bot_manager = BotManager(self.config)
+        selection = bot_manager.select_model(None, bot_slug=self._default_bot)
+        self._default_model = selection.alias
         if not self._default_model and self._available_models:
             self._default_model = self._available_models[0]
+
+    def _resolve_request_model(
+        self,
+        requested_model: str | None,
+        bot_id: str,
+        local_mode: bool,
+    ) -> str:
+        """Resolve the model alias for a request using shared bot/config logic."""
+        bot_manager = BotManager(self.config)
+        selection = bot_manager.select_model(requested_model, bot_slug=bot_id, local_mode=local_mode)
+        model_alias = selection.alias
+
+        if model_alias and model_alias in self._available_models:
+            return model_alias
+
+        # If explicit model is invalid, warn and fall back
+        if model_alias and model_alias not in self._available_models:
+            log.warning(f"Model '{model_alias}' not found, using default.")
+
+        fallback = bot_manager.select_model(None, bot_slug=bot_id, local_mode=local_mode)
+        if fallback.alias and fallback.alias in self._available_models:
+            return fallback.alias
+
+        if self._available_models:
+            return self._available_models[0]
+
+        raise ValueError("No models available.")
     
     async def _start_generation(self) -> tuple[threading.Event, threading.Event]:
         """Start a new generation, cancelling and waiting for any in-progress one.
@@ -871,24 +918,18 @@ class BackgroundService:
         # Log incoming request (verbose mode will show the full payload)
         log.api_request(ctx, request.model_dump(exclude_none=True))
         
-        # Resolve model - use default if not specified or not found
-        model_alias: str | None = request.model
-        if not model_alias or model_alias not in self._available_models:
-            if model_alias and model_alias in ("mira", "nova", "sage") and self._default_model:
-                # Bot name passed as model - use default model
-                model_alias = self._default_model
-            elif self._default_model:
-                if model_alias:
-                    log.warning(f"Model '{request.model}' not found, using default: {self._default_model}")
-                model_alias = self._default_model
-            else:
-                log.api_error(ctx, f"Model '{request.model}' not found", 400)
-                raise ValueError(f"Model '{request.model}' not found. Available: {', '.join(self._available_models)}")
-        
-        ctx.model = model_alias
         bot_id = request.bot_id or self._default_bot
         user_id = request.user or self.config.DEFAULT_USER
         local_mode = not request.augment_memory
+
+        # Resolve model using shared bot/config logic
+        try:
+            model_alias = self._resolve_request_model(request.model, bot_id, local_mode)
+        except Exception as e:
+            log.api_error(ctx, str(e), 400)
+            raise
+
+        ctx.model = model_alias
         
         # Debug: Show memory settings
         log.debug(
@@ -1043,23 +1084,16 @@ class BackgroundService:
         # Log incoming request (verbose mode will show the full payload)
         log.api_request(ctx, request.model_dump(exclude_none=True))
         
-        # Resolve model - use default if not specified or not found
-        model_alias: str | None = request.model
-        if not model_alias or model_alias not in self._available_models:
-            if model_alias and model_alias in ("mira", "nova", "sage") and self._default_model:
-                # Bot name passed as model - use default model
-                model_alias = self._default_model
-            elif self._default_model:
-                if model_alias:
-                    log.warning(f"Model '{request.model}' not found, using default: {self._default_model}")
-                model_alias = self._default_model
-            else:
-                log.api_error(ctx, f"Model '{request.model}' not found", 400)
-                raise ValueError(f"Model '{request.model}' not found.")
-        
         bot_id = request.bot_id or self._default_bot
         user_id = request.user or self.config.DEFAULT_USER
         local_mode = not request.augment_memory
+
+        # Resolve model using shared bot/config logic
+        try:
+            model_alias = self._resolve_request_model(request.model, bot_id, local_mode)
+        except Exception as e:
+            log.api_error(ctx, str(e), 400)
+            raise
         
         # Get cached AskLLM instance
         ask_llm = self._get_ask_llm(model_alias, bot_id, user_id, local_mode)
@@ -1625,8 +1659,8 @@ class BackgroundService:
     async def _process_profile_maintenance(self, task: Task) -> dict:
         """Process profile maintenance - consolidate attributes into summary.
         
-        Uses the same model as chat to avoid loading new model into VRAM.
-        Falls back to loading the default model if no cached client available.
+        Prefers a loaded local model to avoid VRAM churn and remote providers.
+        Falls back to configured/local defaults if no cached model available.
         """
         from ..memory.profile_maintenance import ProfileMaintenanceService
         from ..profiles import ProfileManager
@@ -1634,9 +1668,79 @@ class BackgroundService:
         entity_id = task.payload.get("entity_id", task.user_id)
         entity_type = task.payload.get("entity_type", "user")
         dry_run = task.payload.get("dry_run", False)
-        model_to_use = task.payload.get("model") or self._default_model
+        def is_openai_model(alias: str | None) -> bool:
+            if not alias:
+                return False
+            model_def = self.config.defined_models.get("models", {}).get(alias, {})
+            return model_def.get("type") == "openai"
         
-        log.info(f"🔧 Profile maintenance: {entity_type}/{entity_id}")
+        def first_local_cached() -> str | None:
+            for alias in self._client_cache.keys():
+                if not is_openai_model(alias):
+                    return alias
+            for (alias, _, _), _ask_llm in self._ask_llm_cache.items():
+                if not is_openai_model(alias):
+                    return alias
+            return None
+        
+        def first_local_available() -> str | None:
+            for alias in self._available_models:
+                if not is_openai_model(alias):
+                    return alias
+            return None
+        
+        requested_model = task.payload.get("model") or (self.config.PROFILE_MAINTENANCE_MODEL or None)
+        model_to_use: str | None = None
+        
+        if requested_model:
+            try:
+                model_to_use = self._resolve_request_model(
+                    requested_model,
+                    task.bot_id or self._default_bot,
+                    local_mode=True,
+                )
+            except Exception as e:
+                log.error(f"Failed to resolve model for profile maintenance: {e}")
+                return {"error": f"Failed to resolve model: {e}"}
+        
+        # Prefer currently loaded local model if no explicit model requested
+        if not model_to_use:
+            current_model = self._model_lifecycle.current_model
+            if current_model and not is_openai_model(current_model):
+                model_to_use = current_model
+        
+        # Fall back to any cached local model
+        if not model_to_use:
+            model_to_use = first_local_cached()
+        
+        # Last resort: resolve a local default
+        if not model_to_use:
+            try:
+                model_to_use = self._resolve_request_model(
+                    None,
+                    task.bot_id or self._default_bot,
+                    local_mode=True,
+                )
+            except Exception as e:
+                log.error(f"Failed to resolve model for profile maintenance: {e}")
+                return {"error": f"Failed to resolve model: {e}"}
+        
+        # Never use OpenAI for profile maintenance; fall back to any local model
+        if not model_to_use or is_openai_model(model_to_use):
+            fallback_local = first_local_cached() or first_local_available()
+            if fallback_local and not is_openai_model(fallback_local):
+                if model_to_use:
+                    log.warning(
+                        f"Profile maintenance requested model '{model_to_use}' is openai; "
+                        f"using local '{fallback_local}' instead"
+                    )
+                model_to_use = fallback_local
+            else:
+                err = "No local model available for profile maintenance"
+                log.error(err)
+                return {"error": err}
+        
+        log.info(f"🔧 Profile maintenance: {entity_type}/{entity_id} (model={model_to_use})")
         
         # Get or create profile manager
         profile_manager = ProfileManager(self.config)
@@ -1898,7 +2002,7 @@ try:
         bot_id: str = Field(description="ask_llm bot ID (e.g., nova, monika)")
         room_name: str | None = Field(default=None, description="Room name (default: bot name)")
         bot_name: str | None = Field(default=None, description="Bot display name (default: bot ID)")
-        owner_user_id: str = Field(default="nick", description="Room owner")
+        owner_user_id: str = Field(default="user", description="Room owner")
 
     class NextcloudProvisionResponse(BaseModel):
         """Response from provisioning."""
@@ -2331,6 +2435,198 @@ try:
             raise
         except Exception as e:
             log.error(f"Failed to delete user attribute: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    # =========================================================================
+    # Unified Profile Endpoints
+    # =========================================================================
+
+    @app.get("/v1/profiles/{entity_id}", response_model=ProfileDetail, tags=["Profiles"])
+    async def get_profile_auto(entity_id: str):
+        """Get profile with attributes - auto-detects entity type (user or bot).
+
+        Since entity IDs are unique across users and bots, this endpoint automatically
+        determines whether the entity is a user or bot by checking both tables.
+        The response includes the entity_type field to indicate what was found.
+
+        Note: For listing all profiles of a type, use GET /v1/profiles/list/{entity_type}
+        """
+        # Reject reserved words that should use the list endpoint
+        if entity_id in ("user", "bot"):
+            raise HTTPException(
+                status_code=400,
+                detail=f"'{entity_id}' is a reserved word. To list all {entity_id} profiles, use GET /v1/profiles/list/{entity_id}"
+            )
+
+        service = get_service()
+
+        try:
+            from ..profiles import ProfileManager, EntityType
+
+            manager = ProfileManager(service.config)
+
+            # Try USER first, then BOT
+            profile = manager.get_profile(EntityType.USER, entity_id)
+            entity_type_str = "user"
+            entity_type_enum = EntityType.USER
+
+            if not profile:
+                profile = manager.get_profile(EntityType.BOT, entity_id)
+                entity_type_str = "bot"
+                entity_type_enum = EntityType.BOT
+
+            if not profile:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"No profile found for entity '{entity_id}'"
+                )
+
+            attributes = manager.get_all_attributes(entity_type_enum, entity_id)
+
+            return ProfileDetail(
+                entity_type=entity_type_str,
+                entity_id=entity_id,
+                display_name=profile.display_name,
+                description=profile.description,
+                summary=profile.summary,
+                attributes=[
+                    UserProfileAttribute(
+                        id=attr.id,
+                        category=attr.category.value if hasattr(attr.category, 'value') else str(attr.category),
+                        key=attr.key,
+                        value=attr.value,
+                        confidence=attr.confidence,
+                        source=attr.source,
+                        created_at=attr.created_at.isoformat() if attr.created_at else None,
+                        updated_at=attr.updated_at.isoformat() if attr.updated_at else None,
+                    )
+                    for attr in attributes
+                ],
+                created_at=profile.created_at.isoformat() if profile.created_at else None,
+            )
+        except HTTPException:
+            raise
+        except Exception as e:
+            log.error(f"Failed to get profile for '{entity_id}': {e}")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.get("/v1/profiles/list/{entity_type}", response_model=ProfileListResponse, tags=["Profiles"])
+    async def list_profiles(entity_type: str):
+        """List all profiles of a given type (user or bot).
+
+        Use entity_type='user' for user profiles, 'bot' for bot profiles.
+        """
+        service = get_service()
+
+        # Validate entity_type
+        if entity_type not in ("user", "bot"):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid entity_type '{entity_type}'. Must be 'user' or 'bot'."
+            )
+
+        try:
+            from ..profiles import ProfileManager, EntityType
+
+            # Convert string to EntityType enum
+            entity_type_enum = EntityType.USER if entity_type == "user" else EntityType.BOT
+
+            manager = ProfileManager(service.config)
+            profiles = manager.list_profiles(entity_type_enum)
+
+            result_profiles = []
+            for profile in profiles:
+                attributes = manager.get_all_attributes(entity_type_enum, profile.entity_id)
+                result_profiles.append(ProfileDetail(
+                    entity_type=entity_type,
+                    entity_id=profile.entity_id,
+                    display_name=profile.display_name,
+                    description=profile.description,
+                    summary=profile.summary,
+                    attributes=[
+                        UserProfileAttribute(
+                            id=attr.id,
+                            category=attr.category.value if hasattr(attr.category, 'value') else str(attr.category),
+                            key=attr.key,
+                            value=attr.value,
+                            confidence=attr.confidence,
+                            source=attr.source,
+                            created_at=attr.created_at.isoformat() if attr.created_at else None,
+                            updated_at=attr.updated_at.isoformat() if attr.updated_at else None,
+                        )
+                        for attr in attributes
+                    ],
+                    created_at=profile.created_at.isoformat() if profile.created_at else None,
+                ))
+
+            return ProfileListResponse(
+                profiles=result_profiles,
+                total_count=len(result_profiles),
+            )
+        except HTTPException:
+            raise
+        except Exception as e:
+            log.error(f"Failed to list {entity_type} profiles: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.get("/v1/profiles/{entity_type}/{entity_id}", response_model=ProfileDetail, tags=["Profiles"])
+    async def get_profile(entity_type: str, entity_id: str):
+        """Get profile with attributes for any entity type (user or bot).
+
+        DEPRECATED: Use GET /v1/profiles/{entity_id} instead for auto-detection.
+        This endpoint is maintained for backward compatibility.
+        """
+        service = get_service()
+
+        # Validate entity_type
+        if entity_type not in ("user", "bot"):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid entity_type '{entity_type}'. Must be 'user' or 'bot'."
+            )
+
+        try:
+            from ..profiles import ProfileManager, EntityType
+
+            # Convert string to EntityType enum
+            entity_type_enum = EntityType.USER if entity_type == "user" else EntityType.BOT
+
+            manager = ProfileManager(service.config)
+            profile = manager.get_profile(entity_type_enum, entity_id)
+
+            if not profile:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"{entity_type.capitalize()} '{entity_id}' not found"
+                )
+
+            attributes = manager.get_all_attributes(entity_type_enum, entity_id)
+
+            return ProfileDetail(
+                entity_type=entity_type,
+                entity_id=entity_id,
+                display_name=profile.display_name,
+                description=profile.description,
+                summary=profile.summary,
+                attributes=[
+                    UserProfileAttribute(
+                        id=attr.id,
+                        category=attr.category.value if hasattr(attr.category, 'value') else str(attr.category),
+                        key=attr.key,
+                        value=attr.value,
+                        confidence=attr.confidence,
+                        source=attr.source,
+                        created_at=attr.created_at.isoformat() if attr.created_at else None,
+                        updated_at=attr.updated_at.isoformat() if attr.updated_at else None,
+                    )
+                    for attr in attributes
+                ],
+                created_at=profile.created_at.isoformat() if profile.created_at else None,
+            )
+        except HTTPException:
+            raise
+        except Exception as e:
+            log.error(f"Failed to get {entity_type} profile: {e}")
             raise HTTPException(status_code=500, detail=str(e))
 
     # -------------------------------------------------------------------------

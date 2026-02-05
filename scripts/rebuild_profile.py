@@ -9,8 +9,8 @@ This script:
 4. Optionally regenerates the profile summary
 
 Usage:
-    python scripts/rebuild_profile.py --user nick --bot nova --days 30
-    python scripts/rebuild_profile.py --user nick --dry-run
+    python scripts/rebuild_profile.py --user user --bot nova --days 30
+    python scripts/rebuild_profile.py --user user --dry-run
 """
 
 import argparse
@@ -296,7 +296,7 @@ def regenerate_profile_summary(
 
 def main():
     parser = argparse.ArgumentParser(description="Rebuild user profile from message history")
-    parser.add_argument("--user", "-u", default="nick", help="User ID to rebuild profile for")
+    parser.add_argument("--user", "-u", default="user", help="User ID to rebuild profile for")
     parser.add_argument("--bot", "-b", default="nova", help="Bot ID")
     parser.add_argument("--days", "-d", type=int, default=30, help="Days of history to process")
     parser.add_argument("--limit", "-l", type=int, default=0, help="Limit number of turns to process (0=all)")

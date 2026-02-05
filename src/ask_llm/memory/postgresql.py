@@ -173,7 +173,7 @@ class PostgreSQLMemoryBackend(MemoryBackend):
             embedding_dim = getattr(config, 'MEMORY_EMBEDDING_DIM', 384)
         
         # Get PostgreSQL connection settings from config
-        host = getattr(config, 'POSTGRES_HOST', 'postgres.home')
+        host = getattr(config, 'POSTGRES_HOST', 'localhost')
         port = int(getattr(config, 'POSTGRES_PORT', 5432))
         user = getattr(config, 'POSTGRES_USER', 'askllm')
         password = getattr(config, 'POSTGRES_PASSWORD', '')

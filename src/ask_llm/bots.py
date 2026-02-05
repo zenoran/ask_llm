@@ -26,8 +26,8 @@ def get_repo_bots_yaml_path() -> Path:
 
 def get_user_bots_yaml_path() -> Path:
     """Get the path to user bots.yaml (~/.config/ask-llm/bots.yaml)."""
-    from ask_llm.utils.config import DOTENV_PATH
-    return DOTENV_PATH.parent / "bots.yaml"
+    from ask_llm.utils.config import get_default_config_dir
+    return get_default_config_dir() / "bots.yaml"
 
 
 # Backwards compatibility alias
@@ -54,6 +54,14 @@ class Bot:
     def __post_init__(self):
         # Ensure slug is lowercase and valid
         self.slug = self.slug.lower().strip()
+
+
+@dataclass
+class ModelSelection:
+    """Resolved model selection with source metadata."""
+
+    alias: str | None
+    source: str  # explicit | bot_default | config_default | none
 
 
 # Global bot registry - populated from YAML on module load
@@ -319,6 +327,53 @@ class BotManager:
                 requires_memory=False,
             )
         return bot
+
+    def _is_model_alias(self, alias: str) -> bool:
+        """Check if an alias exists in models.yaml."""
+        if not self.config or not hasattr(self.config, "defined_models"):
+            return False
+        models = getattr(self.config, "defined_models", {}).get("models", {})
+        return alias in models
+
+    def select_model(
+        self,
+        requested_model: str | None,
+        bot_slug: str | None = None,
+        local_mode: bool = False,
+    ) -> ModelSelection:
+        """Resolve the effective model alias for a request.
+
+        Priority:
+        1) Explicit request model (unless it matches a bot slug and isn't a model alias)
+        2) Bot default_model
+        3) Config DEFAULT_MODEL_ALIAS
+        """
+        model_alias = requested_model.strip() if requested_model else None
+        if model_alias == "":
+            model_alias = None
+
+        # If the provided model matches a bot slug (and isn't a model alias),
+        # treat it as no model specified.
+        if model_alias:
+            bot_match = self.get_bot(model_alias)
+            if bot_match and not self._is_model_alias(model_alias):
+                model_alias = None
+
+        if model_alias:
+            return ModelSelection(alias=model_alias, source="explicit")
+
+        bot = self.get_bot(bot_slug) if bot_slug else None
+        if not bot:
+            bot = self.get_default_bot(local_mode=local_mode)
+
+        if bot and bot.default_model:
+            return ModelSelection(alias=bot.default_model, source="bot_default")
+
+        config_default = getattr(self.config, "DEFAULT_MODEL_ALIAS", None) if self.config else None
+        if config_default:
+            return ModelSelection(alias=config_default, source="config_default")
+
+        return ModelSelection(alias=None, source="none")
     
     def list_bots(self) -> list[Bot]:
         """List all available bots.

@@ -7,7 +7,7 @@ Consolidated tools (7 total):
 - memory: action-based (search/store/delete)
 - history: action-based (search/recent/forget) with date filtering
 - profile: action-based (get/set/delete)
-- bot_trait: key/value for bot personality
+- self: action-based (get/set/delete) for bot personality development
 - search: type-based (web/news)
 - model: action-based (list/current/switch)
 - time: current time
@@ -116,8 +116,8 @@ class ToolExecutor:
     for injection back into the conversation.
     """
 
-    # Maximum number of tool calls per conversation turn (prevent infinite loops)
-    MAX_TOOL_CALLS_PER_TURN = 5
+    # Default maximum number of tool calls per conversation turn (prevent infinite loops)
+    DEFAULT_MAX_TOOL_CALLS = 20
 
     def __init__(
         self,
@@ -147,8 +147,10 @@ class ToolExecutor:
         self.model_lifecycle = model_lifecycle
         self.config = config
         self.user_id = user_id
-        self.bot_id = bot_id
+        self.bot_id = bot_id.lower().strip()  # Normalize to match ProfileManager
         self._call_count = 0
+        # Get max tool calls from config (0 = unlimited)
+        self._max_tool_calls = getattr(config, 'MAX_TOOL_CALLS_PER_TURN', self.DEFAULT_MAX_TOOL_CALLS) if config else self.DEFAULT_MAX_TOOL_CALLS
 
         # Tool dispatch table - maps tool names to handler methods
         # New consolidated tools
@@ -157,7 +159,8 @@ class ToolExecutor:
             "memory": self._execute_memory,
             "history": self._execute_history,
             "profile": self._execute_profile,
-            "bot_trait": self._execute_bot_trait,
+            "self": self._execute_self,
+            "bot_trait": self._execute_self,  # Legacy name
             "search": self._execute_search,
             "model": self._execute_model,
             "time": self._execute_time,
@@ -172,7 +175,7 @@ class ToolExecutor:
             "set_user_attribute": self._execute_profile,
             "get_user_profile": self._execute_profile,
             "delete_user_attribute": self._execute_profile,
-            "set_my_trait": self._execute_bot_trait,
+            "set_my_trait": self._execute_self,  # Legacy name
             "web_search": self._execute_search,
             "news_search": self._execute_search,
             "list_models": self._execute_model,
@@ -187,7 +190,10 @@ class ToolExecutor:
 
     def can_execute_more(self) -> bool:
         """Check if more tool calls are allowed this turn."""
-        return self._call_count < self.MAX_TOOL_CALLS_PER_TURN
+        # 0 means unlimited
+        if self._max_tool_calls == 0:
+            return True
+        return self._call_count < self._max_tool_calls
 
     def execute(self, tool_call: ToolCall) -> str:
         """Execute a tool call and return formatted result.
@@ -204,7 +210,7 @@ class ToolExecutor:
             return format_tool_result(
                 tool_call.name,
                 None,
-                error=f"Too many tool calls this turn (max {self.MAX_TOOL_CALLS_PER_TURN})"
+                error=f"Too many tool calls this turn (max {self._max_tool_calls})"
             )
 
         # Normalize legacy tool names to consolidated tools
@@ -634,6 +640,13 @@ class ToolExecutor:
                 error="action='set' requires 'category' and 'key' parameters"
             )
 
+        if value is None:
+            return format_tool_result(
+                tool_call.name,
+                None,
+                error="action='set' requires 'value' parameter (cannot be null)"
+            )
+
         valid_categories = ["preference", "fact", "interest", "communication", "context"]
         if category.lower() not in valid_categories:
             return format_tool_result(
@@ -724,8 +737,8 @@ class ToolExecutor:
             logger.error(f"Delete user attribute failed: {e}")
             return format_tool_result(tool_call.name, None, error=str(e))
 
-    def _execute_bot_trait(self, tool_call: ToolCall) -> str:
-        """Execute bot_trait tool - record bot personality traits."""
+    def _execute_self(self, tool_call: ToolCall) -> str:
+        """Execute self tool - bot personality reflection and development."""
         if not self.profile_manager:
             return format_tool_result(
                 tool_call.name,
@@ -733,23 +746,142 @@ class ToolExecutor:
                 error="Profile system not available"
             )
 
-        key = tool_call.arguments.get("key", "")
+        action = tool_call.arguments.get("action", "").lower()
+
+        if action == "get":
+            return self._self_get(tool_call)
+        elif action == "set":
+            return self._self_set(tool_call)
+        elif action == "delete":
+            return self._self_delete(tool_call)
+        else:
+            return format_tool_result(
+                tool_call.name,
+                None,
+                error=f"Invalid action: '{action}'. Use 'get', 'set', or 'delete'."
+            )
+
+    def _self_get(self, tool_call: ToolCall) -> str:
+        """Get all bot personality traits for self-reflection."""
+        try:
+            from ..profiles import EntityType
+
+            # Get all attributes for this bot
+            attributes = self.profile_manager.get_all_attributes(
+                EntityType.BOT,
+                self.bot_id
+            )
+
+            if not attributes:
+                return format_tool_result(
+                    tool_call.name,
+                    "You haven't developed any personality traits yet. As you interact and discover patterns in your responses, use action='set' to record traits that feel authentic to who you're becoming."
+                )
+
+            # Group by category
+            by_category: dict[str, list] = {}
+            for attr in attributes:
+                by_category.setdefault(attr.category, []).append(attr)
+
+            # Format nicely for self-reflection
+            lines = ["Your current traits:"]
+            lines.append("")
+
+            category_labels = {
+                "personality": "Who you are",
+                "preference": "What you prefer",
+                "interest": "What fascinates you",
+                "communication_style": "How you communicate",
+                "communication": "How you communicate",
+            }
+
+            for category in sorted(by_category.keys()):
+                attrs = by_category[category]
+                label = category_labels.get(category, category.title())
+                lines.append(f"**{label}**:")
+
+                for attr in sorted(attrs, key=lambda a: a.key):
+                    # Format value
+                    if isinstance(attr.value, list):
+                        val_str = ", ".join(str(v) for v in attr.value)
+                    elif isinstance(attr.value, bool):
+                        val_str = "yes" if attr.value else "no"
+                    else:
+                        val_str = str(attr.value)
+
+                    # Format key (convert snake_case to readable)
+                    key_str = attr.key.replace("_", " ")
+                    lines.append(f"  - {key_str}: {val_str}")
+
+                lines.append("")
+
+            return format_tool_result(tool_call.name, "\n".join(lines))
+
+        except Exception as e:
+            logger.exception(f"Self get failed: {e}")
+            return format_tool_result(tool_call.name, None, error="Failed to retrieve traits. Please try again.")
+
+    def _self_set(self, tool_call: ToolCall) -> str:
+        """Record a bot personality trait."""
+        category = tool_call.arguments.get("category", "personality")
+        key = tool_call.arguments.get("key", "").strip()
         value = tool_call.arguments.get("value")
 
         if not key:
             return format_tool_result(
                 tool_call.name,
                 None,
-                error="Missing required parameter: key"
+                error="action='set' requires 'key' parameter"
+            )
+
+        if value is None:
+            return format_tool_result(
+                tool_call.name,
+                None,
+                error="action='set' requires 'value' parameter (cannot be null)"
+            )
+
+        # Validate key length and characters
+        if len(key) > 100:
+            return format_tool_result(
+                tool_call.name,
+                None,
+                error=f"Key too long (max 100 chars, got {len(key)})"
+            )
+
+        # Validate value size to prevent resource exhaustion
+        if value is not None:
+            value_str = str(value)
+            if len(value_str) > 10000:
+                return format_tool_result(
+                    tool_call.name,
+                    None,
+                    error=f"Value too large (max 10KB, got {len(value_str)} chars)"
+                )
+
+        # Normalize category
+        category = category.lower().strip()
+
+        # Map "communication" to "communication_style" for consistency
+        if category == "communication":
+            category = "communication_style"
+
+        # Validate category
+        valid_categories = ["personality", "preference", "interest", "communication_style"]
+        if category not in valid_categories:
+            return format_tool_result(
+                tool_call.name,
+                None,
+                error=f"Invalid category. Must be one of: {', '.join(valid_categories)}"
             )
 
         try:
-            from ..profiles import EntityType, AttributeCategory
+            from ..profiles import EntityType
 
             self.profile_manager.set_attribute(
                 entity_type=EntityType.BOT,
                 entity_id=self.bot_id,
-                category=AttributeCategory.PERSONALITY,
+                category=category,
                 key=key,
                 value=value,
                 confidence=1.0,
@@ -758,12 +890,80 @@ class ToolExecutor:
 
             return format_tool_result(
                 tool_call.name,
-                f"Recorded personality trait: {key} = {value}"
+                f"Recorded {category} trait: {key} = {value}"
             )
 
         except Exception as e:
-            logger.error(f"Set bot trait failed: {e}")
-            return format_tool_result(tool_call.name, None, error=str(e))
+            logger.exception(f"Self set failed: {e}")
+            return format_tool_result(tool_call.name, None, error="Failed to save trait. Please try again.")
+
+    def _self_delete(self, tool_call: ToolCall) -> str:
+        """Delete bot personality traits (evolve past old patterns)."""
+        category = tool_call.arguments.get("category", "").strip()
+        key = tool_call.arguments.get("key", "").strip()
+        query = tool_call.arguments.get("query", "").strip()
+
+        if not query and (not category or not key):
+            return format_tool_result(
+                tool_call.name,
+                None,
+                error="action='delete' requires ('category' and 'key') or 'query' parameter"
+            )
+
+        # Validate query length to prevent accidental bulk deletes
+        if query and len(query) < 2:
+            return format_tool_result(
+                tool_call.name,
+                None,
+                error="Query must be at least 2 characters (to prevent accidental bulk deletes)"
+            )
+
+        try:
+            from ..profiles import EntityType
+
+            # Search and delete by query
+            if query:
+                count, deleted = self.profile_manager.search_and_delete_attributes(
+                    entity_type=EntityType.BOT,
+                    entity_id=self.bot_id,
+                    query=query,
+                    category=category if category else None,
+                )
+
+                if count > 0:
+                    result = f"You've evolved past {count} trait(s) matching '{query}':\n" + "\n".join(f"- {d}" for d in deleted[:5])
+                    if count > 5:
+                        result += f"\n... and {count - 5} more"
+                    return format_tool_result(tool_call.name, result)
+                else:
+                    return format_tool_result(
+                        tool_call.name,
+                        f"No traits found matching '{query}'"
+                    )
+
+            # Delete specific trait
+            success = self.profile_manager.delete_attribute(
+                entity_type=EntityType.BOT,
+                entity_id=self.bot_id,
+                category=category.lower(),
+                key=key,
+            )
+
+            if success:
+                return format_tool_result(
+                    tool_call.name,
+                    f"You've evolved past this trait: {category}.{key}"
+                )
+            else:
+                return format_tool_result(
+                    tool_call.name,
+                    None,
+                    error=f"Trait {category}.{key} not found"
+                )
+
+        except Exception as e:
+            logger.exception(f"Self delete failed: {e}")
+            return format_tool_result(tool_call.name, None, error="Failed to delete trait. Please try again.")
 
     def _execute_search(self, tool_call: ToolCall) -> str:
         """Execute search tool - web or news search."""
@@ -833,6 +1033,11 @@ class ToolExecutor:
             )
 
         action = tool_call.arguments.get("action", "").lower()
+        
+        # Default to 'current' if action is empty (common when LLM doesn't provide required arg)
+        if not action:
+            logger.debug("Model tool called with empty action, defaulting to 'current'")
+            action = "current"
 
         if action == "list":
             return self._model_list(tool_call)

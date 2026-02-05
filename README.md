@@ -255,13 +255,13 @@ The memory system is designed to evolve with you, not fossilize into static fact
 
 ### Configuration
 
-All settings use `ASK_LLM_` prefix in `~/.config/ask-llm/.env`:
+All settings use `ASK_LLM_` prefix. The app loads `.env` from the repo root if it contains `ASK_LLM_` keys; otherwise it falls back to `~/.config/ask-llm/.env` (or set `ASK_LLM_ENV_FILE` to override):
 
 ```bash
 # Core
 ASK_LLM_DEFAULT_MODEL_ALIAS=gpt-5.2-chat-latest
 ASK_LLM_DEFAULT_BOT=mira
-ASK_LLM_DEFAULT_USER=nick
+ASK_LLM_DEFAULT_USER=your-user-id
 
 # Memory Decay (anti-fossilization)
 ASK_LLM_MEMORY_DECAY_ENABLED=true

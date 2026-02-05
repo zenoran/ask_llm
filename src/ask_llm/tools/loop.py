@@ -29,7 +29,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # Default limits
-DEFAULT_MAX_ITERATIONS = 5
+DEFAULT_MAX_ITERATIONS = 20
 
 
 class ToolLoop:
@@ -44,7 +44,7 @@ class ToolLoop:
         config: "Config | None" = None,
         user_id: str = "",  # Required - must be passed explicitly
         bot_id: str = "nova",
-        max_iterations: int = DEFAULT_MAX_ITERATIONS,
+        max_iterations: int | None = None,
         tool_format: ToolFormat | str = ToolFormat.XML,
         tools: list | None = None,
         adapter: "ModelAdapter | None" = None,
@@ -58,7 +58,7 @@ class ToolLoop:
             config: Application config (used for lazy search setup).
             user_id: Current user ID (required).
             bot_id: Current bot ID.
-            max_iterations: Maximum tool call iterations per turn.
+            max_iterations: Maximum tool call iterations per turn (None = use config default).
             adapter: Model adapter for model-specific stop sequences and output cleaning.
         """
         if not user_id:
@@ -72,7 +72,12 @@ class ToolLoop:
             user_id=user_id,
             bot_id=bot_id,
         )
-        self.max_iterations = max_iterations
+        # Use config value if not explicitly provided (0 = unlimited, cap at reasonable max)
+        if max_iterations is None:
+            config_max = getattr(config, 'MAX_TOOL_CALLS_PER_TURN', DEFAULT_MAX_ITERATIONS) if config else DEFAULT_MAX_ITERATIONS
+            self.max_iterations = config_max if config_max > 0 else 100
+        else:
+            self.max_iterations = max_iterations
         self.tool_context: list[dict] = []  # Track tool interactions for history
         self.tool_format = tool_format
         self.tools = tools

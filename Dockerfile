@@ -93,11 +93,7 @@ RUN mkdir -p /app/.run /app/.logs /root/.config/ask-llm
 # Set environment variables
 ENV PATH="/app/.venv/bin:$PATH" \
     TZ=America/New_York \
-    PYTHONUNBUFFERED=1 \
-    ASK_LLM_MEMORY_SERVER_HOST=0.0.0.0 \
-    ASK_LLM_MEMORY_SERVER_PORT=8001 \
-    ASK_LLM_SERVICE_HOST=0.0.0.0 \
-    ASK_LLM_SERVICE_PORT=8642
+    PYTHONUNBUFFERED=1
 
 # Set system timezone
 RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone

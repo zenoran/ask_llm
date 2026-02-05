@@ -3,8 +3,8 @@
 Clean up bloated profile attributes, keeping only core identity traits.
 
 Usage:
-    python scripts/cleanup_profile.py --user nick --dry-run
-    python scripts/cleanup_profile.py --user nick --execute
+    python scripts/cleanup_profile.py --user user --dry-run
+    python scripts/cleanup_profile.py --user user --execute
 """
 
 import argparse
@@ -108,7 +108,7 @@ def cleanup_profile(user_id: str, dry_run: bool = True):
 
 def main():
     parser = argparse.ArgumentParser(description="Clean up bloated profile attributes")
-    parser.add_argument("--user", "-u", default="nick", help="User ID to cleanup")
+    parser.add_argument("--user", "-u", default="user", help="User ID to cleanup")
     parser.add_argument("--execute", action="store_true", help="Actually remove attributes (default is dry run)")
     
     args = parser.parse_args()

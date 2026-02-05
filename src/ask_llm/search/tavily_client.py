@@ -36,7 +36,7 @@ class TavilyClient(SearchClient):
     - Fast response times (~180ms p50)
     - Clean, structured responses
     
-    Requires TAVILY_API_KEY environment variable.
+    Configure via ASK_LLM_TAVILY_API_KEY in the app .env.
     """
     
     PROVIDER = SearchProvider.TAVILY

@@ -56,6 +56,12 @@ TOOL_NAME_ALIASES = {
     "search": "web_search",
     "internet_search": "web_search",
     "google": "web_search",
+    # Model tool variations
+    "current_model": "model",
+    "get_model": "model",
+    "list_models": "model",
+    "show_models": "model",
+    "available_models": "model",
 }
 
 

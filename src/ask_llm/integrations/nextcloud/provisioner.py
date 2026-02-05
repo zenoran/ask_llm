@@ -9,9 +9,9 @@ import httpx
 
 log = logging.getLogger(__name__)
 
-# Provisioner configuration from environment
-PROVISIONER_URL = os.getenv('TALK_PROVISIONER_URL', 'http://ubuntu.home:8790')
-PROVISIONER_TOKEN = os.getenv('TALK_PROVISIONER_TOKEN')
+# Provisioner configuration from environment (prefer ASK_LLM_ prefix)
+PROVISIONER_URL = os.getenv('ASK_LLM_TALK_PROVISIONER_URL') or os.getenv('TALK_PROVISIONER_URL', 'http://localhost:8790')
+PROVISIONER_TOKEN = os.getenv('ASK_LLM_TALK_PROVISIONER_TOKEN') or os.getenv('TALK_PROVISIONER_TOKEN')
 
 
 @dataclass
@@ -48,7 +48,7 @@ class ProvisionerClient:
     ):
         if not token:
             raise ValueError(
-                "TALK_PROVISIONER_TOKEN environment variable is required"
+                "ASK_LLM_TALK_PROVISIONER_TOKEN (or TALK_PROVISIONER_TOKEN) environment variable is required"
             )
 
         self.base_url = base_url.rstrip('/')
@@ -67,7 +67,7 @@ class ProvisionerClient:
         room_name: str,
         bot_name: str,
         webhook_url: Optional[str] = None,
-        owner_user_id: str = "nick",
+        owner_user_id: str = "user",
         room_description: Optional[str] = None,
         bot_description: Optional[str] = None,
     ) -> ProvisionResult:

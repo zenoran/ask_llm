@@ -36,18 +36,58 @@ def is_llama_cpp_available() -> bool:
     # Restore original or remove if too obvious
     return importlib.util.find_spec("llama_cpp") is not None
 
+def get_default_config_dir() -> Path:
+    xdg_config_home = os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config"))
+    default_config_dir = Path(xdg_config_home) / "ask-llm"
+    default_config_dir.mkdir(parents=True, exist_ok=True)
+    return default_config_dir
+
+
 def get_default_models_yaml_path() -> Path:
     env_path = os.environ.get("ASK_LLM_MODELS_CONFIG_PATH")
     if env_path:
         return Path(env_path).expanduser().resolve()
 
-    xdg_config_home = os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config"))
-    default_config_dir = Path(xdg_config_home) / "ask-llm"
-    default_config_dir.mkdir(parents=True, exist_ok=True)
-    return default_config_dir / "models.yaml"
+    return get_default_config_dir() / "models.yaml"
 
 DEFAULT_MODELS_YAML = get_default_models_yaml_path()
-DOTENV_PATH = DEFAULT_MODELS_YAML.parent / ".env"
+
+
+def _env_file_has_ask_llm_key(path: Path) -> bool:
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            if stripped.startswith("export "):
+                stripped = stripped[len("export "):].strip()
+            if "=" not in stripped:
+                continue
+            key = stripped.split("=", 1)[0].strip()
+            if key.startswith("ASK_LLM_"):
+                return True
+    except OSError:
+        return False
+    return False
+
+
+def get_dotenv_path() -> Path:
+    env_override = os.environ.get("ASK_LLM_ENV_FILE") or os.environ.get("ASK_LLM_DOTENV_PATH")
+    if env_override:
+        return Path(env_override).expanduser().resolve()
+
+    cwd_env = Path.cwd() / ".env"
+    if cwd_env.is_file() and _env_file_has_ask_llm_key(cwd_env):
+        return cwd_env
+
+    env_models = os.environ.get("ASK_LLM_MODELS_CONFIG_PATH")
+    if env_models:
+        return Path(env_models).expanduser().resolve().parent / ".env"
+
+    return get_default_config_dir() / ".env"
+
+
+DOTENV_PATH = get_dotenv_path()
 
 class Config(BaseSettings):
     HISTORY_FILE: str = Field(default=os.path.expanduser("~/.cache/ask_llm/chat-history"))
@@ -77,7 +117,7 @@ class Config(BaseSettings):
     )
 
     # --- PostgreSQL Memory Backend Settings --- #
-    POSTGRES_HOST: str = Field(default="postgres.home", description="PostgreSQL server hostname (Set via ASK_LLM_POSTGRES_HOST)")
+    POSTGRES_HOST: str = Field(default="localhost", description="PostgreSQL server hostname (Set via ASK_LLM_POSTGRES_HOST)")
     POSTGRES_PORT: int = Field(default=5432, description="PostgreSQL server port (Set via ASK_LLM_POSTGRES_PORT)")
     POSTGRES_USER: str = Field(default="askllm", description="PostgreSQL username (Set via ASK_LLM_POSTGRES_USER)")
     POSTGRES_PASSWORD: str = Field(default="", description="PostgreSQL password (Set via ASK_LLM_POSTGRES_PASSWORD)")
@@ -110,17 +150,27 @@ class Config(BaseSettings):
 
     # --- Service Settings --- #
     USE_SERVICE: bool = Field(default=False, description="Route queries through the background service by default (same as --service flag)")
-    SERVICE_MODEL: Optional[str] = Field(default=None, description="Default model alias for the background service API")
     SERVICE_HOST: str = Field(default="127.0.0.1", description="Host for the background service to bind to")
     SERVICE_PORT: int = Field(default=8642, description="Port for the background service to listen on")
 
     # --- Web Search Settings --- #
-    SEARCH_PROVIDER: Optional[str] = Field(default=None, description="Search provider: 'duckduckgo' (free) or 'tavily' (production). Auto-selects based on available keys.")
+    SEARCH_PROVIDER: Optional[str] = Field(
+        default=None,
+        description=(
+            "Search provider: 'duckduckgo' (free), 'tavily' (production), or 'brave' "
+            "(privacy-focused). Auto-selects based on available keys."
+        ),
+    )
     TAVILY_API_KEY: str = Field(default="", description="Tavily API key for production search (get from tavily.com)")
+    BRAVE_API_KEY: str = Field(default="", description="Brave Search API key")
     SEARCH_MAX_RESULTS: int = Field(default=5, description="Maximum search results to return per query")
-    SEARCH_TIMEOUT: int = Field(default=10, description="Timeout in seconds for search requests (DuckDuckGo)")
-    SEARCH_INCLUDE_ANSWER: bool = Field(default=False, description="Include AI-generated answer from Tavily (uses more credits)")
+    SEARCH_TIMEOUT: int = Field(default=10, description="Timeout in seconds for search requests (DuckDuckGo/Brave)")
+    SEARCH_INCLUDE_ANSWER: bool = Field(default=False, description="Include AI-generated answer from Tavily or Brave (uses more credits)")
     SEARCH_DEPTH: str = Field(default="basic", description="Tavily search depth: 'basic' (1 credit) or 'advanced' (2 credits)")
+    BRAVE_SAFESEARCH: str = Field(
+        default="moderate",
+        description="Brave safesearch level: off, moderate, strict"
+    )
 
     # --- Tool/History Settings --- #
     TOOLS_SKIP_HISTORY: bool = Field(
@@ -143,7 +193,13 @@ class Config(BaseSettings):
     )
     SUMMARIZATION_MODEL: str = Field(
         default="dolphin-qwen-3b",
-        description="Model alias to use for summarization (uses loaded service model by default)"
+        description="Model alias to use for summarization (uses loaded model by default)"
+    )
+
+    # --- Tool Calling Settings --- #
+    MAX_TOOL_CALLS_PER_TURN: int = Field(
+        default=20,
+        description="Maximum number of tool calls per conversation turn (0 = unlimited)"
     )
 
     # --- LLM Generation Settings --- #
@@ -166,10 +222,10 @@ class Config(BaseSettings):
 
     # --- Nextcloud Talk Bot Settings (legacy single-bot) --- #
     NEXTCLOUD_BOT_SECRET: Optional[str] = Field(default=None, description="Nextcloud Talk bot secret from occ talk:bot:install (deprecated: use bots.yaml)")
-    NEXTCLOUD_URL: str = Field(default="https://nextcloud.ferreri.us", description="Nextcloud instance URL")
+    NEXTCLOUD_URL: str = Field(default="https://nextcloud.example.com", description="Nextcloud instance URL")
 
     # --- Nextcloud Talk Provisioner --- #
-    TALK_PROVISIONER_URL: str = Field(default="http://ubuntu.home:8790", description="Nextcloud Talk provisioner service URL")
+    TALK_PROVISIONER_URL: str = Field(default="http://localhost:8790", description="Nextcloud Talk provisioner service URL")
     TALK_PROVISIONER_TOKEN: Optional[str] = Field(default=None, description="Bearer token for provisioner service")
 
     # SYSTEM_MESSAGE is set at runtime from bot config, this is just the default

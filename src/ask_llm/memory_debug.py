@@ -10,14 +10,16 @@ Two types of data are managed:
 Usage:
     # === MEMORIES (extracted facts) ===
     llm-memory "what do you know about me"       # Search memories
-    llm-memory -m embedding "nick"               # Search via embeddings only
+    llm-memory -m embedding "user"               # Search via embeddings only
     llm-memory --list-memories                   # List memories by importance
     llm-memory --delete-memory <ID>              # Delete a memory by UUID prefix
     llm-memory --consolidate                     # Merge redundant memories
     llm-memory --regenerate-embeddings           # Regenerate all embeddings
 
-    # === USER PROFILE ===
-    llm-memory --list-attrs                      # List profile attributes
+    # === ENTITY PROFILES (user or bot) ===
+    llm-memory --list-profiles                   # List all profiles (users and bots)
+    llm-memory --list-attrs nick                 # List attributes (auto-detects user/bot)
+    llm-memory --list-attrs nova                 # List attributes for nova
     llm-memory --delete-attr 42                  # Delete a profile attribute
 
     # === MESSAGE HISTORY (conversation logs) ===
@@ -423,21 +425,28 @@ def handle_consolidate(bot_id: str, dry_run: bool = False):
 # User Profile Operations
 # =============================================================================
 
-def handle_list_attrs(user_id: str):
-    """List user profile attributes with IDs."""
-    data = api_get(f"/v1/users/{user_id}")
+def handle_list_attrs(entity_id: str):
+    """List profile attributes with IDs for any entity (user or bot).
+
+    Entity type is auto-detected - just provide the entity ID.
+
+    Args:
+        entity_id: The entity's ID (user_id or bot_id)
+    """
+    data = api_get(f"/v1/profiles/{entity_id}")
 
     if not data:
-        console.print(f"[red]Failed to get profile for user '{user_id}'[/red]")
+        console.print(f"[red]Failed to get profile for '{entity_id}'[/red]")
         return
 
-    # Show profile summary if present (from maintenance job)
-    profile = data.get("profile", {})
-    display_name = profile.get("display_name")
-    summary = profile.get("summary")
-    
+    # Show profile summary if present
+    display_name = data.get("display_name")
+    summary = data.get("summary")
+    entity_type = data.get("entity_type", "unknown")
+    entity_label = f"{entity_type.capitalize()}: {entity_id}"
+
     if display_name or summary:
-        console.print(Panel.fit(f"[bold cyan]Profile: {user_id}[/bold cyan]", border_style="cyan"))
+        console.print(Panel.fit(f"[bold cyan]Profile: {entity_label}[/bold cyan]", border_style="cyan"))
         if display_name:
             console.print(f"[bold]Name:[/bold] {display_name}")
         if summary:
@@ -448,12 +457,12 @@ def handle_list_attrs(user_id: str):
     attributes = data.get("attributes", [])
     if not attributes:
         if not summary:
-            console.print(f"[yellow]No attributes found for user '{user_id}'[/yellow]")
+            console.print(f"[yellow]No attributes found for {entity_type} '{entity_id}'[/yellow]")
         else:
             console.print(f"[dim]Individual attributes consolidated into summary above.[/dim]")
         return
 
-    table = Table(title=f"Profile Attributes for {user_id}")
+    table = Table(title=f"Profile Attributes for {entity_label}")
     table.add_column("ID", style="cyan", justify="right", width=6)
     table.add_column("Category", style="magenta", width=15)
     table.add_column("Key", style="yellow", width=25)
@@ -474,6 +483,88 @@ def handle_list_attrs(user_id: str):
 
     console.print(table)
     console.print("\n[dim]Use --delete-attr <ID> to remove an attribute[/dim]")
+
+
+def handle_list_profiles():
+    """List all profiles (both users and bots) with summary information."""
+    # Fetch both user and bot profiles
+    user_profiles_data = api_get("/v1/profiles/list/user")
+    bot_profiles_data = api_get("/v1/profiles/list/bot")
+
+    # Collect all profiles
+    all_profiles = []
+
+    # Process user profiles
+    if user_profiles_data and user_profiles_data.get("profiles"):
+        for profile in user_profiles_data["profiles"]:
+            attrs = profile.get("attributes", [])
+            categories = list(set(a.get("category", "?") for a in attrs)) if attrs else []
+            all_profiles.append({
+                "type": "user",
+                "id": profile.get("entity_id", "?"),
+                "name": profile.get("display_name", "-"),
+                "attr_count": len(attrs),
+                "categories": categories,
+            })
+
+    # Process bot profiles
+    if bot_profiles_data and bot_profiles_data.get("profiles"):
+        for profile in bot_profiles_data["profiles"]:
+            attrs = profile.get("attributes", [])
+            categories = list(set(a.get("category", "?") for a in attrs)) if attrs else []
+            all_profiles.append({
+                "type": "bot",
+                "id": profile.get("entity_id", "?"),
+                "name": profile.get("display_name", "-"),
+                "attr_count": len(attrs),
+                "categories": categories,
+            })
+
+    # Check if we got any data
+    if not all_profiles:
+        if not user_profiles_data and not bot_profiles_data:
+            console.print("[red]Failed to fetch profile data from both endpoints[/red]")
+        else:
+            console.print("[yellow]No profiles found[/yellow]")
+        return
+
+    # Sort by type then ID
+    all_profiles.sort(key=lambda p: (p["type"], p["id"]))
+
+    # Display table
+    table = Table(title="All Entity Profiles")
+    table.add_column("Type", style="cyan", width=6)
+    table.add_column("ID", style="yellow", width=12)
+    table.add_column("Name", style="white", width=15)
+    table.add_column("Attrs", justify="right", width=6)
+    table.add_column("Categories", style="magenta", max_width=40)
+
+    for profile in all_profiles:
+        # Format categories
+        categories = profile.get("categories", [])
+        if categories:
+            cat_str = ", ".join(categories[:4])
+            if len(categories) > 4:
+                cat_str += f", +{len(categories) - 4} more"
+        else:
+            cat_str = "-"
+
+        # Format name
+        name = profile.get("name", "-")
+        if name and len(name) > 15:
+            name = name[:12] + "..."
+
+        table.add_row(
+            profile["type"],
+            profile["id"],
+            name or "-",
+            str(profile.get("attr_count", 0)),
+            cat_str,
+        )
+
+    console.print(table)
+    console.print(f"\n[dim]Total: {len(all_profiles)} profiles ({sum(1 for p in all_profiles if p['type'] == 'user')} users, {sum(1 for p in all_profiles if p['type'] == 'bot')} bots)[/dim]")
+    console.print("[dim]Use --list-attrs <entity_id> to view detailed attributes[/dim]")
 
 
 def handle_delete_attribute(attribute_id: int, skip_confirm: bool):
@@ -951,10 +1042,12 @@ Examples:
     mem_group.add_argument("--consolidate-dry-run", action="store_true", help="Preview memory consolidation")
     mem_group.add_argument("--regenerate-embeddings", action="store_true", help="Regenerate memory embeddings")
 
-    # User profile
-    profile_group = parser.add_argument_group("User Profile")
-    profile_group.add_argument("--list-attrs", metavar="USER", nargs="?", const="nick",
-                               help="List profile attributes (default user: nick)")
+    # Entity profiles
+    profile_group = parser.add_argument_group("Entity Profiles")
+    profile_group.add_argument("--list-profiles", action="store_true",
+                               help="List all profiles (users and bots) with attribute counts")
+    profile_group.add_argument("--list-attrs", metavar="ENTITY", nargs="?", const="user",
+                               help="List profile attributes (auto-detects if user or bot)")
     profile_group.add_argument("--delete-attr", metavar="ID", type=int,
                                help="Delete a profile attribute by ID")
 
@@ -1004,7 +1097,11 @@ Examples:
         handle_regenerate_embeddings(args.bot)
         return
 
-    # === User profile ===
+    # === Entity profiles ===
+    if args.list_profiles:
+        handle_list_profiles()
+        return
+
     if args.list_attrs:
         handle_list_attrs(args.list_attrs)
         return

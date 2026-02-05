@@ -10,9 +10,6 @@
             "request": "launch",
             "program": "${workspaceFolder}/src/ask_llm/main.py",
             "console": "integratedTerminal",
-            "args": [
-                "-m", "dans"
-            ],
             "env": {
                 "PYTHONPATH": "${workspaceFolder}/src"
             }

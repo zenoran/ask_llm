@@ -2,6 +2,7 @@
 """
 Test script for sending messages to Nextcloud Talk as a bot.
 """
+import os
 import requests
 import hmac
 import hashlib
@@ -9,10 +10,10 @@ import secrets
 import json
 import sys
 
-# Configuration
-NEXTCLOUD_URL = "https://nextcloud.ferreri.us"
-BOT_SECRET = "d05a0632eb29d12e90223886d74366f64cb42556790d8295d728f79098ce7d17"
-CONVERSATION_TOKEN = "b3nkowpf"  # AskLLM Test room
+# Configuration (override with env vars for local use)
+NEXTCLOUD_URL = os.getenv("ASK_LLM_NEXTCLOUD_URL", "https://nextcloud.example.com")
+BOT_SECRET = os.getenv("ASK_LLM_NEXTCLOUD_BOT_SECRET", "your-secret-here")
+CONVERSATION_TOKEN = os.getenv("ASK_LLM_NEXTCLOUD_ROOM_TOKEN", "your-room-token")
 
 def send_message(message: str, reference_id: str = None):
     """Send a message to Nextcloud Talk as a bot."""
@@ -74,7 +75,7 @@ if __name__ == '__main__':
         print(f"  NEXTCLOUD_URL: {NEXTCLOUD_URL}")
         print(f"  BOT_SECRET: {'*' * len(BOT_SECRET) if BOT_SECRET != 'your-secret-here' else 'NOT SET'}")
         print(f"  CONVERSATION_TOKEN: {CONVERSATION_TOKEN}")
-        print(f"\nUpdate these values in the script before testing!")
+        print("\nSet ASK_LLM_NEXTCLOUD_URL, ASK_LLM_NEXTCLOUD_BOT_SECRET, and ASK_LLM_NEXTCLOUD_ROOM_TOKEN before testing.")
         sys.exit(1)
 
     message = ' '.join(sys.argv[1:])

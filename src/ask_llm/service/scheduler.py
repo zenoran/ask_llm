@@ -218,7 +218,7 @@ class JobScheduler:
         if job.job_type == JobType.PROFILE_MAINTENANCE:
             # For profile maintenance, entity_id comes from config or is the bot's user
             config = json.loads(job.config_json) if job.config_json else {}
-            entity_id = config.get("entity_id", "nick")  # Default user
+            entity_id = config.get("entity_id", "user")  # Default user
             return create_profile_maintenance_task(
                 entity_id=entity_id,
                 entity_type=config.get("entity_type", "user"),
@@ -257,12 +257,13 @@ def init_default_jobs(engine, config) -> None:
         ).first()
         
         if not existing:
+            default_user = config.DEFAULT_USER or "user"
             job = ScheduledJob(
                 job_type=JobType.PROFILE_MAINTENANCE,
                 bot_id="*",  # All bots
                 enabled=config.SCHEDULER_ENABLED,
                 interval_minutes=config.PROFILE_MAINTENANCE_INTERVAL_MINUTES,
-                config_json=json.dumps({"entity_id": "nick", "entity_type": "user"}),
+                config_json=json.dumps({"entity_id": default_user, "entity_type": "user"}),
             )
             session.add(job)
             session.commit()

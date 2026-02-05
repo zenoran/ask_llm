@@ -4,20 +4,20 @@
 
 ## Overview
 
-Multiple ask_llm bot personalities can have dedicated Nextcloud Talk rooms. A single webhook endpoint routes messages to the appropriate bot based on conversation token. Provisioning is handled by a separate service at `http://ubuntu.home:8790`.
+Multiple ask_llm bot personalities can have dedicated Nextcloud Talk rooms. A single webhook endpoint routes messages to the appropriate bot based on conversation token. Provisioning is handled by a separate service at `http://localhost:8790`.
 
 ## Architecture
 
 ```
 Nextcloud Talk Room (token: abc123)
     ↓ webhook
-http://echo.home:8642/webhook/nextcloud
+http://localhost:8642/webhook/nextcloud
     ↓ routes by conversation_token
 ask_llm bot: nova (uses Nova personality)
 
 Nextcloud Talk Room (token: def456)
     ↓ webhook
-http://echo.home:8642/webhook/nextcloud
+http://localhost:8642/webhook/nextcloud
     ↓ routes by conversation_token
 ask_llm bot: monika (uses Monika personality)
 ```
@@ -63,12 +63,12 @@ Add to `~/.config/ask-llm/.env`:
 
 ```bash
 # Provisioner service
-ASK_LLM_TALK_PROVISIONER_URL=http://ubuntu.home:8790
+ASK_LLM_TALK_PROVISIONER_URL=http://localhost:8790
 ASK_LLM_TALK_PROVISIONER_TOKEN=your-token-here
 
 # Legacy single-bot (deprecated, use bots.yaml)
 ASK_LLM_NEXTCLOUD_BOT_SECRET=...
-ASK_LLM_NEXTCLOUD_URL=https://nextcloud.ferreri.us
+ASK_LLM_NEXTCLOUD_URL=https://nextcloud.example.com
 ```
 
 ## CLI Commands
@@ -107,7 +107,7 @@ Receives webhooks from Nextcloud Talk, routes to appropriate bot.
 ```json
 {
   "type": "Create",
-  "actor": {"id": "users/nick", "name": "nick"},
+  "actor": {"id": "users/user", "name": "user"},
   "object": {
     "content": "{\"message\":\"Hello bot\"}"
   },
@@ -124,7 +124,7 @@ Receives webhooks from Nextcloud Talk, routes to appropriate bot.
   "status": "received",
   "bot": "nova",
   "message": "Hello bot",
-  "from": "nick"
+  "from": "user"
 }
 ```
 
@@ -137,7 +137,7 @@ Provision a new bot/room via provisioner service.
   "bot_id": "nova",
   "room_name": "Nova",  // optional
   "bot_name": "Nova",   // optional
-  "owner_user_id": "nick"
+  "owner_user_id": "user"
 }
 ```
 
@@ -146,7 +146,7 @@ Provision a new bot/room via provisioner service.
 {
   "bot_id": "nova",
   "room_token": "abc123xyz",
-  "room_url": "https://nextcloud.ferreri.us/call/abc123xyz",
+  "room_url": "https://nextcloud.example.com/call/abc123xyz",
   "nextcloud_bot_id": 5,
   "nextcloud_bot_name": "Nova"
 }
@@ -154,7 +154,7 @@ Provision a new bot/room via provisioner service.
 
 ## Provisioner Service
 
-**Base URL:** `http://ubuntu.home:8790`
+**Base URL:** `http://localhost:8790`
 **Auth:** `Authorization: Bearer <TALK_PROVISIONER_TOKEN>`
 
 ### POST /provision/nextcloud-talk
@@ -164,21 +164,21 @@ Provision a new bot/room via provisioner service.
 {
   "roomName": "Nova",
   "botName": "Nova",
-  "webhookUrl": "http://echo.home:8642/webhook/nextcloud",
-  "ownerUserId": "nick"
+  "webhookUrl": "http://localhost:8642/webhook/nextcloud",
+  "ownerUserId": "user"
 }
 ```
 
 **Response:**
 ```json
 {
-  "nextcloudBaseUrl": "https://nextcloud.ferreri.us",
+  "nextcloudBaseUrl": "https://nextcloud.example.com",
   "roomToken": "abc123xyz",
-  "roomUrl": "https://nextcloud.ferreri.us/call/abc123xyz",
+  "roomUrl": "https://nextcloud.example.com/call/abc123xyz",
   "botId": 5,
   "botName": "Nova",
   "botSecret": "...",
-  "webhookUrl": "http://echo.home:8642/webhook/nextcloud"
+  "webhookUrl": "http://localhost:8642/webhook/nextcloud"
 }
 ```
 

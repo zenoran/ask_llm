@@ -8,7 +8,7 @@ Consolidated tools (7 total):
 - memory: Search/store/delete facts
 - history: Search/retrieve/forget messages (with date filtering)
 - profile: Get/set/delete user attributes
-- bot_trait: Record bot personality traits
+- self: Bot personality reflection and development
 - search: Web/news search
 - model: List/current/switch models
 - time: Get current time
@@ -19,7 +19,7 @@ from .definitions import (
     MEMORY_TOOL,
     HISTORY_TOOL,
     PROFILE_TOOL,
-    BOT_TRAIT_TOOL,
+    SELF_TOOL,
     SEARCH_TOOL,
     MODEL_TOOL,
     TIME_TOOL,
@@ -49,7 +49,7 @@ __all__ = [
     "MEMORY_TOOL",
     "HISTORY_TOOL",
     "PROFILE_TOOL",
-    "BOT_TRAIT_TOOL",
+    "SELF_TOOL",
     "SEARCH_TOOL",
     "MODEL_TOOL",
     "TIME_TOOL",

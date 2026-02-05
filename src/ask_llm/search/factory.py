@@ -27,10 +27,14 @@ def is_search_available(provider: SearchProvider | str | None = None) -> bool:
         # Check if any provider is available
         from .ddgs_client import is_ddgs_available
         from .tavily_client import is_tavily_available
-        return is_ddgs_available() or is_tavily_available()
+        from .brave_client import is_brave_available
+        return is_ddgs_available() or is_tavily_available() or is_brave_available()
     
     if isinstance(provider, str):
-        provider = SearchProvider(provider.lower())
+        try:
+            provider = SearchProvider(provider.lower())
+        except ValueError:
+            return False
     
     if provider == SearchProvider.DUCKDUCKGO:
         from .ddgs_client import is_ddgs_available
@@ -38,6 +42,9 @@ def is_search_available(provider: SearchProvider | str | None = None) -> bool:
     elif provider == SearchProvider.TAVILY:
         from .tavily_client import is_tavily_available
         return is_tavily_available()
+    elif provider == SearchProvider.BRAVE:
+        from .brave_client import is_brave_available
+        return is_brave_available()
     
     return False
 
@@ -53,7 +60,8 @@ def get_search_client(
     1. Explicit provider argument
     2. Config SEARCH_PROVIDER setting
     3. Tavily (if API key configured)
-    4. DuckDuckGo (free fallback)
+    4. Brave (if API key configured)
+    5. DuckDuckGo (free fallback)
     
     Args:
         config: Application config
@@ -84,9 +92,13 @@ def get_search_client(
     if provider is None:
         # Auto-select based on availability
         tavily_key = getattr(config, "TAVILY_API_KEY", None)
+        brave_key = getattr(config, "BRAVE_API_KEY", None)
         if tavily_key and is_search_available(SearchProvider.TAVILY):
             provider = SearchProvider.TAVILY
             logger.debug("Auto-selected Tavily (API key configured)")
+        elif brave_key and is_search_available(SearchProvider.BRAVE):
+            provider = SearchProvider.BRAVE
+            logger.debug("Auto-selected Brave (API key configured)")
         elif is_search_available(SearchProvider.DUCKDUCKGO):
             provider = SearchProvider.DUCKDUCKGO
             logger.debug("Auto-selected DuckDuckGo (free fallback)")
@@ -133,6 +145,40 @@ def get_search_client(
             max_results=max_results,
             include_answer=include_answer,
             search_depth=search_depth,
+        )
+
+    elif provider == SearchProvider.BRAVE:
+        from .brave_client import BraveSearchClient, is_brave_available
+
+        if not is_brave_available():
+            logger.warning("Brave requested but httpx not installed, falling back to DuckDuckGo")
+            from .ddgs_client import DuckDuckGoClient, is_ddgs_available
+            if is_ddgs_available():
+                timeout = getattr(config, "SEARCH_TIMEOUT", 10)
+                return DuckDuckGoClient(max_results=max_results, timeout=timeout)
+            logger.error("DuckDuckGo fallback also unavailable")
+            return None
+
+        api_key = getattr(config, "BRAVE_API_KEY", None)
+        if not api_key:
+            logger.warning("Brave requested but BRAVE_API_KEY not configured, falling back to DuckDuckGo")
+            from .ddgs_client import DuckDuckGoClient, is_ddgs_available
+            if is_ddgs_available():
+                timeout = getattr(config, "SEARCH_TIMEOUT", 10)
+                return DuckDuckGoClient(max_results=max_results, timeout=timeout)
+            logger.error("DuckDuckGo fallback also unavailable")
+            return None
+
+        include_summary = getattr(config, "SEARCH_INCLUDE_ANSWER", False)
+        safesearch = getattr(config, "BRAVE_SAFESEARCH", "moderate")
+        timeout = getattr(config, "SEARCH_TIMEOUT", 10)
+
+        return BraveSearchClient(
+            api_key=api_key,
+            max_results=max_results,
+            timeout=timeout,
+            include_summary=include_summary,
+            safesearch=safesearch,
         )
     
     elif provider == SearchProvider.DUCKDUCKGO:
@@ -194,6 +240,16 @@ def get_search_unavailable_reason(
                 )
             return "Tavily is configured but unavailable. Check your API key and network."
 
+        brave_key = getattr(config, "BRAVE_API_KEY", None)
+        if brave_key:
+            from .brave_client import is_brave_available
+            if not is_brave_available():
+                return (
+                    "Brave Search requires httpx. This should be installed by default. "
+                    "Try: pip install httpx"
+                )
+            return "Brave Search is configured but unavailable. Check your API key and network."
+
         from .ddgs_client import is_ddgs_available
         if not is_ddgs_available():
             return (
@@ -201,7 +257,7 @@ def get_search_unavailable_reason(
                 "Install with: ./install.sh --with-search "
                 "or pipx runpip ask-llm install ddgs"
             )
-        return "No search provider available. Configure Tavily or install ddgs."
+        return "No search provider available. Configure Tavily or Brave or install ddgs."
 
     if resolved_provider == SearchProvider.TAVILY:
         from .tavily_client import is_tavily_available
@@ -224,5 +280,20 @@ def get_search_unavailable_reason(
                 "or pipx runpip ask-llm install ddgs"
             )
         return "DuckDuckGo search is configured but unavailable."
+
+    if resolved_provider == SearchProvider.BRAVE:
+        api_key = getattr(config, "BRAVE_API_KEY", None)
+        if not api_key:
+            return (
+                "Brave Search requires BRAVE_API_KEY to be set in your config. "
+                "Get a free API key at: https://api.search.brave.com/"
+            )
+        from .brave_client import is_brave_available
+        if not is_brave_available():
+            return (
+                "Brave Search requires httpx. This should be installed by default. "
+                "Try: pip install httpx"
+            )
+        return "Brave Search is configured but unavailable. Check your API key and network."
 
     return "Web search not available."

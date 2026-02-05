@@ -9,6 +9,7 @@ IMPORTANT: Only uses local LLMs (gguf, ollama) to avoid sending personal data ex
 """
 
 import logging
+import os
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -17,6 +18,7 @@ from typing import Any
 import numpy as np
 
 logger = logging.getLogger(__name__)
+_DEFAULT_USER_ALIAS = os.getenv("ASK_LLM_DEFAULT_USER", "").strip().lower()
 
 
 @dataclass
@@ -94,7 +96,8 @@ def _normalize_text(text: str) -> str:
     text = re.sub(r'\s+', ' ', text)
     # Normalize common variations
     text = re.sub(r'\bthe user\b', 'user', text)
-    text = re.sub(r'\bnick\b', 'user', text)  # User's name -> generic
+    if _DEFAULT_USER_ALIAS:
+        text = re.sub(rf'\b{re.escape(_DEFAULT_USER_ALIAS)}\b', 'user', text)
     text = re.sub(r"user's", 'user', text)
     return text
 

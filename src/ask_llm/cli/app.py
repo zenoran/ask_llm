@@ -304,17 +304,22 @@ def show_status(config: Config, args: argparse.Namespace | None = None):
             bot_display = f"[bold cyan]{target_bot.name}[/bold cyan] ({target_bot.slug}) [dim]default[/dim]"
         session_table.add_row("Bot", bot_display)
 
-        # Determine effective model: -m flag > bot's default_model > config DEFAULT_MODEL_ALIAS
+        # Determine effective model: explicit > bot default > config default
         explicit_model = getattr(args, 'model', None)
-        if explicit_model:
-            model_alias = explicit_model
+        selection = bot_manager.select_model(
+            explicit_model,
+            bot_slug=target_bot.slug,
+            local_mode=getattr(args, 'local', False),
+        )
+        model_alias = selection.alias
+        if selection.source == "explicit":
             model_source = "[dim]-m flag[/dim]"
-        elif target_bot.default_model:
-            model_alias = target_bot.default_model
+        elif selection.source == "bot_default":
             model_source = "[dim]bot default[/dim]"
-        else:
-            model_alias = config.DEFAULT_MODEL_ALIAS
+        elif selection.source == "config_default":
             model_source = "[dim]config default[/dim]"
+        else:
+            model_source = ""
 
         if model_alias:
             # Check if model exists in defined models
@@ -731,7 +736,8 @@ def show_bots(config: Config):
     for bot in bots:
         is_default = " ⭐" if bot.slug == default_bot.slug else ""
         memory_icon = "[green]✓[/green]" if bot.requires_memory else "[dim]✗[/dim]"
-        default_model = bot.default_model or f"[dim]{config.DEFAULT_MODEL_ALIAS or 'global'}[/dim]"
+        selection = bot_manager.select_model(None, bot_slug=bot.slug)
+        default_model = selection.alias or f"[dim]{config.DEFAULT_MODEL_ALIAS or 'global'}[/dim]"
         table.add_row(
             f"{bot.slug}{is_default}",
             bot.name,
@@ -1417,12 +1423,8 @@ def main():
         target_bot = bot_manager.get_bot(config_obj.DEFAULT_BOT) or bot_manager.get_default_bot()
     
     # Determine effective model alias (without validation for service mode)
-    if args.model:
-        effective_model = args.model
-    elif target_bot.default_model:
-        effective_model = target_bot.default_model
-    else:
-        effective_model = config_obj.DEFAULT_MODEL_ALIAS
+    selection = bot_manager.select_model(args.model, bot_slug=target_bot.slug, local_mode=args.local)
+    effective_model = selection.alias
 
     # Auto-switch to service when using non-OpenAI models and service is available
     defined_models = config_obj.defined_models.get("models", {})

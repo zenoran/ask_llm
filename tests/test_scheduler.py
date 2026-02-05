@@ -83,15 +83,15 @@ class TestTaskFactories:
         from ask_llm.service.tasks import create_profile_maintenance_task, TaskType
         
         task = create_profile_maintenance_task(
-            entity_id="nick",
+            entity_id="user",
             entity_type="user",
             bot_id="nova",
         )
         assert task.task_type == TaskType.PROFILE_MAINTENANCE
-        assert task.payload["entity_id"] == "nick"
+        assert task.payload["entity_id"] == "user"
         assert task.payload["entity_type"] == "user"
         assert task.bot_id == "nova"
-        assert task.user_id == "nick"  # entity_id becomes user_id
+        assert task.user_id == "user"  # entity_id becomes user_id
     
     def test_create_maintenance_task_with_user_id(self):
         from ask_llm.service.tasks import create_maintenance_task, TaskType

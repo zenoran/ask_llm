@@ -16,6 +16,7 @@ class SearchProvider(str, Enum):
     """Available search providers."""
     DUCKDUCKGO = "duckduckgo"
     TAVILY = "tavily"
+    BRAVE = "brave"
 
 
 @dataclass

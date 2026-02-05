@@ -537,7 +537,7 @@ class JobScheduler:
         if job.job_type == JobType.PROFILE_MAINTENANCE:
             # For profile maintenance, entity_id comes from config or is the bot's user
             config = json.loads(job.config_json) if job.config_json else {}
-            entity_id = config.get("entity_id", "nick")  # Default user
+            entity_id = config.get("entity_id", "user")  # Default user
             return create_profile_maintenance_task(
                 entity_id=entity_id,
                 entity_type=config.get("entity_type", "user"),
@@ -575,7 +575,7 @@ def init_default_jobs(engine, config) -> None:
                 bot_id="*",  # All bots
                 enabled=config.SCHEDULER_ENABLED,
                 interval_minutes=config.PROFILE_MAINTENANCE_INTERVAL_MINUTES,
-                config_json=json.dumps({"entity_id": "nick", "entity_type": "user"}),
+                config_json=json.dumps({"entity_id": "user", "entity_type": "user"}),
             )
             session.add(job)
             session.commit()
@@ -752,4 +752,4 @@ def test_job_due_calculation():
 - Follow existing patterns in `memory/maintenance.py` for the service class structure
 - The profile consolidation prompt may need tuning based on actual results
 - Job runs are recorded for debugging - consider adding a cleanup job later to prune old runs
-- The `entity_id` for profile maintenance is currently hardcoded to "nick" - this should eventually be configurable per bot or discovered from active users
+- The `entity_id` for profile maintenance is currently hardcoded to "user" - this should eventually be configurable per bot or discovered from active users
