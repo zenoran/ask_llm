@@ -106,13 +106,22 @@ def query_via_service(
 
             # Extract model from first metadata chunk, then yield content
             actual_model = model  # Default to requested model
+            got_metadata = False  # Track if service responded with model info
 
             def content_iterator() -> Iterator[str]:
-                nonlocal actual_model
+                nonlocal actual_model, got_metadata
                 for item in raw_iterator:
-                    if isinstance(item, dict) and "model" in item:
-                        # Metadata chunk with actual model
+                    if isinstance(item, dict) and "warnings" in item:
+                        # Service warnings (e.g. model fallback)
+                        for warning in item["warnings"]:
+                            console.print(f"[yellow]{warning}[/yellow]")
+                        if item.get("model"):
+                            actual_model = item["model"]
+                            got_metadata = True
+                    elif isinstance(item, dict) and "model" in item:
+                        # Metadata chunk with actual model - service is responding
                         actual_model = item["model"]
+                        got_metadata = True
                     elif isinstance(item, str):
                         yield item
 
@@ -122,7 +131,17 @@ def query_via_service(
             try:
                 first_content = next(content_iter)
             except StopIteration:
-                # No content at all
+                if got_metadata:
+                    # Service responded (we got the model) but produced no content.
+                    # This typically means a server-side error (e.g. tool execution failed).
+                    # Show error instead of silently falling back to a different model.
+                    error_detail = ""
+                    if client.last_error:
+                        error_detail = f" {client.last_error}"
+                    console.print(f"[bold red]Service returned empty response.[/bold red]{error_detail}")
+                    console.print("[dim]Check service logs for details.[/dim]")
+                    return True  # Handled (don't fall back to different model)
+                # Service didn't respond at all - allow fallback
                 return False
 
             # Now we have the actual_model set, create panel title
@@ -1522,7 +1541,22 @@ def run_app(args: argparse.Namespace, config_obj: Config, resolved_alias: str):
         use_service = True
         if config_obj.VERBOSE:
             console.print(f"[dim]Bot '{bot.name}' uses tools; enabling service mode[/dim]")
-    
+
+    # Validate service availability upfront when service mode is enabled
+    if use_service:
+        service_client = get_service_client(config_obj)
+        if not service_client or not service_client.is_available(force_check=True):
+            if effective_model_type and effective_model_type != "openai":
+                console.print(
+                    "[bold red]Service not available.[/bold red] Start the service with: [yellow]llm-service[/yellow]"
+                )
+                sys.exit(1)
+            else:
+                console.print(
+                    "[yellow]Warning: Service not available. Queries will use direct API calls.[/yellow]"
+                )
+                use_service = False
+
     ask_llm = None
     
     # For history operations, we can use a lightweight path that doesn't require model init
@@ -1664,8 +1698,7 @@ def run_app(args: argparse.Namespace, config_obj: Config, resolved_alias: str):
                     )
                 return
             # Fall back to local for OpenAI-compatible models
-            if config_obj.VERBOSE:
-                console.print("[dim]Service unavailable, using local client[/dim]")
+            console.print("[yellow]Service unavailable, falling back to direct API calls.[/yellow]")
             if ask_llm is None:
                 try:
                     ask_llm = AskLLM(

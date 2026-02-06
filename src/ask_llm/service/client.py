@@ -306,6 +306,10 @@ class ServiceClient:
                             break
                         try:
                             chunk = json.loads(data)
+                            # Service warning event (e.g. model fallback)
+                            if chunk.get("object") == "service.warning":
+                                yield {"warnings": chunk.get("warnings", []), "model": chunk.get("model")}
+                                continue
                             # On first chunk, yield metadata with actual model used
                             if first_chunk:
                                 actual_model = chunk.get("model")

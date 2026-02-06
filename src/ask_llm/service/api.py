@@ -675,27 +675,37 @@ class BackgroundService:
         requested_model: str | None,
         bot_id: str,
         local_mode: bool,
-    ) -> str:
-        """Resolve the model alias for a request using shared bot/config logic."""
+    ) -> tuple[str, list[str]]:
+        """Resolve the model alias for a request using shared bot/config logic.
+
+        Returns:
+            Tuple of (resolved_model_alias, list_of_warnings)
+        """
+        warnings: list[str] = []
         bot_manager = BotManager(self.config)
         selection = bot_manager.select_model(requested_model, bot_slug=bot_id, local_mode=local_mode)
         model_alias = selection.alias
 
         if model_alias and model_alias in self._available_models:
-            return model_alias
+            return model_alias, warnings
 
         # If explicit model is invalid, warn and fall back
         if model_alias and model_alias not in self._available_models:
-            log.warning(f"Model '{model_alias}' not found, using default.")
-
-        fallback = bot_manager.select_model(None, bot_slug=bot_id, local_mode=local_mode)
-        if fallback.alias and fallback.alias in self._available_models:
-            return fallback.alias
+            fallback = bot_manager.select_model(None, bot_slug=bot_id, local_mode=local_mode)
+            if fallback.alias and fallback.alias in self._available_models:
+                msg = f"Model '{model_alias}' not available on service, using '{fallback.alias}'"
+                log.warning(msg)
+                warnings.append(msg)
+                return fallback.alias, warnings
 
         if self._available_models:
-            return self._available_models[0]
+            fallback_model = self._available_models[0]
+            msg = f"Model '{model_alias}' not available on service, using '{fallback_model}'"
+            log.warning(msg)
+            warnings.append(msg)
+            return fallback_model, warnings
 
-        raise ValueError("No models available.")
+        raise ValueError("No models available on service.")
     
     async def _start_generation(self) -> tuple[threading.Event, threading.Event]:
         """Start a new generation, cancelling and waiting for any in-progress one.
@@ -924,13 +934,13 @@ class BackgroundService:
 
         # Resolve model using shared bot/config logic
         try:
-            model_alias = self._resolve_request_model(request.model, bot_id, local_mode)
+            model_alias, model_warnings = self._resolve_request_model(request.model, bot_id, local_mode)
         except Exception as e:
             log.api_error(ctx, str(e), 400)
             raise
 
         ctx.model = model_alias
-        
+
         # Debug: Show memory settings
         log.debug(
             f"Memory settings: augment_memory={request.augment_memory}, "
@@ -1090,11 +1100,11 @@ class BackgroundService:
 
         # Resolve model using shared bot/config logic
         try:
-            model_alias = self._resolve_request_model(request.model, bot_id, local_mode)
+            model_alias, model_warnings = self._resolve_request_model(request.model, bot_id, local_mode)
         except Exception as e:
             log.api_error(ctx, str(e), 400)
             raise
-        
+
         # Get cached AskLLM instance
         ask_llm = self._get_ask_llm(model_alias, bot_id, user_id, local_mode)
         
@@ -1324,9 +1334,18 @@ class BackgroundService:
             bot = get_bot(bot_id)
             emote_filter = StreamingEmoteFilter() if (bot and bot.voice_optimized) else None
             
+            # Send service warnings (e.g. model fallback) before content
+            if model_warnings:
+                warning_data = {
+                    "object": "service.warning",
+                    "model": model_alias,
+                    "warnings": model_warnings,
+                }
+                yield f"data: {json.dumps(warning_data)}\n\n"
+
             # Start streaming in single-thread executor
             loop.run_in_executor(self._llm_executor, _stream_to_queue)
-            
+
             # Yield SSE chunks
             while True:
                 chunk = await chunk_queue.get()
@@ -1694,7 +1713,7 @@ class BackgroundService:
         
         if requested_model:
             try:
-                model_to_use = self._resolve_request_model(
+                model_to_use, _ = self._resolve_request_model(
                     requested_model,
                     task.bot_id or self._default_bot,
                     local_mode=True,
@@ -1702,21 +1721,21 @@ class BackgroundService:
             except Exception as e:
                 log.error(f"Failed to resolve model for profile maintenance: {e}")
                 return {"error": f"Failed to resolve model: {e}"}
-        
+
         # Prefer currently loaded local model if no explicit model requested
         if not model_to_use:
             current_model = self._model_lifecycle.current_model
             if current_model and not is_openai_model(current_model):
                 model_to_use = current_model
-        
+
         # Fall back to any cached local model
         if not model_to_use:
             model_to_use = first_local_cached()
-        
+
         # Last resort: resolve a local default
         if not model_to_use:
             try:
-                model_to_use = self._resolve_request_model(
+                model_to_use, _ = self._resolve_request_model(
                     None,
                     task.bot_id or self._default_bot,
                     local_mode=True,
