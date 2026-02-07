@@ -1,8 +1,8 @@
-# Claude Code Instructions for ask_llm
+# Claude Code Instructions for LLMBotHub
 
 ## Project Overview
 
-CLI tool for querying LLMs. Supports OpenAI, Ollama-compatible APIs, and local GGUF models.
+Model-agnostic LLM platform providing a unified, OpenAI-compatible API for configurable chatbots and multi-agent systems. Supports OpenAI, Ollama-compatible APIs, and local GGUF models with persistent semantic memory, MCP tools, and web search.
 
 ## Project Structure
 
@@ -24,16 +24,24 @@ src/ask_llm/
 │   ├── base.py             # LLMClient base class
 │   ├── openai_client.py    # OpenAI/Ollama-compatible
 │   └── llama_cpp_client.py # Local GGUF models
+├── adapters/               # Model-specific adapters
+│   ├── base.py             # ModelAdapter ABC
+│   ├── registry.py         # Adapter registration/discovery
+│   ├── default.py          # DefaultAdapter (no-op)
+│   ├── pygmalion.py        # BBCode/role marker cleanup
+│   └── dolphin.py          # Observation hallucination cleanup
 ├── tools/                  # Tool system
 │   ├── definitions.py      # Tool definitions
 │   ├── executor.py         # Tool execution
 │   ├── loop.py             # Tool loop handling
 │   ├── parser.py           # Tool call parsing
-│   └── streaming.py        # Streaming with tools
+│   ├── streaming.py        # Streaming with tools
+│   └── formats/            # Tool format handlers (native/ReAct/XML)
 ├── search/                 # Web search
 │   ├── base.py             # SearchClient base
 │   ├── ddgs_client.py      # DuckDuckGo
 │   ├── tavily_client.py    # Tavily
+│   ├── brave_client.py     # Brave Search
 │   └── factory.py          # get_search_client()
 ├── memory/                 # Memory backend
 │   ├── postgresql.py       # pgvector storage, decay, search
@@ -52,8 +60,12 @@ src/ask_llm/
 │   ├── api.py              # API routes
 │   ├── core.py             # ServiceAskLLM
 │   ├── client.py           # ServiceClient
+│   ├── scheduler.py        # JobScheduler, background tasks
 │   └── tasks.py            # Async task processing
+├── integrations/           # External service integrations
+│   └── nextcloud/          # Nextcloud Talk bot routing
 ├── bots.py                 # Bot personalities, BotManager
+├── bots.yaml               # Bot personality definitions
 ├── profiles.py             # ProfileManager, EntityType, AttributeCategory
 ├── model_manager.py        # Model definitions, aliases
 ├── gguf_handler.py         # GGUF model handling

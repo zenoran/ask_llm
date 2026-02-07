@@ -1,10 +1,10 @@
-# ask_llm - AI Coding Agent Instructions
+# LLMBotHub - AI Coding Agent Instructions
 
 > ⚠️ **IMPORTANT**: When running any tests through the LLM CLI, always use `nova` as the bot (`--bot nova` or default). **Do NOT use `mira`** for testing - Mira is a conversational companion with an unfiltered personality designed for personal use, not suitable for development/testing workflows.
 
 ## Architecture Overview
 
-ask_llm is a CLI tool for querying LLMs with persistent memory. Key components:
+LLMBotHub is a model-agnostic LLM platform providing a unified API for configurable chatbots with persistent memory. Key components:
 
 - **Entry Point**: `src/ask_llm/main.py` → `cli.py` (argparse-based CLI)
 - **Core Engine**: `src/ask_llm/core.py` - `AskLLM` class orchestrates clients, bots, memory, and history
@@ -77,7 +77,7 @@ The project uses **pipx** for global installation (no venv needed other than IDE
 
 ### Fresh Install (from GitHub)
 ```bash
-curl -fsSL https://raw.githubusercontent.com/zenoran/ask_llm/master/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/zenoran/llmbothub/main/install.sh | bash
 ```
 
 ### Development Install (editable mode)

@@ -1,282 +1,264 @@
-# ask_llm
+# LLMBotHub
 
-CLI tool for querying LLMs from your terminal. Supports OpenAI, Ollama-compatible APIs, and local GGUF models.
+A model-agnostic LLM platform that provides a unified, OpenAI-compatible API for running configurable chatbots and multi-agent systems across cloud and local models.
 
-## Install
+LLMBotHub normalizes providers (OpenAI, Ollama, GGUF), augments conversations with persistent semantic memory, and integrates MCP tools and web search — enabling consistent behavior, shared context, and extensible tooling through a single interface.
+
+## Features
+
+- **Multi-Provider Support** — OpenAI, Ollama-compatible APIs, and local GGUF models through a unified client interface
+- **Bot Personalities** — Configurable chatbot identities with isolated memory, tools, and default models (defined in YAML)
+- **Persistent Memory** — PostgreSQL + pgvector semantic memory with temporal decay, access reinforcement, and contradiction detection
+- **Tool System** — Dual-mode tool calling: native OpenAI function calling and ReAct format for local/open models
+- **Web Search** — Pluggable search providers (DuckDuckGo, Tavily, Brave) with factory pattern
+- **MCP Server** — Model Context Protocol memory server for cross-service memory operations
+- **Background Service** — FastAPI-based OpenAI-compatible API with async task processing and job scheduling
+- **Model Adapters** — Per-model output formatting and cleanup (role markers, BBCode, hallucination truncation)
+- **Streaming** — Rich terminal output with streaming responses and tool call detection
+- **Docker-First** — CUDA-enabled multi-stage Docker build with live source mounting for development
+
+## Quick Start
+
+### Install
 
 ```bash
-# Basic install
-curl -fsSL https://raw.githubusercontent.com/zenoran/ask_llm/master/install.sh | bash
+# From GitHub (basic)
+curl -fsSL https://raw.githubusercontent.com/zenoran/llmbothub/main/install.sh | bash
 
-# With local GGUF support (CUDA)
-curl -fsSL https://raw.githubusercontent.com/zenoran/ask_llm/master/install.sh | bash -s -- --with-llama
+# With all optional features
+curl -fsSL https://raw.githubusercontent.com/zenoran/llmbothub/main/install.sh | bash -s -- --all
 
-# With web search (DuckDuckGo + Tavily)
-curl -fsSL https://raw.githubusercontent.com/zenoran/ask_llm/master/install.sh | bash -s -- --with-search
-
-# With background service
-curl -fsSL https://raw.githubusercontent.com/zenoran/ask_llm/master/install.sh | bash -s -- --with-service
-
-# Everything
-curl -fsSL https://raw.githubusercontent.com/zenoran/ask_llm/master/install.sh | bash -s -- --all
-
-# Development: editable install from local path
-./install.sh --local .
-
-# Development: sync .venv with all optional deps
+# Local development
+git clone https://github.com/zenoran/llmbothub.git
+cd llmbothub
 ./install.sh --dev
 ```
 
-## Setup
+### Configure
 
 ```bash
-# Create config directory
 mkdir -p ~/.config/ask-llm
 
-# Add your OpenAI API key
+# API key (required for cloud models)
 echo "OPENAI_API_KEY=sk-..." >> ~/.config/ask-llm/.env
 
-# PostgreSQL for memory (optional)
+# PostgreSQL for persistent memory (optional)
 echo "POSTGRES_HOST=localhost" >> ~/.config/ask-llm/.env
 echo "POSTGRES_USER=askllm" >> ~/.config/ask-llm/.env
 echo "POSTGRES_PASSWORD=yourpassword" >> ~/.config/ask-llm/.env
 echo "POSTGRES_DATABASE=askllm" >> ~/.config/ask-llm/.env
 ```
 
-## Usage
+### Use
 
 ```bash
 llm "what is the meaning of life"     # Ask a question
 llm                                   # Interactive mode
-llm -m gpt4 "explain quantum physics" # Use specific model
-llm --local "hello"                   # Use local model (no API)
-llm -b nova "help me code"            # Use a specific bot
-llm --status                          # Check system status
-llm --list-models                     # List available models
-llm --list-bots                       # List available bots
-```
-
-## Bots
-
-- **mira** - Conversational companion (default)
-- **nova** - Technical assistant
-- **spark** - Lightweight local assistant (no database)
-
-## Features
-
-- Multiple LLM providers (OpenAI, Ollama-compatible, local GGUF)
-- Bot personalities with isolated memory
-- PostgreSQL + pgvector for semantic memory search
-- Web search integration (DuckDuckGo, Tavily)
-- Tool system for extensible capabilities
-- MCP (Model Context Protocol) memory server
-- Streaming responses with rich formatting
-- Conversation history with configurable duration
-- Model aliases for quick switching
-- Docker deployment support
-
-## Commands
-
-| Command | Description |
-|---------|-------------|
-| `llm` | Main CLI for querying LLMs |
-| `ask-llm` | Alias for `llm` |
-| `llm-service` | Background service with OpenAI-compatible API |
-| `llm-mcp-server` | MCP memory server (used by server.sh) |
-| `./server.sh` | Manage MCP + LLM service stack (development) |
-| `./start.sh` | Docker container management |
-
-### Background Service
-
-The service stack consists of two components:
-- **MCP Memory Server** (`llm-mcp-server`) - Model Context Protocol server for memory operations (port 8001)
-- **LLM Service** (`llm-service`) - OpenAI-compatible API with async task processing (port 8642)
-
-```bash
-# Development: Use server.sh to manage both services
-./server.sh start              # Start MCP + LLM service
-./server.sh stop               # Stop both services
-./server.sh restart            # Restart both
-./server.sh status             # Show status and ports
-./server.sh start --dev        # Dev mode with auto-reload
-./server.sh start --stdout     # Logs to stdout instead of files
-
-# Or run services individually
-llm-service                    # Default port 8642
-llm-service --port 8080        # Custom port
-llm-service --host 0.0.0.0     # Listen on all interfaces
-```
-
-### Docker Deployment
-
-```bash
-# Production mode (source baked into image)
-./start.sh up                  # Start containers
-./start.sh down                # Stop containers
-./start.sh rebuild             # Rebuild and restart
-
-# Development mode (live source mounting)
-./start.sh dev                 # Mount ./src for live changes
-./start.sh restart             # Restart after code changes
-
-# Utilities
-./start.sh logs                # Follow container logs
-./start.sh status              # Show container status
-./start.sh shell               # Open bash in container
-./start.sh exec llm --status   # Run command in container
-```
-
-## Development
-
-```bash
-git clone https://github.com/zenoran/ask_llm.git
-cd ask_llm
-uv venv && source .venv/bin/activate
-
-# Sync all dependencies (recommended)
-./install.sh --dev
-
-# Or manually install extras
-uv sync --extra mcp --extra service --extra search --extra memory
-
-# Run the service stack
-./server.sh start --dev        # With auto-reload on code changes
-
-# Or use Docker
-./start.sh dev                 # Live source mounting
+llm -m gpt4 "explain quantum physics" # Use a specific model
+llm --local "hello"                   # Use a local GGUF model
+llm -b nova "help me code"            # Use a specific bot personality
+llm --status                          # System status
+llm --list-models                     # Available models
+llm --list-bots                       # Available bot personalities
 ```
 
 ## Architecture
 
-### System Overview
-
 ```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                                 CLI (llm)                                    │
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────┐ │
-│  │   Prompt    │→ │  Bot/User   │→ │   Memory    │→ │    LLM Client       │ │
-│  │   Input     │  │   Context   │  │  Retrieval  │  │  (OpenAI/GGUF)      │ │
-│  └─────────────┘  └─────────────┘  └─────────────┘  └─────────────────────┘ │
-│                                         ↓                      ↓            │
-│                         ┌───────────────────────────────────────────────┐   │
-│                         │              Tools / Search                   │   │
-│                         │  ┌─────────────┐  ┌─────────────────────────┐ │   │
-│                         │  │ DuckDuckGo  │  │  Tavily (optional)      │ │   │
-│                         │  └─────────────┘  └─────────────────────────┘ │   │
-│                         └───────────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────────────────────────┘
-                                         │
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                         Service Stack (server.sh)                            │
-│  ┌─────────────────────────────┐  ┌─────────────────────────────────────┐   │
-│  │   MCP Memory Server (:8001) │  │      LLM Service (:8642)            │   │
-│  │   - Memory operations       │←→│   - OpenAI-compatible API           │   │
-│  │   - Fact extraction         │  │   - Async task processing           │   │
-│  └─────────────────────────────┘  └─────────────────────────────────────┘   │
-│                                         ↓                                    │
-│                              ┌──────────────────────────────────────────┐   │
-│                              │         PostgreSQL + pgvector           │   │
-│                              │  ┌─────────────┐  ┌─────────────────┐   │   │
-│                              │  │  Messages   │  │    Memories     │   │   │
-│                              │  │  (history)  │  │  (embeddings)   │   │   │
-│                              │  └─────────────┘  └─────────────────┘   │   │
-│                              └──────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────┐
+│                            CLI (llm)                                 │
+│  Input → Bot/User Context → Memory Retrieval → LLM Client → Output  │
+│                                  ↕                  ↕                │
+│                           Tools / Search                             │
+└──────────────────────────────────────────────────────────────────────┘
+                                   │
+┌──────────────────────────────────────────────────────────────────────┐
+│                     Service Stack (server.sh)                        │
+│  ┌──────────────────────────┐  ┌──────────────────────────────────┐  │
+│  │ MCP Memory Server :8001  │←→│     LLM Service :8642            │  │
+│  │  Memory ops, extraction  │  │  OpenAI-compat API, async tasks  │  │
+│  └──────────────────────────┘  └──────────────────────────────────┘  │
+│                          ↕                                           │
+│                PostgreSQL + pgvector                                  │
+│              (messages, memories, embeddings)                         │
+└──────────────────────────────────────────────────────────────────────┘
 ```
 
 ### Query Pipeline
 
-1. **Input Processing** - Parse prompt, load bot personality, inject user profile
-2. **Memory Retrieval** - Semantic search for relevant past context
-3. **Context Assembly** - Combine system prompt + memories + recent history
-4. **LLM Query** - Send to configured model with streaming
-5. **Memory Extraction** - Extract facts from conversation (async background)
-6. **Response Display** - Rich formatted output with bot styling
+1. **Input** — Parse prompt, load bot personality, inject user profile
+2. **Memory** — Semantic search for relevant past context (pgvector)
+3. **Context** — Assemble system prompt + memories + conversation history
+4. **Query** — Stream to configured model via unified client
+5. **Tools** — Execute tool calls (search, memory recall) in a loop if needed
+6. **Extract** — Background extraction of facts from the conversation into memory
 
-### Memory System
-
-The memory system is designed to evolve with you, not fossilize into static facts:
+### Project Structure
 
 ```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                           Memory Lifecycle                                   │
-│                                                                              │
-│  Conversation → Fact Extraction → Embedding → Storage → Retrieval → Decay  │
-│                      (LLM)         (local)    (pgvector)  (semantic)        │
-│                                                                              │
-│  ┌────────────────────────────────────────────────────────────────────────┐ │
-│  │                         Scoring Formula                                 │ │
-│  │                                                                         │ │
-│  │  effective_score = (base_importance × (1 - recency_weight) +           │ │
-│  │                     similarity × decay_factor × recency_weight)         │ │
-│  │                    × access_boost                                       │ │
-│  │                                                                         │ │
-│  │  where:                                                                 │ │
-│  │    decay_factor = exp(-age_days × ln(2) / half_life)                   │ │
-│  │    access_boost = 1 + boost_factor × log(access_count + 1)             │ │
-│  └────────────────────────────────────────────────────────────────────────┘ │
-└─────────────────────────────────────────────────────────────────────────────┘
+src/ask_llm/
+├── cli/                 # CLI entry point, argument parsing, subcommands
+├── core/                # Orchestration: pipeline, prompt builder, model lifecycle
+├── clients/             # LLM clients: OpenAI, llama.cpp (GGUF)
+├── adapters/            # Per-model output formatting and cleanup
+├── tools/               # Tool definitions, execution, format handlers (native/ReAct/XML)
+├── search/              # Web search: DuckDuckGo, Tavily, Brave
+├── memory/              # PostgreSQL backend, embeddings, extraction, consolidation
+├── memory_server/       # MCP (Model Context Protocol) memory server
+├── service/             # FastAPI background service, scheduler, API routes
+├── integrations/        # External integrations (Nextcloud Talk)
+├── utils/               # Config, history, streaming, input handling
+├── bots.py              # Bot manager and personality loading
+├── profiles.py          # User/bot profile management
+├── model_manager.py     # Model definitions and aliases
+└── bots.yaml            # Bot personality definitions
 ```
 
-#### Memory Types & Decay Rates
+## Bots
 
-| Type | Half-Life Multiplier | Use Case |
-|------|---------------------|----------|
-| `fact` | 2.0x (180 days) | Core identity - name, traits |
-| `professional` | 1.5x (135 days) | Career, skills, projects |
-| `health` | 1.2x (108 days) | Health conditions, fitness |
-| `relationship` | 1.0x (90 days) | People, connections |
-| `preference` | 0.8x (72 days) | Likes/dislikes - these change |
-| `event` | 0.5x (45 days) | Past events, milestones |
-| `plan` | 0.3x (27 days) | Goals, intentions - very temporal |
+Bot personalities are defined in `bots.yaml`. Each bot has its own system prompt, memory isolation, tool access, and optional default model.
 
-#### Anti-Fossilization Features
+| Bot | Description | Memory | Tools | Search |
+|-----|-------------|--------|-------|--------|
+| **nova** | Full-featured technical assistant (default) | Yes | Yes | Yes |
+| **spark** | Lightweight local assistant — no database required | No | No | No |
+| **proto** | Testing bot with separate memory for development | Yes | Yes | Yes |
 
-- **Temporal Decay**: Old memories naturally fade unless reinforced
-- **Access Reinforcement**: Frequently recalled memories stay relevant
-- **Contradiction Detection**: New facts supersede old ones (with history preserved)
-- **Diversity Sampling**: Retrieval includes varied time periods and types
-- **Supersession Tracking**: Old facts marked as superseded, not deleted
+Custom bots can be added by editing `src/ask_llm/bots.yaml`.
 
-### Key Components
+## Memory System
 
-| Component | Location | Purpose |
-|-----------|----------|---------|
-| `cli/` | CLI package | `app.py` (main), `parser.py`, `commands/` subcommands |
-| `core/` | Core package | `base.py` (BaseAskLLM), `pipeline.py`, `prompt_builder.py` |
-| `bots.py` | Bot manager | Personality loading, system prompts |
-| `profiles.py` | Profile manager | User/bot profiles with entity types and attributes |
-| `clients/` | LLM clients | `openai_client.py`, `llama_cpp_client.py` |
-| `tools/` | Tool system | `definitions.py`, `executor.py`, `loop.py`, `parser.py` |
-| `search/` | Web search | `ddgs_client.py` (DuckDuckGo), `tavily_client.py` |
-| `memory/` | Memory backend | `postgresql.py`, `embeddings.py`, `extraction/` |
-| `memory_server/` | MCP server | Model Context Protocol memory service |
-| `service/` | Background API | FastAPI, async tasks, OpenAI-compat |
+The memory system uses PostgreSQL with pgvector for semantic storage. It's designed to evolve naturally rather than fossilize into static facts.
 
-### Configuration
+- **Fact Extraction** — LLM-based extraction of facts from conversations
+- **Local Embeddings** — sentence-transformers (MiniLM) for vector similarity, no external API calls
+- **Temporal Decay** — Memories fade over time unless reinforced by access
+- **Contradiction Detection** — New facts supersede old ones (history preserved)
+- **Diversity Sampling** — Retrieval includes varied time periods and memory types
+- **Background Consolidation** — Scheduled jobs merge duplicates and maintain profiles
 
-All settings use `ASK_LLM_` prefix. The app loads `.env` from the repo root if it contains `ASK_LLM_` keys; otherwise it falls back to `~/.config/ask-llm/.env` (or set `ASK_LLM_ENV_FILE` to override):
+Memory types have different decay rates: core facts persist longest (~180 days half-life), while plans and events decay faster (~27-45 days).
+
+## Tool System
+
+Dual-mode tool calling with automatic format detection:
+
+- **Native** — OpenAI function calling for compatible models (structured tool calls)
+- **ReAct** — Thought/Action/Observation format for local and open models (30+ model aliases supported)
+- **Available Tools** — Web search, memory recall, and extensible via `tools/definitions.py`
+
+## Service Stack
+
+Two-service architecture for background operation:
+
+| Service | Port | Purpose |
+|---------|------|---------|
+| MCP Memory Server | 8001 | Memory operations and fact extraction via Model Context Protocol |
+| LLM Service | 8642 | OpenAI-compatible API, async tasks, job scheduling |
+
+```bash
+# Development (non-Docker)
+./server.sh start --dev     # Start both services with auto-reload
+./server.sh stop            # Stop both
+./server.sh status          # Show status
+
+# Docker
+./start.sh dev              # Dev mode with live source mounting
+./start.sh up               # Production mode
+./start.sh logs             # Follow logs
+./start.sh shell            # Shell into container
+```
+
+## Development
+
+### Setup
+
+```bash
+git clone https://github.com/zenoran/llmbothub.git
+cd llmbothub
+./install.sh --dev          # Sync .venv with all dependencies
+
+# Or with Docker (recommended)
+./start.sh dev              # Live source mounting, debug logging
+./start.sh restart          # After code changes (no rebuild needed)
+./start.sh rebuild          # Only for dependency changes
+```
+
+### Branching Strategy
+
+This project uses a Gitflow-style branching model for multi-agent/team contribution:
+
+| Branch | Purpose |
+|--------|---------|
+| `main` | Production-ready releases. Protected — merge via PR only. |
+| `release/*` | Release candidates. Branch from `develop`, merge to `main` and back to `develop`. |
+| `develop` | Integration branch. All feature work merges here. |
+| `feature/*` | Feature branches. Branch from `develop`, PR back to `develop`. |
+| `hotfix/*` | Urgent fixes. Branch from `main`, merge to both `main` and `develop`. |
+
+**Workflow:**
+1. Create a feature branch from `develop`: `git checkout -b feature/my-feature develop`
+2. Do your work, commit, push
+3. Open a PR targeting `develop`
+4. After review and merge, `develop` accumulates features for the next release
+5. When ready to release, create `release/x.y.z` from `develop` for final testing
+6. Merge `release/x.y.z` into `main` and tag the release
+
+### Testing
+
+```bash
+uv run pytest               # Run test suite
+llm --status                # Quick sanity check
+```
+
+### Install Options
+
+```bash
+./install.sh --dev          # All deps for local development
+./install.sh --with-llama   # Local GGUF model support (CUDA)
+./install.sh --with-search  # Web search providers
+./install.sh --with-service # FastAPI background service
+./install.sh --all          # Everything
+```
+
+## Configuration
+
+Config file: `~/.config/ask-llm/.env` — all settings use the `ASK_LLM_` prefix.
 
 ```bash
 # Core
-ASK_LLM_DEFAULT_MODEL_ALIAS=gpt-5.2-chat-latest
-ASK_LLM_DEFAULT_BOT=mira
-ASK_LLM_DEFAULT_USER=your-user-id
+ASK_LLM_DEFAULT_MODEL_ALIAS=gpt4     # Default model alias
+ASK_LLM_DEFAULT_BOT=nova              # Default bot personality
+ASK_LLM_DEFAULT_USER=your-user-id    # User identifier for memory
 
-# Memory Decay (anti-fossilization)
+# Memory
 ASK_LLM_MEMORY_DECAY_ENABLED=true
 ASK_LLM_MEMORY_DECAY_HALF_LIFE_DAYS=90
-ASK_LLM_MEMORY_ACCESS_BOOST_FACTOR=0.15
-ASK_LLM_MEMORY_RECENCY_WEIGHT=0.3
-ASK_LLM_MEMORY_DIVERSITY_ENABLED=true
-
-# Embeddings (local, no API calls)
 ASK_LLM_MEMORY_EMBEDDING_MODEL=all-MiniLM-L6-v2
-ASK_LLM_MEMORY_EMBEDDING_DIM=384
 
 # PostgreSQL
 ASK_LLM_POSTGRES_HOST=localhost
 ASK_LLM_POSTGRES_USER=askllm
 ASK_LLM_POSTGRES_PASSWORD=yourpassword
 ASK_LLM_POSTGRES_DATABASE=askllm
+
+# Search
+ASK_LLM_SEARCH_PROVIDER=ddgs          # ddgs, tavily, or brave
+ASK_LLM_TAVILY_API_KEY=tvly-...       # If using Tavily
 ```
+
+## CLI Commands
+
+| Command | Description |
+|---------|-------------|
+| `llm` | Main CLI — query LLMs, interactive mode |
+| `llm-service` | Start the background LLM service (port 8642) |
+| `llm-mcp-server` | Start the MCP memory server (port 8001) |
+| `llm-memory` | Memory debugging utilities |
+| `llm-nextcloud` | Nextcloud Talk bot management |
+| `./server.sh` | Manage the full service stack (development) |
+| `./start.sh` | Docker container management |
+
+## License
+
+MIT
